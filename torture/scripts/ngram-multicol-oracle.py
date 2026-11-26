@@ -285,6 +285,8 @@ def verify_cache_lifecycle(mysql, fsdb):
     terms = (
         "東京",
         "東*",
+        "+東*",
+        "東* 東*",
         "東京 東*",
         "東* 東京",
         "東京 (東*)",
@@ -300,6 +302,8 @@ def verify_cache_lifecycle(mysql, fsdb):
         "東京駅 東*",
         '"東海" 東*',
         '"不存在" 東*',
+        "+京都 +東* +東京",
+        "+京都 +東* +(東京)",
     )
     mode = "IN BOOLEAN MODE"
     seed = "INSERT INTO docs VALUES(1,'東京',''),(2,'東海',''),(3,'大阪','')"
@@ -365,6 +369,36 @@ def verify_cache_lifecycle(mysql, fsdb):
                 "ANALYZE TABLE docs",
             ),
             (6, 0),
+        ),
+        (
+            "deleted cached postings",
+            (
+                "TRUNCATE TABLE docs",
+                seed,
+                "INSERT INTO docs VALUES(4,'札幌',''),(99,'東京 東北','')",
+                "DELETE FROM docs WHERE id=99",
+                "ANALYZE TABLE docs",
+            ),
+            (6, 0),
+        ),
+        ("purged cached postings", optimize, (0, 4)),
+        (
+            "deleted disk posting",
+            ("DELETE FROM docs WHERE id=2", "ANALYZE TABLE docs"),
+            (0, 4),
+        ),
+        ("purged disk posting", optimize, (0, 3)),
+        (
+            "deleted cached gram outside a required range",
+            (
+                "TRUNCATE TABLE docs",
+                "INSERT INTO docs VALUES(1,'京都 東京',''),(2,'東京',''),(3,'東海',''),(4,'大阪','')",
+                *optimize,
+                "INSERT INTO docs VALUES(99,'東京 東北','')",
+                "DELETE FROM docs WHERE id=99",
+                "ANALYZE TABLE docs",
+            ),
+            (2, 5),
         ),
     )
     failures = 0

@@ -2569,6 +2569,57 @@ let tests =
               execute reopened "INSERT INTO docs VALUES(4,'東北'),(5,'東京 東海 東海')" |> ignore
               Expect.equal (read reopened) [ [ Some "1" ]; [ Some "2" ]; [ Some "5" ] ] "new writes enter the cache again"
 
+          testCase "committed deleted ngram frequencies survive replay and clean close until optimize"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let execute session sql =
+                  let next, result = handle session sql
+                  TestSupport.Sql.expectOk result sql
+                  next
+              let session = Fsdb.Session.create 1 store
+              let session = execute session "CREATE TABLE docs(id INT PRIMARY KEY,body TEXT,flag INT DEFAULT 0,FULLTEXT KEY ft(body) WITH PARSER ngram) COLLATE=utf8mb4_bin"
+              let session = execute session "INSERT INTO docs(id,body) VALUES(1,'東京'),(2,'東海'),(3,'大阪'),(4,'札幌'),(99,'東京 東北')"
+              snapshotNow dir store
+              let session = execute session "START TRANSACTION"
+              let session = execute session "UPDATE docs SET body='東京 東山' WHERE id=99"
+              let session = execute session "DELETE FROM docs WHERE id=99"
+              execute (Fsdb.Session.create 2 store) "UPDATE docs SET flag=1 WHERE id=4" |> ignore
+              execute session "COMMIT" |> ignore
+
+              let check expectedExact expectedPrefix compoundIds (current: Store) =
+                  let table = current.Catalog.[defaultDatabase].["docs"]
+                  let scores term =
+                      Fsdb.FullText.booleanScores table.FullTextIndexes.["ft"] term
+                      |> Map.toList
+                      |> List.map (fun (rowId, rank) -> (table.RowsArray.TryFind rowId |> Option.get).[0], rank)
+                  match scores "東京" with
+                  | [ VInt 1L, score ] -> Expect.floatClose Accuracy.high score expectedExact "only the committed deletion affects the exact score"
+                  | other -> failtestf "unexpected exact matches: %A" other
+                  match scores "東*" with
+                  | [ VInt 1L, first; VInt 2L, second ] ->
+                      Expect.floatClose Accuracy.high first expectedPrefix "the prefix retains the original deleted grams"
+                      Expect.floatClose Accuracy.high second expectedPrefix "both live rows use the same frequency"
+                  | other -> failtestf "unexpected prefix matches: %A" other
+                  Expect.equal (scores "東京 東*" |> List.map fst) compoundIds "the compound search visits flushed prefix postings"
+
+              let withDeleted = check 0.0906190574169159 0.015609688125550747
+              withDeleted [ VInt 1L ] store
+              load dir |> withDeleted [ VInt 1L ]
+              snapshotNow dir store
+              load dir |> withDeleted [ VInt 1L ]
+              detach store
+
+              let reopened = load dir
+              withDeleted [ VInt 1L; VInt 2L ] reopened
+              attach dir reopened
+              let session = execute (Fsdb.Session.create 3 reopened) "SET GLOBAL innodb_optimize_fulltext_only=ON"
+              execute session "OPTIMIZE TABLE docs" |> ignore
+              let purged = check 0.3624762296676636 0.0906190574169159 [ VInt 1L; VInt 2L ]
+              purged reopened
+              load dir |> purged
+
           testCase "clean close flushes committed ngrams while keeping a prepared branch pending"
           <| fun _ ->
               let dir = tempDataDir ()

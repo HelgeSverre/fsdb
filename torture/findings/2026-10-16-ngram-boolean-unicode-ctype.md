@@ -391,15 +391,36 @@ both collations and with two or eighteen flushed documents in the
 binary collation. The maintained two-column corpus matches all
 3,870 searches at sizes 1–10.
 
-Deleted postings can still change frequency totals. After deleting one
-of two cached `東京` postings in a four-row live corpus, MySQL returns
-roughly 0.090619 for `東京`; after a full-text flush it returns 0.362476.
-The retained term tree reproduces the traversal order, while the
-frequency totals still use live postings. MySQL's single, unmodified
-short prefix takes a separate ranking path that subtracts one for each
-deleted document found. A required, grouped, weighted, or repeated
-prefix retains the historical frequency in the audited fixture.
-Automatic cache flushing remains open.
+Deleted postings still contribute to MySQL's Boolean frequency totals.
+With four live documents and a deleted row containing `東京 東北`,
+MySQL returns about 0.090619 for `東京`. The bare prefix `東*`
+subtracts one deleted document from the four matching gram postings
+and scores about 0.015610. Required `+東*` counts all four postings
+and scores about 1.89e-9. Deleted rows never appear in either result.
+After full-text-only optimize, `東京` scores about 0.362476 and
+`+東*` returns about 0.090619.
+
+Fsdb preserves those frequencies across WAL replay, checkpoints, and
+clean shutdown. Clean shutdown moves retained postings to disk, where
+they can influence compound searches that skip cached prefixes.
+Full-text-only optimize purges them. An `FSNT` snapshot loaded with its
+original ranks, then a new `FSNU` checkpoint preserved deleted postings
+written after the upgrade.
+
+A required prefix can set bounds for a later required gram even in a
+flat query. After flushing four documents and deleting a newly cached
+`東京 東北` row, `+京都 +東* +東京` skips the disjoint cached `東京`
+posting and scores about 0.462487. With `東京` optional or inside
+`+(東京)`, it still counts the posting and scores about 0.387477.
+The lifecycle fixture matches 378 queries. A 3,856-query deletion holdout
+matched with both cached and mixed postings for binary bigrams, binary
+trigrams, and `utf8mb4_0900_ai_ci` bigrams. Another 45 comparisons
+matched across multi-update commits, deletes after updates, full rollback,
+and rollback to a savepoint.
+
+Natural-language and query-expansion ranks still diverge when a
+matched gram belongs to a deleted document in the audited compound
+and expansion searches. Automatic cache flushing remains open.
 [InnoDB rank optimization and deleted-document adjustment](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L3119).
 
 Fsdb's orderly CLI shutdown now closes accepted clients, waits for

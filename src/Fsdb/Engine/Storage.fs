@@ -3668,12 +3668,12 @@ let private publishRowsWithDocumentRules rulesFor (before: Table) (after: Table)
 let private publishRows before after =
     publishRowsWithDocumentRules (fun _ _ rules -> rules) before after
 
-let private mergeFullTextDocuments sourceRowIds (baseline: Table) (source: Table) (target: Table) =
+let private mergeFullTextDocuments sourceRowIds (baseline: Table) (source: Table) (live: Table) (target: Table) =
     let targetRowIds = sourceRowIds |> Map.toSeq |> Seq.map (fun (targetId, sourceId) -> sourceId, targetId) |> Map.ofSeq
     let indexes =
         target.FullTextIndexes
         |> Map.map (fun name index ->
-            FullText.mergeDocuments targetRowIds baseline.FullTextIndexes.[name] source.FullTextIndexes.[name] index)
+            FullText.mergeDocuments targetRowIds baseline.FullTextIndexes.[name] source.FullTextIndexes.[name] live.FullTextIndexes.[name] index)
     { target with FullTextIndexes = indexes }
 
 let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (liveTable: Table) : Table =
@@ -3735,7 +3735,7 @@ let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (l
             UniqueIndex = uniqueIndex
             SecondaryIndex = secondaryIndex
             SecondaryOrder = secondaryOrder }
-    |> mergeFullTextDocuments sourceRowIds baseTable batchTable
+    |> mergeFullTextDocuments sourceRowIds baseTable batchTable liveTable
 
 let private foreignKeyStorageValue (column: ColumnDef) value =
     match column.Type, value with
@@ -7081,15 +7081,16 @@ let analyzeTable (store: Store) (dbName: string) (tableName: string) : Result<un
                 Map.add key { table with Statistics = Some statistics } database, statistics))
     |> Result.map ignore
 
-let private flushTableFullText table =
-    { table with FullTextIndexes = table.FullTextIndexes |> Map.map (fun _ index -> FullText.flushPostings index) }
+let private flushTableFullText flushPostings table =
+    if table.FullTextIndexes.IsEmpty then table
+    else { table with FullTextIndexes = table.FullTextIndexes |> Map.map (fun _ index -> flushPostings index) }
 
 let internal flushFullText (store: Store) dbName tableName =
     withDatabasePublishing store dbName
         (fun () -> [ FullTextPostingsFlushed(dbName, tableName) ])
         (fun database ->
             tryGetTable dbName database tableName
-            |> Result.map (fun table -> Map.add (normalizeTableName tableName) (flushTableFullText table) database, ()))
+            |> Result.map (fun table -> Map.add (normalizeTableName tableName) (flushTableFullText FullText.flushPostings table) database, ()))
 
 /// Materializes missing or expired metadata estimates on the first read.
 /// The refreshed roots and their WAL events are published together, so later
@@ -11427,7 +11428,7 @@ let private mergePointUpdate dbName tableKey rowIds (baseDb: Database) (batchDb:
                     UniqueIndex = index
                     SecondaryIndex = secondaryIndex
                     SecondaryOrder = secondaryOrder }
-            |> mergeFullTextDocuments Map.empty baseTable batchTable
+            |> mergeFullTextDocuments Map.empty baseTable batchTable liveTable
 
         Map.add tableKey mergedTable liveDb
     | _ -> conflict ()
@@ -12501,14 +12502,13 @@ let setTableStatisticsForReplay (store: Store) dbName tableName statistics (onMi
     changeTableForReplay store dbName tableName (fun table -> { table with Statistics = Some statistics }) onMissing
 
 let internal flushFullTextForReplay store dbName tableName onMissing =
-    changeTableForReplay store dbName tableName flushTableFullText onMissing
+    changeTableForReplay store dbName tableName (flushTableFullText FullText.flushPostings) onMissing
 
 /// Applies the final cache flush to the checkpoint replica after its queued
 /// writes have landed. Prepared XA catalogs still describe their own snapshots.
 let internal flushFullTextForShutdown (replica: Store) =
     for KeyValue(_, slot) in replica.Databases do
-        slot.Value <- slot.Value |> Map.map (fun _ table ->
-            if table.FullTextIndexes.IsEmpty then table else flushTableFullText table)
+        slot.Value <- slot.Value |> Map.map (fun _ -> flushTableFullText FullText.flushPostingsForShutdown)
 
 /// Puts already-committed rows back exactly as they were, for WAL replay.
 /// Deliberately not `insertRows`: these rows passed validation when committed,

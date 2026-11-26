@@ -391,6 +391,45 @@ let tests =
               let updated = addDocument 1 "서울역 서울역" original
               Expect.equal (booleanScores updated query |> ids) [ 1; 2 ] "the updated document extends the posting across the bounds"
 
+          testCase "ngram relevance retains deleted gram frequencies until optimize"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_bin" |> Option.get
+              let fresh = buildIndexWithStopwords StopwordPolicy.Disabled (Ngrams 2) collation [] |> flushPostings
+              let removed =
+                  (fresh, [ 1, "東京"; 2, "東海"; 3, "大阪"; 4, "札幌"; 99, "東京 東北" ])
+                  ||> List.fold (fun index (id, text) -> addDocument id text index)
+                  |> removeDocument 99
+              let assertScore (index: Index<int>) query ids expected =
+                  let scores = booleanScores index query
+                  Expect.equal (scores |> Map.keys |> Seq.toList) ids query
+                  closeTo expected scores.[1] query
+              assertScore removed "東京" [ 1 ] 0.0906190574169159
+              assertScore removed "東*" [ 1; 2 ] 0.015609688125550747
+              let dictionary = tryFlatBooleanScoresDictionary removed "東*" |> Option.get
+              closeTo 0.015609688125550747 dictionary.[1] "a bare prefix subtracts a deleted document once"
+              assertScore removed "+東*" [ 1; 2 ] 1.885928302414186e-9
+              assertScore removed "東* 東*" [ 1; 2 ] 0.0906190574169159
+              let flushed = flushPostings removed
+              assertScore flushed "東京" [ 1 ] 0.3624762296676636
+              assertScore flushed "+東*" [ 1; 2 ] 0.0906190574169159
+
+          testCase "a required ngram prefix bounds a later required gram"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_bin" |> Option.get
+              let index =
+                  buildIndexWithStopwords StopwordPolicy.Disabled (Ngrams 2) collation
+                      [ 1, [ "京都 東京" ]; 2, [ "東京" ]; 3, [ "東海" ]; 4, [ "大阪" ] ]
+                  |> flushPostings
+                  |> addDocument 99 "東京 東北"
+                  |> removeDocument 99
+              let check query expected =
+                  let scores = booleanScores index query
+                  Expect.equal (scores |> Map.keys |> Seq.toList) [ 1 ] query
+                  closeTo expected scores.[1] query
+              check "+京都 +東* +東京" 0.4624868333339691
+              check "+京都 +東* 東京" 0.38747745752334595
+              check "+京都 +東* +(東京)" 0.38747745752334595
+
           testCase "required ngram phrases count cached and flushed postings separately"
           <| fun _ ->
               let collation = tryFind "utf8mb4_bin" |> Option.get
@@ -640,7 +679,7 @@ let tests =
               let baseline = buildIndexWithDocumentSettings filtered defaultCollation [ 1, filtered, [ "zz" ] ]
               let source = baseline |> withIndexingRules unfiltered |> addDocument 1 "ab"
               let target = baseline |> addDocument 2 "ab"
-              let merged = mergeDocuments Map.empty baseline source target
+              let merged = mergeDocuments Map.empty baseline source target target
               Expect.equal (documentRules 1 merged) (Some unfiltered) "merged document keeps source indexing rules"
               Expect.equal (documentRules 2 merged) (Some filtered) "concurrent document keeps target indexing rules"
               Expect.equal (activeRules merged) filtered "publication does not replace the target's active rules"
@@ -676,7 +715,7 @@ let tests =
               let baseline = buildIndexWith defaultCollation [ 1, "orchard"; 2, "cobalt" ]
               let branch = baseline |> removeDocument 1 |> addDocument 3 "meadow"
               let concurrent = baseline |> addDocument 3 "forest"
-              let merged = mergeDocuments (Map.ofList [ 3, 4 ]) baseline branch concurrent
+              let merged = mergeDocuments (Map.ofList [ 3, 4 ]) baseline branch concurrent concurrent
               Expect.isEmpty (naturalScores merged "orchard") "the branch deletion is published"
               Expect.equal (naturalScores merged "meadow" |> Map.keys |> Seq.toList) [ 4 ] "the inserted document uses its rebased row ID"
               Expect.equal (naturalScores merged "forest" |> Map.keys |> Seq.toList) [ 3 ] "the concurrent insert retains its postings"

@@ -45,7 +45,8 @@ let private tableStatisticsSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x50uy |] 
 let private indexCardinalitySnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x51uy |] // "FSNQ" (format 26)
 let private documentOrderSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x52uy |] // "FSNR" (format 27)
 let private fullTextFlushSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x53uy |] // "FSNS" (format 28)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x54uy |] // "FSNT" (format 29)
+let private fullTextCacheSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x54uy |] // "FSNT" (format 29)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x55uy |] // "FSNU" (format 30)
 
 type private SnapshotFormat =
     { GeneratedForeignKeyIndexes: bool
@@ -71,6 +72,7 @@ type private SnapshotFormat =
       FullTextDocumentOrder: bool
       FullTextFlushPosition: bool
       FullTextCacheTerms: bool
+      FullTextDeletedPostings: bool
       FullTextStopwordSources: bool
       TableStatistics: bool
       IndexCardinality: bool }
@@ -99,6 +101,7 @@ let private legacySnapshotFormat =
       FullTextDocumentOrder = false
       FullTextFlushPosition = false
       FullTextCacheTerms = false
+      FullTextDeletedPostings = false
       FullTextStopwordSources = false
       TableStatistics = false
       IndexCardinality = false }
@@ -172,8 +175,11 @@ let private documentOrderSnapshotFormat =
 let private fullTextFlushSnapshotFormat =
     { documentOrderSnapshotFormat with FullTextFlushPosition = true }
 
-let private currentSnapshotFormat =
+let private fullTextCacheSnapshotFormat =
     { fullTextFlushSnapshotFormat with FullTextCacheTerms = true }
+
+let private currentSnapshotFormat =
+    { fullTextCacheSnapshotFormat with FullTextDeletedPostings = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -182,6 +188,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = fullTextCacheSnapshotMagic then
+        Some fullTextCacheSnapshotFormat
     elif header = fullTextFlushSnapshotMagic then
         Some fullTextFlushSnapshotFormat
     elif header = documentOrderSnapshotMagic then
@@ -2085,6 +2093,14 @@ let private writeStore (s: FileStream) (store: Store) : unit =
                     for term in terms do
                         writeStr w term
                         if w.Count >= (1 <<< 20) then flush ()
+                    let deleted = FullText.deletedPostings index
+                    w.WriteLenEncInt(uint64 deleted.Count)
+                    for KeyValue(order, grams) in deleted do
+                        w.WriteInt64LE order
+                        w.WriteLenEncInt(uint64 grams.Length)
+                        for gram in grams do
+                            writeStr w gram
+                            if w.Count >= (1 <<< 20) then flush ()
                 let indexesWithRules = List.zip fullTextIndexes ruleTables
 
                 for rowId, row in table.RowsArray.Indexed do
@@ -2188,17 +2204,34 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
         else []
     let postingStates =
         if format.FullTextFlushPosition then
+            let readCount name =
+                match r.ReadLenEncInt() with
+                | Some length when length <= uint64 Int32.MaxValue -> int length
+                | _ -> failwithf "Persistence: invalid full-text %s count" name
             fullTextNames |> List.map (fun name ->
                 let through = r.ReadInt64LE()
                 if through < -1L then failwith "Persistence: invalid full-text flush position"
                 let terms =
                     if format.FullTextCacheTerms then
-                        match r.ReadLenEncInt() with
-                        | Some length when length <= uint64 Int32.MaxValue ->
-                            Some(List.init (int length) (fun _ -> readStr r))
-                        | _ -> failwith "Persistence: invalid full-text cache term count"
+                        Some(List.init (readCount "cache term") (fun _ -> readStr r))
                     else None
-                name, ((if through >= 0L then Some through else None), terms))
+                let deleted =
+                    if format.FullTextDeletedPostings then
+                        let count = readCount "deleted document"
+                        let mutable previous = 0L
+                        seq {
+                            for _ in 1..count do
+                                let order = r.ReadInt64LE()
+                                if order <= previous || order = Int64.MaxValue then
+                                    failwith "Persistence: invalid full-text deleted document order"
+                                previous <- order
+                                let gramCount = readCount "deleted document gram"
+                                if gramCount = 0 then failwith "Persistence: empty full-text deleted document"
+                                yield order, (Seq.init gramCount (fun _ -> readStr r) |> Seq.toArray)
+                        }
+                        |> Map.ofSeq
+                    else Map.empty
+                name, ((if through >= 0L then Some through else None), terms, deleted))
             |> Map.ofList
         else Map.empty
     let mutable documents = Map.empty
@@ -2259,7 +2292,11 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
         |> Map.map (fun name index ->
             let index = index |> FullText.restoreDocumentOrder (Map.tryFind name documentOrders |> Option.defaultValue Map.empty)
             (match Map.tryFind name postingStates with
-             | Some(through, terms) -> index |> FullText.restoreFlushedThrough through |> FullText.restoreCachedTerms terms
+             | Some(through, terms, deleted) ->
+                 index
+                 |> FullText.restoreDeletedPostings deleted
+                 |> FullText.restoreFlushedThrough through
+                 |> FullText.restoreCachedTerms terms
              | None -> FullText.flushPostings index)
             |> FullText.withStopwordSource (sources |> Map.tryFind name |> Option.flatten))
     reindexTableWithFullTextIndexes fullTextIndexes table

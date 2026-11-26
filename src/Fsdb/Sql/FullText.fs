@@ -143,6 +143,14 @@ type private PrefixPosting<'id when 'id: comparison> =
     { Rows: Map<'id, int>
       GramDocumentCount: int64 }
 
+type private DeletedPostings =
+    { Documents: Map<int64, string[]>
+      Words: Map<string, Map<int64, int64>>
+      Prefixes: Map<string, Map<int64, int64>> }
+
+let private emptyDeletedPostings =
+    { Documents = Map.empty; Words = Map.empty; Prefixes = Map.empty }
+
 type Index<'id when 'id: comparison> =
     private
         { Documents: Map<'id, IndexedDocument>
@@ -155,6 +163,7 @@ type Index<'id when 'id: comparison> =
           NextDocumentOrder: int64
           FlushedThrough: int64 option
           CachedTerms: FullTextCache.Terms
+          Deleted: DeletedPostings
           DocumentOrderFollowsIds: bool
           HasDocumentOrder: bool }
 
@@ -189,6 +198,7 @@ type internal ReadView<'id when 'id: comparison> =
           VisibleDocumentIds: Set<'id> option
           FlushedThrough: int64 option
           CachedTerms: FullTextCache.Terms
+          Deleted: DeletedPostings
           DocumentOrderFollowsIds: bool
           HasDocumentOrder: bool }
 
@@ -202,6 +212,7 @@ let internal readView (index: Index<'id>) : ReadView<'id> =
       VisibleDocumentIds = None
       FlushedThrough = index.FlushedThrough |> Option.filter (fun through -> through < index.NextDocumentOrder - 1L)
       CachedTerms = index.CachedTerms
+      Deleted = index.Deleted
       DocumentOrderFollowsIds = index.DocumentOrderFollowsIds
       HasDocumentOrder = index.HasDocumentOrder }
 
@@ -326,30 +337,32 @@ let private prefixKeys (collation: Collation) (token: Token) =
            collation.FullTextKeyOf(token.Text.Substring(0, length)) |]
     |> Array.distinct
 
-let private documentPrefixes collation tokenizer tokens (words: (string * Token[])[]) =
+let private ngramDocumentPrefixes collation (words: (string * Token[])[]) =
+    // InnoDB keeps the first matching gram's TF but tallies every gram's posting.
+    let prefixes = Collections.Generic.Dictionary<string, int * int64>()
+
+    for _, grams in Array.sortBy fst words do
+        let keys =
+            grams
+            |> Array.distinctBy _.Text
+            |> Array.collect (prefixKeys collation)
+            |> Array.distinct
+
+        for key in keys do
+            match prefixes.TryGetValue key with
+            | true, (frequency, count) -> prefixes.[key] <- frequency, count + 1L
+            | false, _ -> prefixes.Add(key, (grams.Length, 1L))
+
+    prefixes |> Seq.map (fun (KeyValue(key, counts)) -> key, counts) |> Seq.toArray
+
+let private documentPrefixes collation tokenizer tokens words =
     match tokenizer with
     | Words _ ->
         tokens
         |> Array.collect (prefixKeys collation)
         |> Array.countBy id
         |> Array.map (fun (key, frequency) -> key, (frequency, 0L))
-    | Ngrams _ ->
-        // InnoDB keeps the first matching gram's TF but tallies every gram's posting.
-        let prefixes = Collections.Generic.Dictionary<string, int * int64>()
-
-        for _, grams in Array.sortBy fst words do
-            let keys =
-                grams
-                |> Array.distinctBy _.Text
-                |> Array.collect (prefixKeys collation)
-                |> Array.distinct
-
-            for key in keys do
-                match prefixes.TryGetValue key with
-                | true, (frequency, count) -> prefixes.[key] <- frequency, count + 1L
-                | false, _ -> prefixes.Add(key, (grams.Length, 1L))
-
-        prefixes |> Seq.map (fun (KeyValue(key, counts)) -> key, counts) |> Seq.toArray
+    | Ngrams _ -> ngramDocumentPrefixes collation words
 
 let private removePosting id key postings =
     match Map.tryFind key postings with
@@ -357,6 +370,27 @@ let private removePosting id key postings =
     | Some rows ->
         let remaining = Map.remove id rows
         if remaining.IsEmpty then Map.remove key postings else Map.add key remaining postings
+
+let private addDeletedDocument order (tokens: Token[]) words prefixes (history: DeletedPostings) =
+    if Array.isEmpty tokens then history
+    else
+        let add rows (key, frequency) =
+            let positions = Map.tryFind key rows |> Option.defaultValue Map.empty
+            Map.add key (Map.add order frequency positions) rows
+        { Documents = Map.add order (tokens |> Array.map _.Text |> Array.distinct) history.Documents
+          Words = words |> Array.fold (fun rows (key, _) -> add rows (key, 1L)) history.Words
+          Prefixes = prefixes |> Array.fold (fun rows (key, (_, count)) -> add rows (key, count)) history.Prefixes }
+
+let private deletedTokens (collation: Collation) texts =
+    texts |> Array.map (fun text -> { Text = text; Key = collation.FullTextKeyOf text })
+
+let private removeDeletedDocument collation order texts (history: DeletedPostings) =
+    let tokens = deletedTokens collation texts
+    let words = tokens |> Array.groupBy _.Key
+    let prefixes = ngramDocumentPrefixes collation words
+    { Documents = Map.remove order history.Documents
+      Words = words |> Array.fold (fun rows (key, _) -> removePosting order key rows) history.Words
+      Prefixes = prefixes |> Array.fold (fun rows (key, _) -> removePosting order key rows) history.Prefixes }
 
 let private emptyIndexWith policy tokenizer (collation: Collation) : Index<'id> =
     { Documents = Map.empty
@@ -369,6 +403,7 @@ let private emptyIndexWith policy tokenizer (collation: Collation) : Index<'id> 
       NextDocumentOrder = 1L
       FlushedThrough = None
       CachedTerms = FullTextCache.empty
+      Deleted = emptyDeletedPostings
       DocumentOrderFollowsIds = true
       HasDocumentOrder = true }
 
@@ -409,7 +444,7 @@ let internal withWordLengths lengths (index: Index<'id>) =
     | Words _ -> withTokenizer (Words lengths) index
     | Ngrams _ -> index
 
-let removeDocument (id: 'id) (index: Index<'id>) : Index<'id> =
+let private removeDocumentCore retainPosting (id: 'id) (index: Index<'id>) : Index<'id> =
     match Map.tryFind id index.Documents with
     | None -> index
     | Some indexed ->
@@ -435,7 +470,13 @@ let removeDocument (id: 'id) (index: Index<'id>) : Index<'id> =
         { index with
             Documents = Map.remove id index.Documents
             Postings = postings
-            PrefixPostings = prefixPostings }
+            PrefixPostings = prefixPostings
+            Deleted =
+                if retainPosting && index.FlushedThrough.IsSome then
+                    addDeletedDocument indexed.Order tokens words prefixes index.Deleted
+                else index.Deleted }
+
+let removeDocument id index = removeDocumentCore true id index
 
 let private addDocumentData id (document: Document) (index: Index<'id>) =
     let index = removeDocument id index
@@ -484,7 +525,7 @@ let internal sameDocument id (left: Index<'id>) (right: Index<'id>) =
     | Some left, Some right -> obj.ReferenceEquals(left.Content, right.Content)
     | _ -> false
 
-let internal mergeDocuments sourceRowIds (baseline: Index<'id>) (source: Index<'id>) (target: Index<'id>) =
+let internal mergeDocuments sourceRowIds (baseline: Index<'id>) (source: Index<'id>) (live: Index<'id>) (target: Index<'id>) =
     if obj.ReferenceEquals(baseline.Documents, source.Documents) then target
     else
         let targetId sourceId = Map.tryFind sourceId sourceRowIds |> Option.defaultValue sourceId
@@ -497,7 +538,10 @@ let internal mergeDocuments sourceRowIds (baseline: Index<'id>) (source: Index<'
         written
         |> List.choose (fun (id, document) -> document |> Option.map (fun value -> targetId id, value))
         |> List.sortBy (snd >> _.Order)
-        |> List.fold (fun index (id, document) -> addDocumentData id document.Content index) target
+        |> List.fold (fun index (id, document) ->
+            // Row publication may already have installed a temporary replacement.
+            let index = if sameDocument id live index then index else removeDocumentCore false id index
+            addDocumentData id document.Content index) target
 
 let addDocumentFields id texts (index: Index<'id>) =
     addDocumentFieldsWithRules (activeRules index) id texts index
@@ -542,16 +586,22 @@ let internal withDocumentOrderFrom (source: Index<'id>) (target: Index<'id>) =
         NextDocumentOrder = source.NextDocumentOrder
         FlushedThrough = source.FlushedThrough
         CachedTerms = source.CachedTerms
+        Deleted = source.Deleted
         DocumentOrderFollowsIds = source.DocumentOrderFollowsIds
         HasDocumentOrder = source.HasDocumentOrder }
 
-let internal flushPostings (index: Index<'id>) =
+let internal flushPostingsForShutdown (index: Index<'id>) =
     match index.Rules.Tokenizer with
     | Words _ -> index
     | Ngrams _ ->
         { index with
             FlushedThrough = Some(index.NextDocumentOrder - 1L)
             CachedTerms = FullTextCache.empty }
+
+let internal flushPostings index =
+    let flushed = flushPostingsForShutdown index
+    if flushed.Deleted.Documents.IsEmpty then flushed
+    else { flushed with Deleted = emptyDeletedPostings }
 
 let internal flushedThrough (index: Index<'id>) = index.FlushedThrough
 
@@ -560,6 +610,24 @@ let internal restoreFlushedThrough through (index: Index<'id>) =
 
 let internal cachedTermsInInsertionOrder (index: Index<'id>) =
     FullTextCache.inInsertionOrder index.CachedTerms
+
+let internal deletedPostings (index: Index<'id>) = index.Deleted.Documents
+
+let internal restoreDeletedPostings (saved: Map<int64, string[]>) (index: Index<'id>) =
+    if saved.IsEmpty then index
+    else
+        if index.Documents |> Map.exists (fun _ document -> saved.ContainsKey document.Order) then
+            invalidOp "Persistence: repeated full-text document order"
+        let history =
+            saved
+            |> Map.fold (fun history order texts ->
+                let tokens = deletedTokens index.Collation texts
+                let words = tokens |> Array.groupBy _.Key
+                let prefixes = ngramDocumentPrefixes index.Collation words
+                addDeletedDocument order tokens words prefixes history) emptyDeletedPostings
+        { index with
+            Deleted = history
+            NextDocumentOrder = max index.NextDocumentOrder (1L + fst (Map.maxKeyValue saved)) }
 
 let private cacheDocumentsAfter through (index: Index<'id>) initial =
     index.Documents
@@ -587,12 +655,21 @@ let internal publishCachedTerms (baseline: Index<'id>) (index: Index<'id>) =
     if index.FlushedThrough.IsNone
        || index.FlushedThrough <> baseline.FlushedThrough
        || index.NextDocumentOrder < baseline.NextDocumentOrder
-       || obj.ReferenceEquals(index.CachedTerms, baseline.CachedTerms) then
+       || (obj.ReferenceEquals(index.CachedTerms, baseline.CachedTerms)
+           && obj.ReferenceEquals(index.Deleted, baseline.Deleted)) then
         index
     else
         // Only final documents are indexed by a committing transaction.
-        let terms = cacheDocumentsAfter (baseline.NextDocumentOrder - 1L) index baseline.CachedTerms
-        { index with CachedTerms = terms }
+        let terms =
+            if obj.ReferenceEquals(index.CachedTerms, baseline.CachedTerms) then index.CachedTerms
+            else cacheDocumentsAfter (baseline.NextDocumentOrder - 1L) index baseline.CachedTerms
+        let deleted =
+            if index.Deleted.Documents.IsEmpty || fst (Map.maxKeyValue index.Deleted.Documents) < baseline.NextDocumentOrder then index.Deleted
+            else
+                index.Deleted.Documents |> Map.fold (fun history order texts ->
+                    if order < baseline.NextDocumentOrder then history
+                    else removeDeletedDocument index.Collation order texts history) index.Deleted
+        { index with CachedTerms = terms; Deleted = deleted }
 
 let internal rulesInUse (index: Index<'id>) =
     seq {
@@ -1262,10 +1339,17 @@ let private ngramPrefixWeight documentCount frequency =
     let documents = float documentCount
     if frequency = documents then idfFloor else log10 (documents / frequency)
 
-let private prefixWeight (view: ReadView<'id>) occurrences (posting: PrefixPosting<'id>) =
+let private prefixWeight (view: ReadView<'id>) key (posting: PrefixPosting<'id>) =
     match view.Rules.Tokenizer with
     | Ngrams _ when posting.GramDocumentCount > 0L ->
-        let frequency = float posting.GramDocumentCount * float occurrences
+        let retained =
+            match Map.tryFind key view.Deleted.Prefixes with
+            | Some deleted ->
+                // The single, unmodified prefix path subtracts one per deleted
+                // document after totaling the postings from all matching grams.
+                deleted |> Map.fold (fun count _ grams -> count + grams - 1L) 0L
+            | None -> 0L
+        let frequency = float (posting.GramDocumentCount + retained)
         ngramPrefixWeight view.DocumentCount frequency
     | _ -> idf view posting.Rows.Count
 
@@ -1356,7 +1440,7 @@ let rec private evalTerm
         match Map.tryFind term.Key view.PrefixPostings with
         | None -> Map.empty
         | Some posting ->
-            let weight = prefixWeight view 1 posting
+            let weight = prefixWeight view term.Key posting
             posting.Rows
             |> restrictScores candidateIds
             |> prefixRowsWithCacheOrder None term.Key view
@@ -1492,8 +1576,10 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
         let frequencies = leaves nodes |> Seq.collect (snd >> keys) |> Seq.countBy id |> Map.ofSeq
 
         let tracksPostingBounds =
-            view.HasDocumentOrder
-            && (nodes |> List.exists (function _, BGroup _ -> true | _ -> false))
+            let canVisitBoundedPhrase =
+                (nodes |> List.exists (function _, BGroup _ -> true | _ -> false))
+                || (view.FlushedThrough.IsSome && (nodes |> List.exists (fun (op, term) -> op = Must && isPhrase term)))
+            view.HasDocumentOrder && canVisitBoundedPhrase
             && (leaves nodes |> Seq.exists (function Must, BWord(_, true) -> true | _ -> false))
 
         let weighted = hasRankAdjustments nodes
@@ -1502,8 +1588,17 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
             view.FlushedThrough.IsSome
             && (frequencies |> Map.exists (fun key _ -> match key with NgramPrefix _ -> true | _ -> false))
             && (leaves nodes |> Seq.exists (snd >> isPhrase))
+        let deletedSensitive =
+            match nodes with
+            | [ Optional, BWord(_, true) ] -> false
+            | _ ->
+                not view.Deleted.Documents.IsEmpty
+                && (frequencies |> Map.exists (fun key _ ->
+                    match key with
+                    | ExactNgram word -> view.Deleted.Words.ContainsKey word
+                    | NgramPrefix prefix -> view.Deleted.Prefixes.ContainsKey prefix))
 
-        if not tracksPostingBounds && not repeated && not weighted && not cacheSensitive then
+        if not tracksPostingBounds && not repeated && not weighted && not cacheSensitive && not deletedSensitive then
             None
         else
             // A wildcard exclusion visits postings only if its group has matches.
@@ -1530,6 +1625,16 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
             let contributionOrder = Collections.Generic.Dictionary<NgramScoringKey, int>()
             let mutable postingBounds = None
             let mutable inPhraseMode = false
+
+            let retainedPrefixFrequency diskOnly key =
+                match Map.tryFind key view.Deleted.Prefixes with
+                | None -> 0L
+                | Some history ->
+                    match diskOnly, view.FlushedThrough with
+                    | true, Some through ->
+                        history |> Map.fold (fun count order grams ->
+                            if order <= through then count + grams else count) 0L
+                    | _ -> history |> Map.values |> Seq.sum
 
             let prefixPosting diskOnly key =
                 let all = Map.tryFind key view.PrefixPostings
@@ -1564,18 +1669,22 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                         let position = order id
                         min lower position, max upper position) (Int64.MaxValue, 0L)
 
-            let boundedExactPosting lower upper key (rows: Map<'id, int>) =
-                let withinBounds rows =
-                    if Map.isEmpty rows then Map.empty
-                    else
-                        let first, last = documentBounds rows
-                        if first > upper || last < lower then Map.empty else rows
+            let boundedExactPosting lower upper key (rows: Map<'id, int>) (deleted: Map<int64, int64>) =
+                let overlaps rows deleted =
+                    let first, last =
+                        if Map.isEmpty rows then Int64.MaxValue, 0L else documentBounds rows
+                    let first, last =
+                        if Map.isEmpty deleted then first, last
+                        else min first (fst (Map.minKeyValue deleted)), max last (fst (Map.maxKeyValue deleted))
+                    first <= upper && last >= lower
 
                 match view.FlushedThrough with
-                | None -> rows.Count, withinBounds rows
+                | None ->
+                    let read = overlaps rows deleted
+                    int64 rows.Count + int64 deleted.Count, (if read then rows else Map.empty), read
                 | Some 0L ->
-                    let cached = withinBounds rows
-                    cached.Count, cached
+                    if overlaps rows deleted then int64 rows.Count + int64 deleted.Count, rows, true
+                    else 0L, Map.empty, false
                 | Some through ->
                     let disk, cache =
                         match exactSegments.TryGetValue key with
@@ -1584,12 +1693,18 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                             let segments = rows |> Map.partition (fun id _ -> view.Documents.[id].Order <= through)
                             exactSegments.Add(key, segments)
                             segments
-                    let availableDisk, availableCache = withinBounds disk, withinBounds cache
+                    let deletedDisk, deletedCache = deleted |> Map.partition (fun order _ -> order <= through)
+                    let readDisk = overlaps disk deletedDisk
+                    let readCache = overlaps cache deletedCache
                     // Disk counts all postings, and cache counts only the nodes it reads.
-                    let frequency = disk.Count + availableCache.Count
-                    if availableDisk.Count + availableCache.Count = rows.Count then frequency, rows
-                    elif availableDisk.IsEmpty then frequency, availableCache
-                    else frequency, availableDisk
+                    let frequency =
+                        int64 disk.Count + int64 deletedDisk.Count
+                        + (if readCache then int64 cache.Count + int64 deletedCache.Count else 0L)
+                    match readDisk, readCache with
+                    | true, true -> frequency, rows, true
+                    | true, false -> frequency, disk, true
+                    | false, true -> frequency, cache, true
+                    | false, false -> frequency, Map.empty, false
 
             let visitExactWords bounds found =
                 let rec visit offset candidates =
@@ -1599,14 +1714,15 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                         | NgramPrefix _ -> visit (offset + 1) candidates
                         | ExactNgram word ->
                             let rows = Map.tryFind word view.Postings |> Option.defaultValue Map.empty
-                            let frequency, available =
+                            let deleted = Map.tryFind word view.Deleted.Words |> Option.defaultValue Map.empty
+                            let frequency, available, read =
                                 match bounds with
-                                | Some(lower, upper) -> boundedExactPosting lower upper word rows
-                                | None -> rows.Count, rows
+                                | Some(lower, upper) -> boundedExactPosting lower upper word rows deleted
+                                | None -> int64 rows.Count + int64 deleted.Count, rows, true
                             let _, count = exactCounts.TryGetValue word
-                            exactCounts.[word] <- count + int64 frequency
+                            exactCounts.[word] <- count + frequency
                             match bounds with
-                            | Some _ when available.IsEmpty -> None
+                            | Some _ when not read -> None
                             | Some _ when available.Count < rows.Count ->
                                 let allowed = available |> Map.keys |> Set.ofSeq
                                 visit (offset + 1) (intersectCandidates candidates (Some allowed))
@@ -1638,11 +1754,14 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                         match term with
                         | BWord(word, true) ->
                             // Required prefixes use the cache even after visiting a phrase.
-                            match prefixPosting (inPhraseMode && not isRequired) word.Key with
+                            let diskOnly = inPhraseMode && not isRequired
+                            let posting = prefixPosting diskOnly word.Key
+                            let _, count = prefixCounts.TryGetValue word.Key
+                            let frequency = posting |> Option.map _.GramDocumentCount |> Option.defaultValue 0L
+                            prefixCounts.[word.Key] <- count + frequency + retainedPrefixFrequency diskOnly word.Key
+                            match posting with
                             | None -> Map.empty
                             | Some posting ->
-                                let _, count = prefixCounts.TryGetValue word.Key
-                                prefixCounts.[word.Key] <- count + posting.GramDocumentCount
                                 posting.Rows |> restrictScores scope |> Map.map (fun _ _ -> 0.0)
                         | _ ->
                             let bounds = if isRequired then postingBounds else None
@@ -1785,7 +1904,7 @@ let internal tryFlatBooleanScoresDictionaryInView
                 Map.tryFind term.Key view.PrefixPostings
                 |> Option.map (fun posting ->
                     let rows = prefixRowsWithCacheOrder candidateIds term.Key view posting.Rows
-                    rows, prefixWeight view 1 posting)
+                    rows, prefixWeight view term.Key posting)
             elif isExactLookup view.Rules term then
                 booleanPostingRows view term |> Option.map (fun rows -> rows, idf view rows.Count)
             else None
