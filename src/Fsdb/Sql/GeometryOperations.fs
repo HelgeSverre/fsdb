@@ -1297,12 +1297,12 @@ let private geographicTurnSide referenceSystem =
             let azimuth = geographicTurnAzimuth flattening first
             geographicAzimuthSide (azimuth query) (azimuth last)
 
-let private geographicTurnArrivesFromInside side first last point sourceStart =
-    // The incoming interval uses two sub-arcs of the directed ring edge.
+let private geographicTurnArrivesFromInside side first following point sourceStart =
+    // Use the directed boundary arcs before and after the turn.
     let incoming = side first point sourceStart
-    let onward = side first point last
+    let onward = side first point following
     if incoming * onward = -1 then incoming = -1
-    else side point last sourceStart = -1
+    else side point following sourceStart = -1
 
 let private tryGeographicPairedTurns referenceSystem ((start, endpoint) as segment) rings =
     let spheroid, flattening = geographicIntersectionSpheroid referenceSystem
@@ -1347,7 +1347,8 @@ let private tryGeographicPairedTurns referenceSystem ((start, endpoint) as segme
         let first, last = geographicPointRadians first, geographicPointRadians last
         tryGeographicSegmentCrossing referenceSystem segment properEdge
         |> Option.bind (fun point ->
-            if not (boostGeoEqual (distance a point) 0.0)
+            // The proper cut and the contact at b must be distinct turns.
+            if boostGeoEqual (distance b point) 0.0
                || equalGeographicCoordinates point first
                || equalGeographicCoordinates point last then None
             else
@@ -1395,9 +1396,10 @@ type private GeographicAreaTurnDirection = Entry | Exit
 let private tryGeographicLineAreaTurns referenceSystem ((start, endpoint) as segment) rings sampled =
     let side = geographicTurnSide referenceSystem
 
-    let edges =
+    let boundary =
         orientGeographicPolygonRings referenceSystem rings
-        |> List.collect (List.rev >> List.pairwise)
+        |> List.map (List.rev >> List.pairwise)
+    let edges = List.concat boundary
     let rejectsRoundedTurn = geographicTurnRejectsRoundedEndpoint referenceSystem segment
 
     let crossings =
@@ -1414,9 +1416,12 @@ let private tryGeographicLineAreaTurns referenceSystem ((start, endpoint) as seg
         geographicSharedSegmentEndpoints referenceSystem segment edge |> List.isEmpty |> not
 
     let sourceStart, sourceEnd = geographicPointRadians start, geographicPointRadians endpoint
-    let directedPosition () =
+    let intersectionDistance () =
         let spheroid, _ = geographicIntersectionSpheroid referenceSystem
-        let distance = geographicInverseDistanceRadians false spheroid
+        geographicInverseDistanceRadians false spheroid
+
+    let directedPosition () =
+        let distance = intersectionDistance ()
         // The intersection strategy orders endpoints by latitude. Reverse its ratio
         // for a descending source so that positions increase in source order.
         if fst sourceStart > fst sourceEnd then
@@ -1428,6 +1433,26 @@ let private tryGeographicLineAreaTurns referenceSystem ((start, endpoint) as seg
 
     let isEdgeVertex first last point =
         equalGeographicCoordinates point first || equalGeographicCoordinates point last
+
+    let arrivesFromRoundedCorner edge first vertex point =
+        let distance = intersectionDistance () sourceStart
+        // The rounded contact is between the first ordered source endpoint
+        // and the last ordered boundary endpoint.
+        if fst sourceStart <= fst sourceEnd && fst first <= fst vertex
+           && boostGeoEqual (distance point) 0.0 && boostGeoEqual (distance vertex) 0.0
+           && not (boostGeoEqual (distance first) 0.0) then
+            let following =
+                boundary
+                |> List.tryPick (fun ring ->
+                    ring |> List.tryFindIndex ((=) edge)
+                    |> Option.bind (fun index ->
+                        Seq.append (List.skip (index + 1) ring) (List.take index ring)
+                        |> Seq.map (snd >> geographicPointRadians)
+                        |> Seq.tryFind (fun point -> not (equalGeographicCoordinates vertex point))))
+            // A rounded cut at the end of the edge belongs to the ring vertex.
+            following
+            |> Option.exists (fun next -> geographicTurnArrivesFromInside side first next vertex sourceStart)
+        else false
 
     match crossings with
     | [] when sampled.Crosses
@@ -1449,7 +1474,8 @@ let private tryGeographicLineAreaTurns referenceSystem ((start, endpoint) as seg
             match side a b sourceEnd with
             // An exit reached from outside establishes boundary contact.
             | 1 when sampled.Crosses && not fromInside ->
-                Some geographicLineAreaTouch
+                if arrivesFromRoundedCorner edge a b point then None
+                else Some geographicLineAreaTouch
             // An entry can expose an interior interval missed by sampling.
             | -1 when not sampled.Intersects && not fromInside ->
                 let _, position = directedPosition ()

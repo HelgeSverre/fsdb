@@ -611,6 +611,28 @@ The wider WGS 84, dense offset, and short-corner sweeps still match.
 Global line pairs, shared endpoints, rings, and polygon-validity probes
 also match.
 
+## Proper cuts and rounded polygon vertices
+
+A proper cut and a rounded endpoint contact on opposite sides of one
+boundary span can be distinct turns even when the inverse distance from
+the other source endpoint is nonzero. Fsdb now checks separation from
+the rounded contact and evaluates the two turns in source order.
+
+When a cut and the first latitude-ordered source endpoint both round
+to the end of the directed ring edge, Fsdb uses the next distinct
+vertex on that ring to classify the incoming side. The check follows
+the latitude-ordered endpoint comparison. A trial without the
+source-order check classified several descending touches as crossings.
+[Boost line/area turn analysis](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/relate/linear_areal.hpp).
+
+The independent seed 311041 now matches native MySQL 8.4.11 in all
+6,000 cases in each direction, closing four forward and three reverse
+differences. The wider 5,000-case sweep still matches in each direction.
+A fresh seed, 2468137, matches in all 7,000 cases in each direction.
+The rounded-corner sweep matches all 968 cases across both line
+directions and four hole-ring starting vertices. It varies source
+longitude over the same 121 offsets as the near-coincident sweep.
+
 ## Current-head overlay check
 
 A current-head rerun still finds 11/448 geographic line/polygon relation

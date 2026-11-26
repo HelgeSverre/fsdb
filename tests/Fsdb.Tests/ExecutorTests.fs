@@ -19895,6 +19895,38 @@ let tests =
                             when crossing = crosses && touching = touches -> ()
                         | result -> failtestf "unexpected mixed turn topology for {wkt}: %A" result
 
+                testCase "a proper geographic turn can be separated from a rounded endpoint"
+                <| fun _ ->
+                    let store = newStore ()
+                    let area = "ST_GeomFromText('POLYGON((31.21868725301916 -148.57030646710416,31.21868725301916 -145.55367970540945,31.47996795038065 -145.55367970540945,31.47996795038065 -148.57030646710416,31.21868725301916 -148.57030646710416),(31.28400742735953 -147.81614977668048,31.41464777604028 -147.81614977668048,31.41464777604028 -146.30783639583314,31.28400742735953 -146.30783639583314,31.28400742735953 -147.81614977668048))',4326)"
+                    let a = "31.28400742735953 -146.30783669749582"
+                    let b = "31.41464777604028 -146.30783669749582"
+                    for start, endpoint in [ a, b; b, a ] do
+                        let line = $"ST_GeomFromText('LINESTRING({start},{endpoint})',4326)"
+                        let sql = $"SELECT ST_Intersects({line},{area}),ST_Crosses({line},{area}),ST_Touches({line},{area}),ST_Within({line},{area})"
+                        match runDefault store sql with
+                        | ResultSet(_, [ row ]) ->
+                            Expect.equal row [ Some "1"; Some "1"; Some "0"; Some "0" ] line
+                        | result -> failtestf "unexpected line topology for {line}: %A" result
+
+                testCase "a rounded geographic corner uses the next edge to classify its incoming side"
+                <| fun _ ->
+                    let store = newStore ()
+                    let area = "ST_GeomFromText('POLYGON((37.28359539931617 7.72044698181028,37.28359539931617 9.75316362299426,39.43140504709263 9.75316362299426,39.43140504709263 7.72044698181028,37.28359539931617 7.72044698181028),(37.82054781126028 8.22862614210628,38.89445263514852 8.22862614210628,38.89445263514852 9.24498446269827,37.82054781126028 9.24498446269827,37.82054781126028 8.22862614210628))',4326)"
+                    let a = "37.82054781126028 9.24498425942660"
+                    let b = "38.89445263514852 9.24498425942660"
+                    let otherArea = "ST_GeomFromText('POLYGON((-54.94803502836352 153.53250141784872,-54.94803502836352 155.05777203230238,-53.62278942810559 155.05777203230238,-53.62278942810559 153.53250141784872,-54.94803502836352 153.53250141784872),(-54.61672362829904 153.91381907146214,-53.95410082817008 153.91381907146214,-53.95410082817008 154.67645437868896,-54.61672362829904 154.67645437868896,-54.61672362829904 153.91381907146214))',4326)"
+                    for polygon, start, endpoint, crosses, touches in
+                        [ area, a, b, "1", "0"
+                          area, b, a, "1", "0"
+                          otherArea, "-53.95410082817008 153.91381922398921", "-54.61672362829904 153.91381922398921", "0", "1" ] do
+                        let line = $"ST_GeomFromText('LINESTRING({start},{endpoint})',4326)"
+                        let sql = $"SELECT ST_Intersects({line},{polygon}),ST_Crosses({line},{polygon}),ST_Touches({line},{polygon}),ST_Within({line},{polygon})"
+                        match runDefault store sql with
+                        | ResultSet(_, [ row ]) ->
+                            Expect.equal row [ Some "1"; Some crosses; Some touches; Some "0" ] line
+                        | result -> failtestf "unexpected line topology for {line}: %A" result
+
                 testCase "geographic turns distinguish a near-hole crossing from a touch"
                 <| fun _ ->
                     let store = newStore ()
