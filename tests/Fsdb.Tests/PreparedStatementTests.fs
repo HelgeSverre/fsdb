@@ -93,6 +93,19 @@ let tests =
                   noDatabaseResult
                   "text execution retains the absence of a preparation database"
 
+          testCase "text prepared statements preserve newlines in SQL and arguments"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, prepared =
+                  handle session "PREPARE multiline FROM 'SELECT\n? AS a, HEX(''x\ny'') AS payload, ? AS b'"
+              Expect.equal prepared (Affected 0UL) "prepare multiline SQL"
+              let session, assigned = handle session "SET @a=7,@b=9"
+              Expect.equal assigned (Affected 0UL) "set prepared arguments"
+              Expect.equal
+                  (handle session "EXECUTE multiline USING @a,\n@b" |> snd)
+                  (ResultSet([ "a"; "payload"; "b" ], [ [ Some "7"; Some "780A79"; Some "9" ] ]))
+                  "bind both arguments and preserve the literal newline"
+
           testCase "bound parameters keep a joined correlated COUNT decorrelated"
           <| fun _ ->
               let mutable session = create 1 (Fsdb.Storage.create ())

@@ -85,6 +85,7 @@ key cases include a writable view on the right of the join.
 Prepared execution and explicit rollback match in the fixture. A separate
 two-session check waited for the permanent writer, then affected zero rows
 after the committed value stopped matching. WAL replay after an abrupt
-stop recovered matching permanent rows. A newline inside the SQL string
-supplied to text PREPARE still returns 1064 in Fsdb for the same statement
-that prepares successfully on one line.
+stop recovered matching permanent rows. Text PREPARE accepts the multiline
+joined statement, and EXECUTE accepts its arguments on separate lines.
+A separate regression checks that a newline in a nested string literal
+survives preparation and execution.

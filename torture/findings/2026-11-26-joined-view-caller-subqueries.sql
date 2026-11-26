@@ -29,9 +29,12 @@ CREATE TABLE collision(id INT PRIMARY KEY,n INT);
 INSERT INTO collision VALUES(1,12);
 UPDATE writable v JOIN collision p ON p.id=v.k SET v.n=(SELECT n) WHERE v.k=1;
 START TRANSACTION;
-PREPARE joined_update FROM 'UPDATE writable v JOIN look p ON p.id=v.k SET v.n=(SELECT v.k+p.extra)+? WHERE v.k=? AND EXISTS(SELECT 1 FROM base t WHERE t.id=k)';
+PREPARE joined_update FROM 'UPDATE writable v JOIN look p ON p.id=v.k
+SET v.n=(SELECT v.k+p.extra)+?
+WHERE v.k=? AND EXISTS(SELECT 1 FROM base t WHERE t.id=k)';
 SET @increment=7,@target=1;
-EXECUTE joined_update USING @increment,@target;
+EXECUTE joined_update USING @increment,
+@target;
 SELECT ROW_COUNT();
 SELECT k,n FROM writable WHERE k=1;
 DEALLOCATE PREPARE joined_update;

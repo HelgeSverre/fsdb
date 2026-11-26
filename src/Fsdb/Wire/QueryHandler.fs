@@ -6230,10 +6230,10 @@ type private TextPreparedCommand =
 let private preparedName = @"(?:`(?<name>(?:``|[^`])+)`|(?<name>[A-Za-z_][A-Za-z0-9_$]*))"
 
 let private prepareTextRe =
-    Regex(@"^\s*PREPARE\s+" + preparedName + @"\s+FROM\s+(?<source>.+?)\s*$", RegexOptions.IgnoreCase)
+    Regex(@"^\s*PREPARE\s+" + preparedName + @"\s+FROM\s+(?<source>.+?)\s*$", RegexOptions.IgnoreCase ||| RegexOptions.Singleline)
 
 let private executeTextRe =
-    Regex(@"^\s*EXECUTE\s+" + preparedName + @"(?:\s+USING\s+(?<variables>.+))?\s*$", RegexOptions.IgnoreCase)
+    Regex(@"^\s*EXECUTE\s+" + preparedName + @"(?:\s+USING\s+(?<variables>.+))?\s*$", RegexOptions.IgnoreCase ||| RegexOptions.Singleline)
 
 let private deallocateTextRe =
     Regex(@"^\s*(?:DEALLOCATE|DROP)\s+PREPARE\s+" + preparedName + @"\s*$", RegexOptions.IgnoreCase)
