@@ -62,13 +62,9 @@ temporary table.
 foreign key references the same-named permanent base. MySQL drops the
 temporary table and retains both permanent tables.
 
-Assignment to a user variable in the surrounding statement can make
-MySQL materialize an UNDEFINED view. The audited joined DELETE then
-returns 1288 instead of the join-view error. A directly defined MERGE
-view retains the join-view error, while an outer MERGE view over an
-UNDEFINED component can still return 1288. Fsdb's shape-based
-updatability does not yet account for this merge decision.
-[MySQL view and derived-table merge resolution](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_resolver.cc#L3108-L3123)
+The [merge-heuristic follow-up](2026-11-26-view-merge-variable-assignments.md)
+covers joined DELETE when a variable assignment makes an UNDEFINED view
+materialize. A directly defined MERGE view retains the join-view error.
 
 ## Correlated merged columns
 

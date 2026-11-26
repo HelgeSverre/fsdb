@@ -20,7 +20,66 @@ let private setup () =
 let tests =
     testList
         "views"
-        [ testCase "outer window CTE joins make nested checked views read only"
+        [ testCase "variable writes disable heuristic view merging for one statement"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable session = Fsdb.Session.create 1 store
+              let runSql sql =
+                  let current, result = Fsdb.QueryHandler.handle session sql
+                  session <- current
+                  result
+              for sql in
+                  [ "CREATE TABLE base(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE partner(id INT PRIMARY KEY)"
+                    "INSERT INTO base VALUES(1,10),(2,20)"
+                    "INSERT INTO partner VALUES(1),(2)"
+                    "CREATE VIEW direct_v AS SELECT id,n FROM base"
+                    "CREATE ALGORITHM=MERGE VIEW direct_m AS SELECT id,n FROM base"
+                    "CREATE ALGORITHM=MERGE VIEW outer_m AS SELECT id,n FROM direct_v"
+                    "CREATE ALGORITHM=MERGE VIEW mixed_m AS SELECT v.n,p.id AS pid FROM direct_v v JOIN partner p ON p.id=v.id" ] do
+                  expectOk (runSql sql) sql
+
+              expectOk (runSql "SET @x=0") "initialize session variable"
+
+              let invalidTarget operation target =
+                  1288, $"The target table {target} of the {operation} is not updatable"
+              for sql, (code, message) in
+                  [ "UPDATE direct_v SET n=(@x:=99) WHERE id=1", invalidTarget "UPDATE" "direct_v"
+                    "UPDATE direct_v v JOIN partner p ON v.id=p.id SET v.n=(@x:=99)", invalidTarget "UPDATE" "v"
+                    "UPDATE outer_m SET n=(@x:=99)", invalidTarget "UPDATE" "outer_m"
+                    "UPDATE mixed_m SET n=(@x:=99) WHERE pid=1", invalidTarget "UPDATE" "mixed_m"
+                    "DELETE FROM direct_v AS v WHERE (@x:=1)=1", invalidTarget "DELETE" "v"
+                    "DELETE v FROM direct_v v JOIN partner p ON v.id=p.id WHERE EXISTS (SELECT (@x:=1))", invalidTarget "DELETE" "v"
+                    "INSERT INTO direct_v VALUES (3,(@x:=99))", (1471, "The target table direct_v of the INSERT is not insertable-into") ] do
+                  Expect.equal (runSql sql) (Err(code, message)) sql
+                  Expect.equal (runSql ("EXPLAIN " + sql)) (Err(code, message)) ("EXPLAIN " + sql)
+                  match Fsdb.QueryHandler.prepareStatementForSession session sql with
+                  | Error error -> Expect.equal error (code, message) ("PREPARE " + sql)
+                  | Ok _ -> failtestf "expected preparation to reject %s" sql
+
+              Expect.equal (runSql "SELECT id,n,@x AS x FROM base ORDER BY id")
+                  (ResultSet([ "id"; "n"; "x" ], [ [ Some "1"; Some "10"; Some "0" ]; [ Some "2"; Some "20"; Some "0" ] ]))
+                  "rejected writes preserve base rows and the session variable"
+              Expect.equal (runSql "UPDATE direct_m SET n=(@x:=15) WHERE id=1") (Affected 1UL) "explicit MERGE can write"
+              Expect.equal (runSql "UPDATE mixed_m SET pid=(@x:=3) WHERE pid=1") (Affected 1UL) "the unmaterialized partner can write"
+              Expect.equal (runSql "UPDATE direct_v SET n=16 WHERE id=1") (Affected 1UL) "the next statement can merge the default view"
+
+              let owner = Fsdb.Session.create 2 store
+              let owner, _ = Fsdb.QueryHandler.handle owner "START TRANSACTION"
+              let owner, held = Fsdb.QueryHandler.handle owner "UPDATE base SET n=17 WHERE id=1"
+              expectOk held "hold the base row in a different transaction"
+              try
+                  expectOk (runSql "SET innodb_lock_wait_timeout=1") "limit a possible regression to one second"
+                  expectOk (runSql "START TRANSACTION") "open the second transaction"
+                  for sql, operation, target in
+                      [ "UPDATE direct_v SET n=(@x:=99) WHERE id=1", "UPDATE", "direct_v"
+                        "DELETE v FROM direct_v v JOIN partner p USING(id) WHERE v.id=1 AND (@x:=1)", "DELETE", "v" ] do
+                      Expect.equal (runSql sql) (Err(invalidTarget operation target)) "rejection precedes row-lock acquisition"
+              finally
+                  runSql "ROLLBACK" |> ignore
+                  Fsdb.QueryHandler.handle owner "ROLLBACK" |> ignore
+
+          testCase "outer window CTE joins make nested checked views read only"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               for sql in

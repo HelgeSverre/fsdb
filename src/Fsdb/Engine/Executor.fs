@@ -1098,7 +1098,9 @@ let private lookupScopedFunction registry dbName (name: string) =
 
 let internal withJoinHintDiagnostics (diagnostics: OptimizerHintResolution.ExecutionDiagnostics) body =
     let inherited = DynamicScope.valueOrDefault OptimizerHintResolution.emptyExecution joinHintDiagnostics
-    if diagnostics.Warnings.IsEmpty && inherited.Warnings.IsEmpty then body ()
+    let isEmpty (value: OptimizerHintResolution.ExecutionDiagnostics) =
+        value.Warnings.IsEmpty && value.SourceStrategies.IsEmpty && value.ParameterizedWhere.IsEmpty
+    if isEmpty diagnostics && isEmpty inherited then body ()
     else DynamicScope.withValue joinHintDiagnostics diagnostics body
 
 /// Owns DOUBLE/FLOAT literal conversions across a correlated execution tree,
@@ -1589,7 +1591,7 @@ let private resolveViewOrderExpression projections expression =
     | Col name as column -> tryProjectionExpressionNamed projections name |> Option.defaultValue column
     | resolved -> resolved
 
-let private updatableViewOfSelect (store: Store) (view: StoredView) (select: SelectStmt) : UpdatableView option =
+let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store: Store) (view: StoredView) (select: SelectStmt) : UpdatableView option =
     let combine left right =
         match left, right with
         | Some left, Some right -> Some(BinOp(And, left, right))
@@ -1799,7 +1801,9 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
             |> InformationSchema.flattenInnerJoinedOperands store.Catalog view.Schema
         let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
 
-        if Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting then
+        if Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting
+           || (not allowHeuristicMerge && not (equalsIgnoreCase view.Algorithm "MERGE")
+               && not (seen.IsEmpty && forceRootMerge && equalsIgnoreCase view.Algorithm "UNDEFINED")) then
             None
         else
             match select.From with
@@ -1961,6 +1965,7 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
 
                     if
                         unresolvedStar
+                        || (not allowHeuristicMerge && underlyingStored.IsSome && underlying.IsNone)
                         || dependentProjection
                         || dependentPredicate
                         || not (namesMatchProjections outputNames projected)
@@ -2972,6 +2977,9 @@ let private updatableViewOfSelect (store: Store) (view: StoredView) (select: Sel
             | _ -> None
 
     classify Set.empty view select
+
+let private updatableViewOfSelect store view select =
+    updatableViewOfSelectWith true false store view select
 
 let private storedChecks (store: Store) (dbName: string) (tableName: string) : StoredCheck list =
     match scan store "mysql" "check_constraints" with
@@ -26716,12 +26724,124 @@ let private withInsertSelectSources
     else
         contextFactory target.Store target.Registry target.DbName (columnIndexOf columns) qualifiers (Some target) (Array.ofList values)
 
-let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) : UpdatableView option =
+let private disableHeuristicViewMerge = System.Threading.AsyncLocal<bool>()
+let private forcedViewMerges = System.Threading.AsyncLocal<Set<string * string> option>()
+
+let private withStatementViewMerge store dbName statement run =
+    let sourceNames items =
+        items |> List.collect FromItem.leaves |> List.choose (function
+            | FromTable source -> Some(source.Database |> Option.defaultValue dbName, source.Table, source.Alias |> Option.defaultValue source.Table)
+            | _ -> None)
+    let rec writeSources = function
+        | Update update -> sourceNames (FromTable update.From :: (update.Joins |> List.map _.Table))
+        | Delete delete -> sourceNames (delete.From :: (delete.Joins |> List.map _.Table))
+        | Insert(table, _, _, _, _) | InsertSelect(table, _, _, _, _)
+        | Replace(table, _, _) | ReplaceSelect(table, _, _) | ReplaceSet(table, _) ->
+            let schema, name = splitQualified dbName table
+            [ schema, name, name ]
+        | Explain(_, statement) -> writeSources statement
+        | _ -> []
+    let rec reachableCtes = function
+        | Update update when not update.Ctes.IsEmpty ->
+            let expressions = (update.Assignments |> List.map _.Value) @ Option.toList update.Where
+                              @ List.map fst update.OrderBy @ Option.toList update.Limit
+            Update { update with Ctes = referencedMutationCtes update.Ctes (Some(FromTable update.From)) update.Joins expressions }
+        | Delete delete when not delete.Ctes.IsEmpty -> Delete { delete with Ctes = referencedDeleteCtes delete }
+        | Explain(format, statement) -> Explain(format, reachableCtes statement)
+        | statement -> statement
+    let sources = writeSources statement
+    let isView (schema, name, _) =
+        match Storage.tableSnapshot store schema name with
+        | Ok _ -> false
+        | Error _ -> (tryStoredView store schema name).IsSome
+    // The merge heuristic consults assignments in the enclosing statement.
+    // Unreferenced mutation CTEs never enter that statement's resolved query.
+    let assignsVariable =
+        if not (List.exists isView sources) then false
+        else
+            let mutable assigns = false
+            Expression.iterStatement (function AssignUserVariable _ -> assigns <- true | _ -> ()) (reachableCtes statement)
+            assigns
+    let hints = DynamicScope.valueOrDefault OptimizerHintResolution.emptyExecution joinHintDiagnostics
+    let forced =
+        if not assignsVariable || hints.SourceStrategies.IsEmpty then None
+        else
+            let scopes = OptimizerHintScopes.collect OptimizerHintScopes.BoundStatement statement
+            scopes.Numbered |> List.tryHead |> Option.map (fun block ->
+                let merge (alias: string) =
+                    Map.tryFind (block.Number, Some(alias.ToLowerInvariant())) hints.SourceStrategies
+                    |> Option.orElseWith (fun () -> Map.tryFind (block.Number, None) hints.SourceStrategies)
+                    |> (=) (Some OptimizerHintResolution.MergeSource)
+                // Write classification is keyed by stored view. Require every
+                // reference to agree before overriding the root merge decision.
+                sources
+                |> List.groupBy (fun (schema, name, _) -> schema.ToLowerInvariant(), name.ToLowerInvariant())
+                |> List.choose (fun (key, sources) ->
+                    if sources |> List.forall (fun (_, _, alias) -> merge alias) then Some key
+                    else None)
+                |> Set.ofList)
+    DynamicScope.withValue disableHeuristicViewMerge assignsVariable (fun () -> DynamicScope.withValue forcedViewMerges forced run)
+
+let private tryUpdatableViewWith allowHeuristicMerge (store: Store) (dbName: string) (viewName: string) : UpdatableView option =
     match tryStoredView store dbName viewName with
     | None -> None
     | Some view ->
         match parseStoredViewStatement view with
-        | Ok(Select select) -> updatableViewOfSelect (storeForStoredView store) view select
+        | Ok(Select select) ->
+            let forceRoot = not allowHeuristicMerge && (forcedViewMerges.Value |> Option.exists (Set.contains (dbName.ToLowerInvariant(), viewName.ToLowerInvariant())))
+            updatableViewOfSelectWith allowHeuristicMerge forceRoot (storeForStoredView store) view select
+        | _ -> None
+
+let private tryUpdatableView store dbName viewName =
+    tryUpdatableViewWith (not disableHeuristicViewMerge.Value) store dbName viewName
+
+let rec private viewWriteMergeError store dbName statement =
+    let insertError fullName =
+        let schema, name = splitQualified dbName fullName
+        match tryUpdatableViewWith true store schema name with
+        | Some view when view.Insertable && (tryUpdatableView store schema name |> Option.forall (fun current -> not current.Insertable)) ->
+            Some(1471, $"The target table {name} of the INSERT is not insertable-into")
+        | _ -> None
+
+    if not disableHeuristicViewMerge.Value then None
+    else
+        match statement with
+        | Explain(_, inner) -> viewWriteMergeError store dbName inner
+        | Insert(table, _, _, _, _) | InsertSelect(table, _, _, _, _)
+        | Replace(table, _, _) | ReplaceSelect(table, _, _) | ReplaceSet(table, _) -> insertError table
+        | Update update ->
+            let sources = FromTable update.From :: (update.Joins |> List.map _.Table) |> List.collect FromItem.leaves
+            let cteNames = update.Ctes |> List.map _.CteName
+            let isCte (source: TableRef) =
+                source.Database.IsNone && (List.exists (equalsIgnoreCase source.Table) cteNames
+                    || Map.containsKey (source.Table.ToLowerInvariant()) (currentCteScope ()))
+            let hasColumn name source =
+                selectSourceColumns store dbName source |> List.exists (Option.exists (fun column -> equalsIgnoreCase column.Name name))
+            let assignedTo qualifier (assignment: Assignment) =
+                match assignment.Table with
+                | Some owner -> equalsIgnoreCase owner qualifier
+                | None when sources.Length = 1 -> true
+                | None ->
+                    match sources |> List.filter (hasColumn assignment.Column) |> List.choose FromItem.tryQualifier with
+                    | [ owner ] -> equalsIgnoreCase owner qualifier
+                    | _ -> false
+
+            sources
+            |> List.tryPick (function
+                | FromTable source when not (isCte source) ->
+                    let schema = source.Database |> Option.defaultValue dbName
+                    let qualifier = source.Alias |> Option.defaultValue source.Table
+                    tryUpdatableViewWith true store schema source.Table
+                    |> Option.bind (fun previous ->
+                        let current = tryUpdatableView store schema source.Table
+                        let writable (view: UpdatableView) (column: string) = Map.containsKey (column.ToLowerInvariant()) view.Targets
+                        let losesTarget (assignment: Assignment) =
+                            assignedTo qualifier assignment
+                            && (current.IsNone || (writable previous assignment.Column
+                                && (current |> Option.exists (fun view -> not (writable view assignment.Column)))))
+                        if List.exists losesTarget update.Assignments then Some(nonUpdatableTarget "UPDATE" qualifier)
+                        else None)
+                | _ -> None)
         | _ -> None
 
 let private bindJoinedDeleteTargetNames dbName (delete: DeleteStmt) =
@@ -26729,6 +26849,8 @@ let private bindJoinedDeleteTargetNames dbName (delete: DeleteStmt) =
         (currentCteScope () |> Map.keys |> Set.ofSeq, delete.Ctes)
         ||> List.fold (fun names cte -> Set.add (cte.CteName.ToLowerInvariant()) names)
     match delete.Source with
+    | SingleDeleteTable table when disableHeuristicViewMerge.Value ->
+        Ok(cteNames, [ table.Alias |> Option.defaultValue table.Table, FromTable table ])
     | SingleDeleteTable _ -> Ok(cteNames, [])
     | MultiDeleteSource(from, joins) ->
         let sources =
@@ -26750,20 +26872,7 @@ let private bindJoinedDeleteTargetNames dbName (delete: DeleteStmt) =
                     Map.tryFind (qualifier.ToLowerInvariant()) named |> Option.map (fun name -> name, source))
                 |> fun targets -> Ok(cteNames, targets))
 
-let private validateJoinedDeleteTargets store registry dbName (delete: DeleteStmt) =
-    let targetError cteNames (target, source) =
-        match source with
-        | FromTable table when table.Database.IsSome || not (Set.contains (table.Table.ToLowerInvariant()) cteNames) ->
-            let schema = table.Database |> Option.defaultValue dbName
-            match tryStoredView store schema table.Table with
-            | None -> None
-            | Some _ ->
-                match tryUpdatableView store schema table.Table with
-                | Some view when not view.UpdateJoins.IsEmpty -> Some(joinViewDeleteError view)
-                | Some _ -> None
-                | None -> Some(nonUpdatableTarget "DELETE" target)
-        | _ -> Some(nonUpdatableTarget "DELETE" target)
-
+let private probeMutationSources store registry dbName source joins ctes =
     let rec withoutSourceConditions = function
         | FromJoinGroup(first, joins) -> FromJoinGroup(withoutSourceConditions first, List.map withoutJoinConditions joins)
         | other -> other
@@ -26778,33 +26887,66 @@ let private validateJoinedDeleteTargets store registry dbName (delete: DeleteStm
 
     // Resolve sources before rejecting a named target, but leave this
     // query block's join predicates and WHERE until after that decision.
-    let checkSources () =
-        let bindingRegistry =
-            { registry with
-                Scalars =
-                    registry.Scalars
-                    |> Map.map (fun name scalar ->
-                        if name = "CURRENT_USER" || Functions.isUnmodifiedBuiltinScalar name registry then scalar
-                        else fun _ -> VNull)
-                Aggregates =
-                    registry.Aggregates
-                    |> Map.map (fun name aggregate ->
-                        if Functions.isUnmodifiedBuiltinAggregate name registry then aggregate
-                        else fun _ -> VNull) }
-        let query = mutationSourceQuery (Some(withoutSourceConditions delete.From)) (List.map withoutJoinConditions delete.Joins) delete.Ctes [ Lit(VInt 1L) ]
-        let result, _, _ =
-            DynamicScope.withValue statementMemo (freshStatementMemo ()) (fun () ->
-                withPlanningProbe (fun () ->
-                    withSourceMetadataProbe (fun () -> runSelectStmt store bindingRegistry dbName query None)))
-        match result with
-        | Err _ -> Error result
-        | _ -> Ok()
+    let bindingRegistry =
+        { registry with
+            Scalars =
+                registry.Scalars
+                |> Map.map (fun name scalar ->
+                    if name = "CURRENT_USER" || Functions.isUnmodifiedBuiltinScalar name registry then scalar
+                    else fun _ -> VNull)
+            Aggregates =
+                registry.Aggregates
+                |> Map.map (fun name aggregate ->
+                    if Functions.isUnmodifiedBuiltinAggregate name registry then aggregate
+                    else fun _ -> VNull) }
+    let query = mutationSourceQuery (Option.map withoutSourceConditions source) (List.map withoutJoinConditions joins) ctes [ Lit(VInt 1L) ]
+    let result, _, _ =
+        DynamicScope.withValue statementMemo (freshStatementMemo ()) (fun () ->
+            withPlanningProbe (fun () ->
+                withSourceMetadataProbe (fun () -> runSelectStmt store bindingRegistry dbName query None)))
+    match result with
+    | Err _ -> Error result
+    | _ -> Ok()
+
+let private validateJoinedDeleteTargets store registry dbName (delete: DeleteStmt) =
+    let targetError cteNames (target, source) =
+        match source with
+        | FromTable table when table.Database.IsSome || not (Set.contains (table.Table.ToLowerInvariant()) cteNames) ->
+            let schema = table.Database |> Option.defaultValue dbName
+            match tryStoredView store schema table.Table with
+            | None -> None
+            | Some _ ->
+                match tryUpdatableView store schema table.Table with
+                | Some view when not view.UpdateJoins.IsEmpty -> Some(joinViewDeleteError view)
+                | Some _ -> None
+                | None -> Some(nonUpdatableTarget "DELETE" target)
+        | _ -> Some(nonUpdatableTarget "DELETE" target)
 
     bindJoinedDeleteTargetNames dbName delete
     |> Result.bind (fun (cteNames, targets) ->
         match List.tryPick (targetError cteNames) targets with
         | None -> Ok()
-        | Some error -> checkSources () |> Result.bind (fun () -> Error(Err error)))
+        | Some error -> probeMutationSources store registry dbName (Some delete.From) delete.Joins delete.Ctes |> Result.bind (fun () -> Error(Err error)))
+
+let private rejectedViewWrite store registry dbName statement =
+    let rec probe = function
+        | Explain(_, inner) -> probe inner
+        | Update update -> probeMutationSources store registry dbName (Some(FromTable update.From)) update.Joins update.Ctes
+        | InsertSelect(_, _, select, _, _) | ReplaceSelect(_, _, select) ->
+            probeMutationSources store registry dbName select.From select.Joins select.Ctes
+        | _ -> Ok()
+    viewWriteMergeError store dbName statement
+    |> Option.map (fun error ->
+        match probe statement with
+        | Ok() -> Err error
+        | Error sourceError -> sourceError)
+
+let internal skipsViewWriteLocks store registry dbName statement =
+    withStatementViewMerge store dbName statement (fun () ->
+        disableHeuristicViewMerge.Value
+        && (match statement with
+            | Delete delete -> validateJoinedDeleteTargets store registry dbName delete |> Result.isError
+            | _ -> (viewWriteMergeError store dbName statement).IsSome))
 
 /// Carry a statement-local row ordinal through each view projection so equal
 /// projected values still identify different rows in a keyless base table.
@@ -29380,7 +29522,11 @@ let private validateBindingsWith describeColumns validateFunction store registry
         | CreateTableAs(_, query, _, _) | Explain(_, query) -> validate query
         | _ -> Ok()
 
-    validate statement
+    withStatementViewMerge store schema statement (fun () ->
+        match rejectedViewWrite store registry schema statement with
+        | Some(Err(code, message)) -> Error(code, message)
+        | Some _ -> Error(1105, "Failed to validate view write")
+        | None -> validate statement)
 
 let private validateBindings store registry schema functionDatabase statement =
     let validateFunction = validateFunctionName registry functionDatabase
@@ -32596,7 +32742,10 @@ let rec private executeAsWithViewSources
 
         resultIds, result
 
+    let (|UnmergedViewWrite|_|) = rejectedViewWrite store registry dbName
+
     match stmt with
+    | UnmergedViewWrite error -> ids, error
     | Update update when not update.Ctes.IsEmpty ->
         let update = writableViewFirst store dbName update
         let expressions =
@@ -34995,7 +35144,11 @@ let rec private executeAsWithViewSources
         let viewDb = source.Database |> Option.defaultValue dbName
 
         match tryUpdatableView store viewDb source.Table with
-        | None -> ids, Err(nonUpdatableTarget "DELETE" source.Table)
+        | None ->
+            let target =
+                if disableHeuristicViewMerge.Value then source.Alias |> Option.defaultValue source.Table
+                else source.Table
+            ids, Err(nonUpdatableTarget "DELETE" target)
         | Some view when not view.UpdateJoins.IsEmpty ->
             ids, Err(joinViewDeleteError view)
         | Some view ->
@@ -35282,7 +35435,8 @@ let rec private executeAsWithViewSources
         ids, explainStatement format store registry currentAccount dbName inner
 
 and executeAs store registry dbName ids foundRows currentAccount stmt =
-    executeAsWithViewSources { Aliases = Set.empty; Conditions = []; CallerSubqueries = None } store registry dbName ids foundRows currentAccount stmt
+    withStatementViewMerge store dbName stmt (fun () ->
+        executeAsWithViewSources { Aliases = Set.empty; Conditions = []; CallerSubqueries = None } store registry dbName ids foundRows currentAccount stmt)
 
 let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (statement: Statement) =
     let unsafeError =

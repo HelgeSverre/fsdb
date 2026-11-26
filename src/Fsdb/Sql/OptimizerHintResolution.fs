@@ -275,15 +275,15 @@ let resolve (options: Parser.ParserOptions) sql hasSyntaxDiagnostics (hints: Opt
                         match joinTargetWarnings quote blocks.[scope.Number] with
                         | [] -> None
                         | warnings -> Some(scope.Number, warnings))
+                let strategies =
+                    blocks |> Map.toSeq |> Seq.collect (fun (number, block) ->
+                        block.SourceStrategies |> Map.toSeq |> Seq.map (fun (table, strategy) -> (number, table), strategy))
+                    |> Map.ofSeq
                 { Context = List.ofSeq context; Hints = Some(contextHints |> List.map snd)
                   Resolution = resolution
                   Execution =
-                    if execution.IsEmpty then emptyExecution
+                    if execution.IsEmpty then { emptyExecution with SourceStrategies = strategies }
                     else
-                        let strategies =
-                            blocks |> Map.toSeq |> Seq.collect (fun (number, block) ->
-                                block.SourceStrategies |> Map.toSeq |> Seq.map (fun (table, strategy) -> (number, table), strategy))
-                            |> Map.ofSeq
                         let parameterizedWhere =
                             scopes.Numbered |> List.choose (fun block ->
                                 block.Query |> Option.bind _.Where |> Option.bind (fun condition ->

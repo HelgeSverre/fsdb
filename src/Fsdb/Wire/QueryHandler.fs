@@ -2964,11 +2964,12 @@ let startTransactionStatement (session: Session) : Session =
     | None -> session
 
 let private prepareTransactionWrite (temporaryCatalog: Catalog option) (statement: Statement) (session: Session) : Session =
+    let dbName = session.Database |> Option.defaultValue defaultDatabase
+    let registry = registryFor session
     match session.Tx with
     | None -> session
+    | Some transaction when temporaryCatalog.IsNone && Executor.skipsViewWriteLocks transaction.Snapshot registry dbName statement -> session
     | Some transaction ->
-        let dbName = session.Database |> Option.defaultValue defaultDatabase
-        let registry = registryFor session
         let timeout = lockWaitTimeout session
         let claimReadPartners = temporaryCatalog.IsNone
         // Functions share the invoking statement's private view and publication boundary.
@@ -6116,8 +6117,9 @@ let prepareStatementForSession (session: Session) (sql: string) : Result<Stateme
             let schema = session.Database |> Option.defaultValue defaultDatabase
             checkSessionAccess session store (Auth.requiredPrivilegesInStore store schema ast)
             |> Result.bind (fun () ->
-                Executor.withSynchronousFunctionDatabase session.Database (fun () ->
-                    Executor.validatePreparedBindings store (preparedRegistryFor session) schema ast))
+                Executor.withJoinHintDiagnostics resolution.Execution (fun () ->
+                    Executor.withSynchronousFunctionDatabase session.Database (fun () ->
+                        Executor.validatePreparedBindings store (preparedRegistryFor session) schema ast)))
             |> Result.mapError (fun (code, message) ->
                 match resolveMissingFunctionDatabase session.Database options sql (Err(code, message)) with
                 | Err(normalizedCode, normalizedMessage) -> normalizedCode, normalizedMessage
