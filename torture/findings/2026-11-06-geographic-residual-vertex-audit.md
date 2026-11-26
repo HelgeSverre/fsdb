@@ -571,6 +571,28 @@ Fsdb reports containment for five, a touch for one, and disjointness for
 one. The disjoint case already yields two proper candidate cuts. The
 single-turn refinement leaves its sampled result in place.
 
+## Interior interval between two proper turns
+
+The disjoint holdout fixture crosses near an exterior corner. Both
+endpoints are outside, and sampled points miss the short inside interval.
+The relation can now use proper boundary entry and exit cuts ordered along
+the input segment. Both cuts must lie strictly inside the segment and off
+polygon vertices, with positive separation between entry and exit.
+[MySQL's object-shape predicates](https://dev.mysql.com/doc/refman/8.4/en/spatial-relation-functions-object-shapes.html).
+
+MySQL 8.4.11 and Fsdb matched all 1,764 focused cases, including 1,556
+crossings. The sweep shifts both line latitudes from −0.0001° through
++0.0021° in 0.000005° increments, uses both source directions, and varies
+the shell's starting vertex and the hole's winding. The independent
+6,000-case holdout dropped from seven to six forward differences and
+from six to five reverse differences, with no new mismatching cases.
+The wider 5,000-case sweep still matches in each direction.
+
+Two of the remaining geometries disagree in both directions. In an
+isolated endpoint calculation, paired sine and cosine preserved the
+nonzero separation seen in the native turn trace. Separate sine and
+cosine rounded the endpoints together and triggered turn rejection.
+
 ## Current-head overlay check
 
 A current-head rerun still finds 11/448 geographic line/polygon relation

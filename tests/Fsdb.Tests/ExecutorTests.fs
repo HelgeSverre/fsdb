@@ -19937,6 +19937,22 @@ let tests =
                             Expect.equal row [ Some expected; Some "0"; Some "0"; Some expected ] start
                         | result -> failtestf "unexpected line topology for {start} to {endpoint}: %A" result
 
+                testCase "geographic turns find a short interior interval near a polygon corner"
+                <| fun _ ->
+                    let store = newStore ()
+                    let area = "ST_GeomFromText('POLYGON((-64.66343677320666 -113.02252068969167,-64.66343677320666 -109.64680091283840,-64.61057200504574 -109.64680091283840,-64.61057200504574 -113.02252068969167,-64.66343677320666 -113.02252068969167),(-64.65022058116642 -112.17859074547836,-64.62378819708597 -112.17859074547836,-64.62378819708597 -110.49073085705172,-64.65022058116642 -110.49073085705172,-64.65022058116642 -112.17859074547836))',4326)"
+                    for first, last, crossing in
+                        [ "-64.61712401172909 -115.20242344681758", "-64.60618158984728 -112.47547361907496", "1"
+                          "-64.61612401172908 -115.20242344681758", "-64.60518158984728 -112.47547361907496", "1"
+                          "-64.61512401172909 -115.20242344681758", "-64.60418158984729 -112.47547361907496", "0" ] do
+                        for start, endpoint in [ first, last; last, first ] do
+                            let line = $"ST_GeomFromText('LINESTRING({start},{endpoint})',4326)"
+                            let sql = $"SELECT ST_Intersects({line},{area}),ST_Crosses({line},{area}),ST_Touches({line},{area}),ST_Within({line},{area})"
+                            match runDefault store sql with
+                            | ResultSet(_, [ row ]) ->
+                                Expect.equal row [ Some crossing; Some crossing; Some "0"; Some "0" ] line
+                            | result -> failtestf "unexpected line topology for {line}: %A" result
+
                 testCase "geographic line-polygon topology distinguishes crossing and boundaries"
                 <| fun _ ->
                     let store = newStore ()

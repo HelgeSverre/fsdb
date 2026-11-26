@@ -3224,8 +3224,9 @@ implementation effort:
    close the remaining cases in the 70-case offset sweep.
    [Reduced-latitude tangent and rounded turn rejection](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#reduced-latitude-tangent-and-rounded-turn-rejection)
    close the dense offset sweep and the wider forward and reverse WGS 84
-   sweeps. Seven forward and six reverse differences remain in the
-   independent holdout.
+   sweeps. [Ordered proper entry and exit cuts](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#interior-interval-between-two-proper-turns)
+   recover the short corner crossing that sampling missed. Six forward
+   and five reverse differences remain in the independent holdout.
    Broader non-point topology beyond [point/line membership](torture/findings/2026-10-11-geographic-point-line-topology.md) and [point/polygon membership](torture/findings/2026-10-11-geographic-point-polygon-topology.md),
    and other reference systems remain open.
 

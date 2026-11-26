@@ -1388,7 +1388,9 @@ let private tryGeographicPairedTurns referenceSystem ((start, endpoint) as segme
                 |> Option.orElseWith (fun () -> tryAlongSpan last first following preceding)
             | _ -> None))
 
-let private tryGeographicSingleTurn referenceSystem ((start, endpoint) as segment) rings sampled =
+type private GeographicAreaTurnDirection = Entry | Exit
+
+let private tryGeographicLineAreaTurns referenceSystem ((start, endpoint) as segment) rings sampled =
     let side = geographicTurnSide referenceSystem
 
     let edges =
@@ -1403,11 +1405,27 @@ let private tryGeographicSingleTurn referenceSystem ((start, endpoint) as segmen
             // A solved intersection can still be rejected by the relation's endpoint rule.
             |> Option.filter (fun _ -> not (rejectsRoundedTurn edge))
             |> Option.map (fun point -> edge, point))
-        |> Seq.truncate 2
+        |> fun turns -> if sampled.Intersects then Seq.truncate 2 turns else turns
         |> Seq.toList
 
     let sharesEndpoint edge =
         geographicSharedSegmentEndpoints referenceSystem segment edge |> List.isEmpty |> not
+
+    let sourceStart, sourceEnd = geographicPointRadians start, geographicPointRadians endpoint
+    let directedPosition () =
+        let spheroid, _ = geographicIntersectionSpheroid referenceSystem
+        let distance = geographicInverseDistanceRadians false spheroid
+        // The intersection strategy orders endpoints by latitude. Reverse its ratio
+        // for a descending source so that positions increase in source order.
+        if fst sourceStart > fst sourceEnd then
+            let fromEnd = distance sourceEnd
+            let length = fromEnd sourceStart
+            length, fun point -> length - fromEnd point
+        else
+            distance sourceStart sourceEnd, distance sourceStart
+
+    let isEdgeVertex first last point =
+        equalGeographicCoordinates point first || equalGeographicCoordinates point last
 
     match crossings with
     | [] when sampled.Crosses
@@ -1422,9 +1440,8 @@ let private tryGeographicSingleTurn referenceSystem ((start, endpoint) as segmen
         | _ -> None
     | [ ((first, last) as edge), point ] ->
         let a, b = geographicPointRadians first, geographicPointRadians last
-        let sourceStart, sourceEnd = geographicPointRadians start, geographicPointRadians endpoint
         let endpointContact = edges |> List.exists (fun other -> other <> edge && sharesEndpoint other)
-        if endpointContact || equalGeographicCoordinates point a || equalGeographicCoordinates point b then None
+        if endpointContact || isEdgeVertex a b point then None
         else
             let fromInside = geographicTurnArrivesFromInside side a b point sourceStart
             match side a b sourceEnd with
@@ -1433,17 +1450,32 @@ let private tryGeographicSingleTurn referenceSystem ((start, endpoint) as segmen
                 Some geographicLineAreaTouch
             // An entry can expose an interior interval missed by sampling.
             | -1 when not sampled.Intersects && not fromInside ->
-                let spheroid, _ = geographicIntersectionSpheroid referenceSystem
-                let distance = geographicInverseDistanceRadians false spheroid
-                // For a descending segment, the ordered intersection strategy
-                // subtracts the cut distance from the total.
-                let startDistance =
-                    if fst sourceStart > fst sourceEnd then distance sourceEnd sourceStart - distance sourceEnd point
-                    else distance sourceStart point
-
-                if startDistance > 0.0 then Some geographicLineAreaCrossing
+                let _, position = directedPosition ()
+                if position point > 0.0 then Some geographicLineAreaCrossing
                 else None
             | _ -> None
+    | _ :: _ :: _ when not sampled.Intersects ->
+        let length, position = directedPosition ()
+        let turns =
+            crossings
+            |> List.choose (fun ((first, last), point) ->
+                let a, b = geographicPointRadians first, geographicPointRadians last
+                let offset = position point
+                if offset <= 0.0 || offset >= length || isEdgeVertex a b point then None
+                else
+                    let fromInside = geographicTurnArrivesFromInside side a b point sourceStart
+                    match side a b sourceEnd, fromInside with
+                    | -1, false -> Some(offset, Entry)
+                    | 1, true -> Some(offset, Exit)
+                    | _ -> None)
+        // An entry followed by an exit establishes an interior interval even
+        // when the distance-based sampling misses every point in that interval.
+        let hasInterior =
+            turns
+            |> List.sortBy fst
+            |> List.pairwise
+            |> List.exists (function (lower, Entry), (upper, Exit) -> lower < upper | _ -> false)
+        if hasInterior then Some geographicLineAreaCrossing else None
     | _ -> None
 
 let internal geographicLinePolygonTopology referenceSystem lines polygons =
@@ -1456,7 +1488,7 @@ let internal geographicLinePolygonTopology referenceSystem lines polygons =
                 if sampled.LineWithinPolygon then tryGeographicPairedTurns referenceSystem segment rings
                 else None
             paired |> Option.orElseWith (fun () ->
-                if sampled.Crosses || not sampled.Intersects then tryGeographicSingleTurn referenceSystem segment rings sampled
+                if sampled.Crosses || not sampled.Intersects then tryGeographicLineAreaTurns referenceSystem segment rings sampled
                 else None)
         | _ -> None
     Option.defaultValue sampled refined
