@@ -11906,27 +11906,34 @@ let prepareXa
     (baseCatalog: Catalog)
     (snapshot: Store)
     : bool =
+    let events = transactionEvents snapshot
+    let transactionLocks =
+        if events.IsEmpty then None else snapshot.TransactionLocks
+
     let lockClaims =
-        snapshot.TransactionLocks
+        transactionLocks
         |> Option.map (fun context -> lock context.LockClaims (fun () -> context.LockClaims |> Seq.sort |> List.ofSeq))
         |> Option.defaultValue []
 
     let prepared =
         { BaseCatalog = baseCatalog
           Catalog = snapshot.Catalog
-          Events = transactionEvents snapshot
+          Events = events
           LockClaims = lockClaims
-          ValidateWholeSnapshot = validateWholeSnapshot
-          TransactionLocks = snapshot.TransactionLocks }
+          ValidateWholeSnapshot = validateWholeSnapshot && not events.IsEmpty
+          TransactionLocks = transactionLocks }
 
     lock store.PreparedXas (fun () ->
         if store.PreparedXas.TryAdd(xid, prepared) then
             try
-                persistXaControl store (XaPrepared(xid, validateWholeSnapshot, lockClaims, prepared.Events))
-                true
+                persistXaControl store (XaPrepared(xid, prepared.ValidateWholeSnapshot, lockClaims, events))
             with error ->
                 store.PreparedXas.TryRemove xid |> ignore
                 raise error
+
+            // The prepared XID stays recoverable even when there is no work left to lock.
+            if events.IsEmpty then releaseTransactionLocks snapshot
+            true
         else
             false)
 
@@ -11946,7 +11953,11 @@ let internal restorePreparedXaLocks (store: Store) : unit =
             |> List.ofSeq
 
         for xid, prepared in branches do
-            if prepared.TransactionLocks.IsNone && not prepared.LockClaims.IsEmpty then
+            // Older snapshots and WAL records may contain locks for an empty branch.
+            if prepared.Events.IsEmpty then
+                store.PreparedXas.[xid] <-
+                    { prepared with LockClaims = []; ValidateWholeSnapshot = false }
+            elif prepared.TransactionLocks.IsNone && not prepared.LockClaims.IsEmpty then
                 let snapshot = beginTransactionContext store
 
                 try

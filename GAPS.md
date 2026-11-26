@@ -851,10 +851,11 @@ until `UNLOCK TABLES`, including permanent writes whose SELECT source is
 temporary. The lock owner receives 1223 for the same mixed write.
 
 XA branches use the same private snapshots and conflict validation. Prepared
-branches detach from their sessions, survive WAL recovery, remain invisible
-until completion, and retain their shared row, exclusive row, and unique-key
-claims after restart. Snapshot truncation waits until every prepared branch has
-resolved.
+branches detach from their sessions, survive WAL recovery, and remain invisible
+until completion. Preparing a branch with no changes releases its row locks
+while keeping its XID recoverable. Prepared writing branches retain their
+shared row, exclusive row, and unique-key claims after restart. Snapshot
+truncation waits until every prepared branch has resolved.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
@@ -3116,8 +3117,10 @@ implementation effort:
    isolation. Broader scan plans remain open. [Missing-key gap
    locks](benchmarks/results/2026-11-25-bound-joined-view-update.md#scope-of-the-missing-key-gap)
    cover the interval between neighboring primary keys in MySQL at
-   REPEATABLE READ and SERIALIZABLE. That interval and other outer join
-   access paths remain open. An audited
+   REPEATABLE READ and SERIALIZABLE. The [schedule oracle](torture/findings/2026-11-26-joined-view-primary-key-gaps.md)
+   also covers key moves, shared holders, unbounded intervals, changes to
+   neighboring keys, and the lifetime of gaps in prepared XA branches.
+   Gap protection and other outer join access paths remain open. An audited
    [nested checked view LEFT JOINed to a window CTE](torture/findings/2026-11-17-nested-window-outer-view.md)
    correctly remains read only, matching MySQL's metadata, rows, CHECK OPTION
    rejection, and mutation rejection. Procedures, functions, and triggers

@@ -1037,60 +1037,46 @@ let tests =
               let emptyStore = load dir
               attach dir emptyStore
               let emptySession = Fsdb.Session.create 5 emptyStore
+              let emptySession = run emptySession "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE"
               let emptySession = run emptySession "XA START 'durable-empty'"
               let emptySession = run emptySession "SELECT id FROM xa_durable WHERE id = 1 FOR SHARE"
               let emptySession = run emptySession "XA END 'durable-empty'"
               let _ = run emptySession "XA PREPARE 'durable-empty'"
-              let recoveredEmpty = load dir
-              attach dir recoveredEmpty
 
               let sharedRowId =
-                  match tryUniqueLookup recoveredEmpty defaultDatabase "xa_durable" "id" (VInt 1L) with
+                  match tryUniqueLookup emptyStore defaultDatabase "xa_durable" "id" (VInt 1L) with
                   | Some(_, [ rowId, _ ]) -> rowId
-                  | other -> failtestf "expected the row locked by the recovered branch, got %A" other
+                  | other -> failtestf "expected the row read by the prepared branch, got %A" other
 
-              let sharedCompetitor = beginTransactionContext recoveredEmpty
-
-              acquireTransactionReadTargets
-                  TimeSpan.Zero
-                  sharedCompetitor
-                  defaultDatabase
-                  "xa_durable"
-                  ShareLock
-                  WaitForLocks
-                  [ sharedRowId ]
-              |> ignore
-
-              Expect.throwsT<LockNowait>
-                  (fun () ->
-                      acquireTransactionReadTargets
-                          TimeSpan.Zero
-                          sharedCompetitor
-                          defaultDatabase
-                          "xa_durable"
-                          UpdateLock
-                          NoWait
+              let expectRowAvailable current =
+                  let competitor = beginTransactionContext current
+                  try
+                      Expect.equal
+                          (acquireTransactionReadTargets TimeSpan.Zero competitor defaultDatabase "xa_durable"
+                              UpdateLock NoWait [ sharedRowId ])
                           [ sharedRowId ]
-                      |> ignore)
-                  "the WAL-recovered shared lock rejects an exclusive claim"
+                          "an empty prepared branch releases the row"
+                  finally
+                      releaseTransactionLocks competitor
 
-              releaseTransactionLocks sharedCompetitor
-              let emptyRecovery = Fsdb.Session.create 6 recoveredEmpty
+              expectRowAvailable emptyStore
+              let recoveredEmpty = load dir
+              expectRowAvailable recoveredEmpty
+              let xid, prepared = preparedXas recoveredEmpty |> List.exactlyOne
+              recoveredEmpty.PreparedXas.[xid] <-
+                  { prepared with
+                      ValidateWholeSnapshot = true
+                      LockClaims = [ SharedRowLock(defaultDatabase, "xa_durable", sharedRowId) ] }
+              snapshotNow dir recoveredEmpty
+              let legacyEmpty = load dir
+              expectRowAvailable legacyEmpty
+              attach dir legacyEmpty
+              let emptyRecovery = Fsdb.Session.create 6 legacyEmpty
+              let emptyRecovery = run emptyRecovery "UPDATE xa_durable SET id=3 WHERE id=1"
               let _ = run emptyRecovery "XA COMMIT 'durable-empty'"
 
-              let releasedReader = beginTransactionContext recoveredEmpty
-
-              acquireTransactionReadTargets
-                  TimeSpan.Zero
-                  releasedReader
-                  defaultDatabase
-                  "xa_durable"
-                  UpdateLock
-                  NoWait
-                  [ sharedRowId ]
-              |> ignore
-
-              releaseTransactionLocks releasedReader
+              Expect.equal (rowsOf legacyEmpty defaultDatabase "xa_durable") [ [| VInt 3L |] ]
+                  "completing the empty serializable branch leaves the later write visible"
 
               match handle (Fsdb.Session.create 7 (load dir)) "XA RECOVER" |> snd with
               | ResultSet(_, []) -> ()
