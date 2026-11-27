@@ -257,6 +257,21 @@ let tests =
                       let ids = booleanScores index term |> Map.keys |> Seq.toList
                       Expect.equal ids expected (name + " " + term)
 
+          testCase "accent-sensitive ngram prefixes can end inside CJK expansions"
+          <| fun _ ->
+              let documents =
+                  [ 1, "㍿中"; 2, "株中"; 3, "㌔中"; 4, "キ中"; 5, "ヿ中"; 6, "こと中"
+                    7, "ゟ中"; 8, "より中"; 9, "한中"; 10, "하中"; 11, "ᄒ中"; 12, "花束"; 13, "㌐中" ]
+              let collation = tryFind "utf8mb4_0900_as_ci" |> Option.get
+              let index = buildIndexWithTokenizer (Ngrams 2) collation documents
+              Expect.isEmpty (booleanScores index "ギ*") "cached prefixes do not match a synthetic voiced spelling"
+              for view in [ index; flushPostings index ] do
+                  for term, expected in
+                      [ "株*", [ 1; 2 ]; "キ*", [ 3; 4; 13 ]; "こ*", [ 5; 6 ]; "ヿ*", [ 5; 6 ]
+                        "よ*", [ 7; 8 ]; "ゟ*", [ 7; 8 ]; "ᄒ*", [ 9; 10; 11 ]; "하*", [ 9; 10 ] ] do
+                      let ids = booleanScores view term |> Map.keys |> Seq.toList
+                      Expect.equal ids expected term
+
           testCase "Unicode 5.2 ngrams share padded space keys but retain Mongolian separator weight"
           <| fun _ ->
               let collation = tryFind "utf8mb4_unicode_520_ci" |> Option.get

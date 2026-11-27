@@ -33,7 +33,7 @@ a phrase on flushed postings.
 The [Kana and Jamo follow-up](2026-11-27-ngram-kana-and-jamo.md) covers
 the outstanding Kana and Hangul equivalences in a dedicated mixed
 corpus. Accent-sensitive wildcards and broader flushed-posting ranking
-remain open.
+remain open beyond the [audited CJK expansion cases](2026-11-27-ngram-accent-sensitive-prefixes.md).
 
 MySQL's [InnoDB wildcard cache search](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L844-L875)
 uses the [UCA prefix comparison](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/strings/ctype-uca.cc#L1667-L1717).
