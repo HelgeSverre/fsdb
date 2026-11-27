@@ -8593,4 +8593,36 @@ let tests =
               let gap = handle observer "INSERT INTO gate VALUES (1,15,4)" |> snd
               TestSupport.Sql.expectOk (handle reader "ROLLBACK" |> snd) "release the read gaps"
               Expect.equal predecessor (ResultSet([ "n" ], [ [ Some "2" ] ])) "the rejected row stays available"
-              TestSupport.Sql.expectError 1205 gap "the gap before the rejected row is protected" ]
+              TestSupport.Sql.expectError 1205 gap "the gap before the rejected row is protected"
+
+          testCase "zero-row locking reads validate SQL without claiming rows"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let store = Fsdb.Storage.create ()
+              let admin = create 1 store
+              run admin "CREATE TABLE gate(id INT PRIMARY KEY,n INT)" (Affected 0UL) |> ignore
+              run admin "INSERT INTO gate VALUES (1,1),(2,2)" (Affected 2UL) |> ignore
+              let holder = run (create 2 store) "START TRANSACTION" (Affected 0UL)
+              let holder = run holder "UPDATE gate SET n=20 WHERE id=2" (Affected 1UL)
+              let reader = run (create 3 store) "START TRANSACTION" (Affected 0UL)
+              let empty = ResultSet([ "id" ], [])
+              let reader =
+                  [ "SELECT id FROM gate LIMIT 0 FOR UPDATE NOWAIT"
+                    "SELECT id FROM gate WHERE id=2 LIMIT 0 OFFSET 0 FOR SHARE NOWAIT"
+                    "SELECT a.id FROM gate a JOIN gate b ON a.id=b.id LIMIT 0 FOR UPDATE OF a NOWAIT"
+                    "SELECT id FROM (SELECT id FROM gate FOR UPDATE NOWAIT) d LIMIT 0"
+                    "WITH c AS (SELECT id FROM gate FOR UPDATE NOWAIT) SELECT id FROM c LIMIT 0"
+                    "(SELECT id FROM gate FOR UPDATE NOWAIT) UNION ALL (SELECT id FROM gate) LIMIT 0" ]
+                  |> List.fold (fun session sql -> run session sql empty) reader
+              let reader, wrongTarget = handle reader "SELECT id FROM gate LIMIT 0 FOR UPDATE OF absent NOWAIT"
+              let reader, wrongColumn = handle reader "SELECT absent FROM gate LIMIT 0 FOR UPDATE NOWAIT"
+              run holder "ROLLBACK" (Affected 0UL) |> ignore
+              let probe = "SELECT id FROM gate WHERE id=1 FOR UPDATE NOWAIT"
+              let available = handle admin probe |> snd
+              run reader "ROLLBACK" (Affected 0UL) |> ignore
+              TestSupport.Sql.expectError 3568 wrongTarget "validate the locking target"
+              TestSupport.Sql.expectError 1054 wrongColumn "validate the projection"
+              Expect.equal available (ResultSet([ "id" ], [ [ Some "1" ] ])) "rows remain available" ]

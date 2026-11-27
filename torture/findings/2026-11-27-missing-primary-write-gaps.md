@@ -178,3 +178,30 @@ available for updates.
 
 Ranges that require a filesort or have competing access paths remain
 outside the audited `NOWAIT` and `SKIP LOCKED` coverage.
+
+## Locking reads with LIMIT 0
+
+With a plain `LIMIT 0` or `LIMIT 0 OFFSET 0`, MySQL validates the query
+and takes its normal table metadata locks. It skips row admission in
+that query block and its inputs. Fsdb now does the same, including for
+joins, derived tables, CTEs, and UNION branches. Invalid column names
+and locking targets still report their ordinary errors.
+
+To reproduce, let one transaction update key 2 in `t`. In another
+transaction `SELECT id FROM t LIMIT 0 FOR UPDATE NOWAIT` returns a typed
+empty result. Key 1 remains available to a third session. That session's
+`ALTER TABLE t ADD COLUMN note INT` waits until the reader ends its
+transaction. A prepared statement bound to limit zero has the same
+row behavior. Executing it again with limit one reports 3572 if the
+requested row is still locked.
+
+The comparison matched MySQL 8.4.11 in 508 cases in memory and with WAL
+enabled. It covered all four isolation levels, both lock strengths, each
+wait mode, explicit transactions, autocommit, and validation errors.
+
+`SQL_CALC_FOUND_ROWS` and a positive `OFFSET` can still scan and lock
+records with `LIMIT 0`. The no-offset shortcut excludes those cases.
+Zero-limit positive offsets still differ in how many rows they visit.
+MySQL also includes consumed offsets in `FOUND_ROWS()` without
+`SQL_CALC_FOUND_ROWS`. With four matching rows, `LIMIT 1 OFFSET 2`
+returns one row and reports three in MySQL, while fsdb reports one.

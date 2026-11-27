@@ -1114,6 +1114,7 @@ let private triggerRowScope = System.Threading.AsyncLocal<TriggerRowScope option
 let private observedTriggerWrites = System.Threading.AsyncLocal<(Value[] * HashSet<int>) option>()
 let private viewCheckScope = System.Threading.AsyncLocal<ViewCheckScope option>()
 let private lockingReadRows = System.Threading.AsyncLocal<Map<string, Set<RowId>>>()
+let private suppressReadRowLocks = new System.Threading.ThreadLocal<bool>()
 let private committedFullTextStore = System.Threading.AsyncLocal<Store option>()
 let private lockingReadStore = System.Threading.AsyncLocal<(unit -> Store) option>()
 let private lockingReadTimeout = System.Threading.AsyncLocal<System.TimeSpan option>()
@@ -15636,6 +15637,7 @@ and private prepareLockingRead
                 |> List.tryFind (fun (_, count) -> count > 1)
             with
             | Some(name, _) -> Error(Err(3569, sprintf "Table `%s` appears in multiple locking clauses." name))
+            | None when suppressReadRowLocks.Value -> Ok Map.empty
             | None ->
                 let rowIdsFor (source: LockingReadSource) =
                     if sources.Length = 1 && select.Joins.IsEmpty then
@@ -15679,7 +15681,12 @@ and private runSelectStmt
     let rangesBefore =
         if select.Limit.IsSome then Some(HashSet<Expr>(rangeSetups.Keys, HashIdentity.Reference))
         else None
-    let result = runSelectStmtCore store registry dbName select outer
+    let result =
+        if select.Limit.IsSome && not select.CalculateFoundRows && not suppressReadRowLocks.Value
+           && zeroLimitWithoutOffset select.Limit select.Offset then
+            DynamicScope.withThreadValue suppressReadRowLocks true (fun () ->
+                runSelectStmtCore store registry dbName select outer)
+        else runSelectStmtCore store registry dbName select outer
     if hasZeroRowLimit select then
         pendingBefore |> Option.iter rollbackCorrelatedNumericWarnings
         rangesBefore |> Option.iter (fun before ->
@@ -21225,6 +21232,10 @@ and private rowCount =
 and private hasZeroRowLimit (select: SelectStmt) =
     select.Limit |> Option.exists (fun limit -> rowCount limit = 0)
 
+and private zeroLimitWithoutOffset limit offset =
+    (limit |> Option.exists (fun expression -> rowCount expression = 0))
+    && (offset |> Option.forall (fun expression -> rowCount expression = 0))
+
 and private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a list) : 'a list =
     let afterOffset =
         match offset with
@@ -21579,7 +21590,11 @@ and private runUnionStmtWithOuter
     : QueryResult * ColumnMetadata list * Value[] list =
     // A `WITH` clause ahead of a UNION is parsed onto the first branch (see
     // `Parser.withClause`) but scopes over every branch.
-    if not first.Ctes.IsEmpty then
+    if limitExpr.IsSome && not first.CalculateFoundRows && not suppressReadRowLocks.Value
+       && zeroLimitWithoutOffset limitExpr offsetExpr then
+        DynamicScope.withThreadValue suppressReadRowLocks true (fun () ->
+            runUnionStmtWithOuter store registry dbName first rest orderBy limitExpr offsetExpr outer)
+    elif not first.Ctes.IsEmpty then
         let body = UnionSelect({ first with Ctes = [] }, rest, orderBy, limitExpr, offsetExpr)
         let ctes = referencedCtes first.Ctes (selectOrUnionTableNames body)
         withCteScope store registry dbName ctes outer (fun () ->

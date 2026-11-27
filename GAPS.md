@@ -949,6 +949,9 @@ under REPEATABLE READ and SERIALIZABLE.
 stop at the limit and keep the visited locks after a conflict. The
 corresponding `SKIP LOCKED` ranges count unlocked rows toward the limit
 and preserve the gaps at the records they visit successfully.
+[Locking reads with `LIMIT 0` and no offset](torture/findings/2026-11-27-missing-primary-write-gaps.md#locking-reads-with-limit-0)
+validate the statement and retain table metadata without claiming rows,
+including when the locking read is inside a subquery, CTE, or UNION.
 
 [Unique secondary-key moves](torture/findings/2026-11-27-unique-secondary-key-moves.md)
 now hold the destination key through commit or rollback, including in a
