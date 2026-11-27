@@ -19,7 +19,7 @@ type ExplainRow =
       Table: string option
       Type: string option
       Key: ExplainKey option
-      Ref: string option
+      Ref: string list option
       Rows: uint64 option
       Extra: string list }
 
@@ -79,7 +79,8 @@ let renderJson (shape: ExplainJsonShape) (derivedAliases: Map<int, string>) (row
             key.Length |> Option.iter (fun value -> table["key_length"] <- JsonValue.Create(string value)))
 
         row.Ref
-        |> Option.iter (fun value -> table["ref"] <- jsonArray [ JsonValue.Create(value) ])
+        |> Option.iter (fun values ->
+            table["ref"] <- values |> List.map (fun value -> JsonValue.Create(value) :> JsonNode) |> jsonArray)
 
         row.Rows
         |> Option.iter (fun value ->
@@ -134,7 +135,8 @@ let renderJson (shape: ExplainJsonShape) (derivedAliases: Map<int, string>) (row
             |> Option.iter (fun derivedRows ->
                 let materialized = JsonObject()
                 materialized["using_temporary_table"] <- JsonValue.Create(true)
-                materialized["dependent"] <- JsonValue.Create(false)
+                let dependent = derivedRows |> List.exists (fun row -> row.SelectType = "DEPENDENT DERIVED")
+                materialized["dependent"] <- JsonValue.Create(dependent)
                 materialized["cacheable"] <- JsonValue.Create(true)
                 materialized["query_block"] <- queryBlock derivedBlocks NoNestedSubqueries derivedRows
                 let table = item["table"] :?> JsonObject
@@ -287,9 +289,10 @@ let renderJson (shape: ExplainJsonShape) (derivedAliases: Map<int, string>) (row
         branchRows
         |> List.groupBy _.Id
         |> List.choose (fun (id, grouped) -> id |> Option.map (fun value -> value, grouped))
+    let isDerived row = row.SelectType = "DERIVED" || row.SelectType = "DEPENDENT DERIVED"
     let derivedBlocks =
         sorted
-        |> List.filter (fun row -> row.SelectType = "DERIVED")
+        |> List.filter isDerived
         |> List.choose (fun row -> row.Id |> Option.map (fun id -> id, row))
         |> List.groupBy fst
         |> List.map (fun (id, grouped) -> id, grouped |> List.map snd)
@@ -335,7 +338,7 @@ let renderJson (shape: ExplainJsonShape) (derivedAliases: Map<int, string>) (row
                 row.SelectType = "PRIMARY"
                 || row.SelectType = "UNION"
                 || row.SelectType = "UNION RESULT"
-                || row.SelectType = "DERIVED"
+                || isDerived row
                 || row.SelectType = "SUBQUERY"
                 || row.SelectType = "DEPENDENT SUBQUERY"))
         && (shape.AllowDerived || derivedBlocks.IsEmpty)
@@ -357,7 +360,7 @@ let renderJson (shape: ExplainJsonShape) (derivedAliases: Map<int, string>) (row
             && (sorted
                 |> List.forall (fun row ->
                     row.SelectType = "PRIMARY"
-                    || row.SelectType = "DERIVED"
+                    || isDerived row
                     || row.SelectType = "SUBQUERY"
                     || row.SelectType = "DEPENDENT SUBQUERY"))
             && (match placement with
@@ -392,7 +395,7 @@ let renderJson (shape: ExplainJsonShape) (derivedAliases: Map<int, string>) (row
             && (sorted
                 |> List.forall (fun row ->
                     row.SelectType = "PRIMARY"
-                    || row.SelectType = "DERIVED"
+                    || isDerived row
                     || row.SelectType = "DEPENDENT SUBQUERY"))
             && (placements |> List.sumBy snd) = subqueryBlocks.Length
         | _ -> false
@@ -405,6 +408,10 @@ let renderJson (shape: ExplainJsonShape) (derivedAliases: Map<int, string>) (row
         | MixedSelectJson placements when plainMixedSelectShape placements ->
             let branchId, branchRows = List.head branches
             queryBlock derivedBlocks (nestedBranchSubqueries branchId placements) branchRows
+        | SelectJson _ when subqueryBlocks.IsEmpty
+                            && List.exists (fun row -> row.SelectType = "DEPENDENT DERIVED") sorted
+                            && (derivedBlocks |> Map.keys |> Set.ofSeq) = referencedDerivedIds ->
+            queryBlock derivedBlocks NoNestedSubqueries (sorted |> List.filter (isDerived >> not))
         | UnionJson unionShape when plainBranchShape unionShape ->
             let unionResult = JsonObject()
             unionResult["using_temporary_table"] <- JsonValue.Create(unionShape.Materialized)

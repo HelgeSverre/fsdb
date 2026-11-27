@@ -28,5 +28,29 @@ limit.
 
 MySQL sorts the observed inner matches in this fixture. Fsdb reads them
 in the requested index suffix order, so the two engines can report
-different inner row and loop counts. Static EXPLAIN, runtime details for
-other access paths, and MySQL's full iterator tree remain open.
+different inner row and loop counts. Runtime details for other access
+paths and MySQL's full iterator tree remain open.
+
+## Static EXPLAIN
+
+Replace `EXPLAIN ANALYZE` with `EXPLAIN` in the same SQL fixture to see
+the selected index and the leading key parts bound by the outer query.
+Fsdb reports `ref`, `recent`, and the references `o.tenant,const` with
+the outer table's schema name. The lateral input is a dependent derived
+block, including when an index hint forces it to scan. The scalar
+queries keep their own plans when they reuse the same alias.
+
+Both Fsdb storage modes matched MySQL 8.4.11 on the inner select type,
+access type, key, key length, and references for all 192 variants, up from
+64 matches at `45030f74`. These
+varied signed and unsigned integer keys, binary and case-insensitive text
+keys, scalar and lateral blocks, empty outer inputs, qualified and bare
+outer references across schemas, forward and reverse index order, and
+index hints.
+
+JSON renders the references as separate entries and shows the access under
+the dependent lateral input. TREE names the selected key. The runtime plan
+remains responsible for reporting how many invocations seek or fall back for
+individual values. Estimates for those probes, outer scopes containing
+materialized sources, and nested zero-limit prepared plan details remain
+open. [MySQL EXPLAIN output](https://dev.mysql.com/doc/refman/8.4/en/explain-output.html)

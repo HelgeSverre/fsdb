@@ -106,9 +106,58 @@ let tests =
               Expect.hasLength indexedBlocks 1 "the index observation belongs only to the block that used it"
               Expect.isTrue (mixedPlan |> List.exists (fun line -> line.Contains "ALL on e")) "the hinted sibling retains its scan"
 
+              let staticAccess sql =
+                  match runDefault store ("EXPLAIN " + sql) with
+                  | ResultSet(_, rows) ->
+                      rows
+                      |> List.choose (function
+                          | _ :: kind :: Some "e" :: _ :: access :: _ :: key :: _ :: reference :: _ ->
+                              Some(kind, access, key, reference)
+                          | _ -> None)
+                  | other -> failtestf "expected a static plan, got %A" other
+
+              let indexedAccess (kind: string) =
+                  Some kind, Some "ref", Some "recent", Some "fsdb.o.tenant,const"
+
+              Expect.equal (staticAccess (query "")) [ indexedAccess "DEPENDENT DERIVED" ] "the lateral plan binds the index prefix"
+              Expect.equal (staticAccess reverse) [ indexedAccess "DEPENDENT SUBQUERY" ] "the scalar plan binds the same index prefix"
+              Expect.containsAll (staticAccess mixed)
+                  [ indexedAccess "DEPENDENT SUBQUERY"; Some "DEPENDENT SUBQUERY", Some "ALL", None, None ]
+                  "the hinted sibling retains its scan in the static plan"
+              Expect.equal (staticAccess (query "IGNORE INDEX FOR JOIN (recent)"))
+                  [ Some "DEPENDENT DERIVED", Some "ALL", None, None ] "a join-scoped hint rules out the ordered lookup"
+
+              match runDefault store ("EXPLAIN FORMAT=JSON " + query "") with
+              | ResultSet([ "EXPLAIN" ], [ [ Some json ] ]) ->
+                  let root = (System.Text.Json.Nodes.JsonNode.Parse json).["query_block"]
+                  let child = root.["nested_loop"].[1].["table"].["materialized_from_subquery"]
+                  let inner = child.["query_block"].["table"]
+                  Expect.isTrue (child.["dependent"].GetValue<bool>()) "the lateral plan is a dependent source"
+                  Expect.isTrue (child.["cacheable"].GetValue<bool>()) "the lateral materialization retains its cacheable flag"
+                  Expect.equal (inner.["key"].GetValue<string>()) "recent" "the index is in the lateral block"
+                  let references = inner.["ref"].AsArray() |> Seq.map (fun value -> value.GetValue<string>()) |> Seq.toList
+                  Expect.equal references [ "fsdb.o.tenant"; "const" ] "JSON renders each key-part reference separately"
+              | other -> failtestf "expected a JSON plan, got %A" other
+
+              match runDefault store ("EXPLAIN FORMAT=TREE " + reverse) with
+              | ResultSet([ "EXPLAIN" ], rows) ->
+                  let plan = rows |> List.choose (List.tryHead >> Option.flatten) |> String.concat "\n"
+                  Expect.stringContains plan "ref on e using recent (fsdb.o.tenant,const)" "the tree names the selected index"
+              | other -> failtestf "expected a tree plan, got %A" other
+
+              Expect.equal (runDefault store "ALTER TABLE evt ADD UNIQUE KEY preferred(tenant,state,stamp DESC,id)")
+                  (Affected 0UL) "add a competing ordered index"
+              Expect.equal (staticAccess reverse)
+                  [ Some "DEPENDENT SUBQUERY", Some "ref", Some "preferred", Some "fsdb.o.tenant,const" ]
+                  "the static plan uses storage's preferred index"
+              let competing = planLines reverse |> String.concat "\n"
+              Expect.stringContains competing "Ordered index lookup on e using preferred" "execution chose the same index"
+              Expect.equal (runDefault store "ALTER TABLE evt DROP INDEX preferred") (Affected 0UL) "remove the competing index"
+
               match runDefault store "DELETE FROM outer_row" with
               | Affected _ -> ()
               | other -> failtestf "could not empty the outer source: %A" other
+              Expect.equal (staticAccess (query "")) [ indexedAccess "DEPENDENT DERIVED" ] "static planning needs no outer data"
               let emptyPlan = planLines (query "") |> String.concat "\n"
               Expect.stringContains emptyPlan "rows=0 loops=1" "the root returns no rows"
               Expect.isFalse (emptyPlan.Contains "Ordered index lookup") "binding an empty lateral source does not record a lookup"

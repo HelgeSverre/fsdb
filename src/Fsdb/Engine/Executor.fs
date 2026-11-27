@@ -21304,9 +21304,7 @@ and private tryIndexOrder
                 tryFixedPrefixIndexOrder store registry dbName tref select.Where orderedColumns Set.empty []
                 |> Option.bind planLookup))
 
-/// Bind physical predicates to the current outer row for index planning.
-/// Keep the SQL predicate for residual evaluation before LIMIT and OFFSET.
-and private tryCorrelatedTopOrder store registry dbName (tref: TableRef) (select: SelectStmt) outer : Storage.OrderedLookup option =
+and private bindCorrelatedTopOrder store registry dbName (tref: TableRef) (select: SelectStmt) (outer: EvalContext option) readOuter =
     let directProjection (projection: Projection) =
         match projection.Expression with
         | Col _ | QualifiedCol _ | Star _ -> true
@@ -21353,8 +21351,8 @@ and private tryCorrelatedTopOrder store registry dbName (tref: TableRef) (select
                                 equalsIgnoreCase effective.Name (Collation.findOrDefault column.Collation).Name))
 
                     match bound with
-                    | LiteralValue VNull when comparison = NullSafeEq -> Some(key column VNull, false)
-                    | LiteralValue(VString _ as value) when usesStoredTextCollation None -> Some(key column value, false)
+                    | LiteralValue VNull when comparison = NullSafeEq -> Some(key column VNull, None)
+                    | LiteralValue(VString _ as value) when usesStoredTextCollation None -> Some(key column value, None)
                     | Col _ | QualifiedCol _ ->
                         let boundColumn = tryColumnDefForExpr context bound
                         let integerKey =
@@ -21363,16 +21361,16 @@ and private tryCorrelatedTopOrder store registry dbName (tref: TableRef) (select
                         let textKey () =
                             isTextColumn boundColumn && usesStoredTextCollation boundColumn
 
-                        match tryCorrelatedOuterValue source context bound with
-                        | Some(VInt _ | VUInt _ as value) when integerKey -> Some(key column value, true)
-                        | Some(VString _ as value) when textKey () -> Some(key column value, true)
+                        match readOuter source context bound boundColumn with
+                        | Some(VInt _ | VUInt _ as value) when integerKey -> Some(key column value, Some bound)
+                        | Some(VString _ as value) when textKey () -> Some(key column value, Some bound)
                         | Some VNull when comparison = NullSafeEq && (integerKey || textKey ()) ->
-                            Some(key column VNull, true)
+                            Some(key column VNull, Some bound)
                         | _ -> None
                     | _ -> None)
 
             let tryPrefixPin = function
-                | IsNull indexed -> indexedColumn indexed |> Option.map (fun column -> key column VNull, false)
+                | IsNull indexed -> indexedColumn indexed |> Option.map (fun column -> key column VNull, None)
                 | BinOp((Eq | NullSafeEq as comparison), left, right) ->
                     tryBoundPin comparison left right |> Option.orElseWith (fun () -> tryBoundPin comparison right left)
                 | _ -> None
@@ -21383,9 +21381,8 @@ and private tryCorrelatedTopOrder store registry dbName (tref: TableRef) (select
             else
                 let pins = clauses |> List.choose snd
                 let correlatedPins =
-                    pins |> List.choose (fun (pin, bindsOuterRow) ->
-                        if bindsOuterRow then Some(pin.Column.ToLowerInvariant()) else None)
-                    |> Set.ofList
+                    pins |> List.choose (fun (pin, reference) ->
+                        reference |> Option.map (fun expression -> pin.Column.ToLowerInvariant(), expression))
 
                 let safeOrder (term: IndexOrderTerm) =
                     term.Transform.IsNone
@@ -21403,12 +21400,20 @@ and private tryCorrelatedTopOrder store registry dbName (tref: TableRef) (select
                     indexOrderTerms registry tref select
                     |> Option.filter (fun terms ->
                         orderIsValid && List.forall safeOrder terms && indexOrderPreservesSqlTies table.Columns terms)
-                    |> Option.bind (fun terms ->
-                        let bound =
-                            Expression.rewrite (function
-                                | (Col _ | QualifiedCol _) as expression -> tryCorrelatedOuterValue source context expression |> Option.map Lit
-                                | _ -> None) predicate
-                        tryFixedPrefixIndexOrder store registry dbName tref (Some bound) terms correlatedPins (List.map fst pins)))
+                    |> Option.map (fun terms -> source, context, predicate, terms, List.map fst pins, correlatedPins))
+
+/// Bind physical predicates to the current outer row for index planning.
+/// Keep the SQL predicate for residual evaluation before LIMIT and OFFSET.
+and private tryCorrelatedTopOrder store registry dbName tref select outer : Storage.OrderedLookup option =
+    let readOuter source context expression _ = tryCorrelatedOuterValue source context expression
+    bindCorrelatedTopOrder store registry dbName tref select outer readOuter
+    |> Option.bind (fun (source, context, predicate, terms, pins, references) ->
+        let bound =
+            Expression.rewrite (function
+                | (Col _ | QualifiedCol _) as expression -> tryCorrelatedOuterValue source context expression |> Option.map Lit
+                | _ -> None) predicate
+        let correlatedPins = references |> List.map fst |> Set.ofList
+        tryFixedPrefixIndexOrder store registry dbName tref (Some bound) terms correlatedPins pins)
 
 and private tryEqualityPrefixOrder
     (store: Store)
@@ -22781,6 +22786,23 @@ and private orderedIndexPrefixMatches
                             |> Option.exists (fun rangeCount -> conjunctCount = pins.Length + rangeCount)) }))))
     |> Option.defaultValue []
 
+and private fixedPrefixOrderDirections (orderedTerms: IndexOrderTerm list) correlatedPins (matched: IndexPrefixMatch) =
+    let invert = function Asc -> Desc | Desc -> Asc
+    let bindsOuterKey =
+        Set.isEmpty correlatedPins
+        || (matched.Terms |> List.take matched.PinnedCount
+            |> List.exists (fun term -> Set.contains (term.Column.ToLowerInvariant()) correlatedPins))
+
+    if matched.PinnedCount = 0 || not bindsOuterKey then
+        None
+    else
+        let stored = matched.Terms |> List.map _.Direction
+        let storedSuffix = stored |> List.skip matched.PinnedCount
+        let requested = orderedTerms |> List.map _.Direction
+        if storedSuffix = requested then Some stored
+        elif List.map invert storedSuffix = requested then Some(List.map invert stored)
+        else None
+
 and private tryFixedPrefixIndexOrder
     (store: Store)
     (registry: Registry)
@@ -22791,46 +22813,25 @@ and private tryFixedPrefixIndexOrder
     (correlatedPins: Set<string>)
     (prefixPins: PointEquality list)
     : Storage.OrderedLookup option =
-    let invert = function Asc -> Desc | Desc -> Asc
-    let requestedDirections = orderedTerms |> List.map _.Direction
-    let orderAllowed = indexAllowedForOrderedAccess IndexOrderBy tref
-    let joinAllowed = indexHintsFor IndexJoin tref |> indexAllowedBy
-    let allowed name = orderAllowed name && (correlatedPins.IsEmpty || joinAllowed name)
+    let allowed = indexAllowedForOrderedAccess IndexOrderBy tref
 
     orderedIndexPrefixMatches IndexOrderBy store registry dbName tref whereExpr orderedTerms prefixPins
     |> List.tryPick (fun resolved ->
         let matched = resolved.Match
+        fixedPrefixOrderDirections orderedTerms correlatedPins matched
+        |> Option.bind (fun directions ->
+            let terms =
+                List.map2 (fun (term: IndexOrderTerm) direction -> { term with Direction = direction }) matched.Terms directions
+                |> storageOrderTerms
 
-        let bindsOuterKey =
-            correlatedPins.IsEmpty
-            || (matched.Terms |> List.take matched.PinnedCount
-                |> List.exists (fun term -> correlatedPins.Contains(term.Column.ToLowerInvariant())))
+            let lower, upper = fixedPrefixSuffixBounds store registry resolved.Table tref whereExpr matched
 
-        if matched.PinnedCount = 0 || not bindsOuterKey then
-            None
-        else
-            let stored = matched.Terms |> List.map _.Direction
-            let storedSuffix = stored |> List.skip matched.PinnedCount
-
-            let traversal =
-                if storedSuffix = requestedDirections then Some stored
-                elif storedSuffix |> List.map invert = requestedDirections then Some(stored |> List.map invert)
-                else None
-
-            traversal
-            |> Option.bind (fun directions ->
-                let terms =
-                    List.map2 (fun (term: IndexOrderTerm) direction -> { term with Direction = direction }) matched.Terms directions
-                    |> storageOrderTerms
-
-                let lower, upper = fixedPrefixSuffixBounds store registry resolved.Table tref whereExpr matched
-
-                if not prefixPins.IsEmpty && (resolved.PinnedValues |> List.exists (function VString _ -> true | _ -> false)) then
-                    Storage.tryMergedEqualityPrefixOrderWith allowed store resolved.Table terms resolved.PinnedValues lower upper
-                else
-                    Storage.tryOrderedIndexPrefixRangeLookupWith allowed store resolved.Database tref.Table terms resolved.PinnedValues lower upper
-                    |> Option.orElseWith (fun () ->
-                        Storage.tryOrderedIndexPrefixLookupWith allowed store resolved.Database tref.Table terms resolved.PinnedValues)))
+            if not prefixPins.IsEmpty && (resolved.PinnedValues |> List.exists (function VString _ -> true | _ -> false)) then
+                Storage.tryMergedEqualityPrefixOrderWith allowed store resolved.Table terms resolved.PinnedValues lower upper
+            else
+                Storage.tryOrderedIndexPrefixRangeLookupWith allowed store resolved.Database tref.Table terms resolved.PinnedValues lower upper
+                |> Option.orElseWith (fun () ->
+                    Storage.tryOrderedIndexPrefixLookupWith allowed store resolved.Database tref.Table terms resolved.PinnedValues)))
 
 and private tryGroupingIndexOrder
     (store: Store)
@@ -28812,7 +28813,7 @@ let private tryExplainBoundViewUpdate (store: Store) registry account dbName id 
                                     | Some(UpdateRange _) -> "range", None
                                     | Some _ ->
                                         let accessType = if constant then "const" else "ref"
-                                        accessType, Some(String.concat "," (List.replicate columns.Length "const"))
+                                        accessType, Some(List.replicate columns.Length "const")
                                     | None -> "ALL", None
 
                                 { Id = Some id
@@ -28938,6 +28939,94 @@ let private indexedJoinExplainPlans
     |> List.fold step (initial |> Result.map (fun sources -> sources, Map.empty))
     |> Result.map snd
 
+type private ExplainOuterScope =
+    { Context: EvalContext
+      Sources: (string * string * ColumnDef list) list
+      Outer: ExplainOuterScope option }
+
+let private explainOuterScope store registry dbName outer items =
+    let describeSource = function
+        | FromTable tref ->
+            physicalFastPathTable store dbName tref
+            |> Option.map (fun table ->
+                tref.Database |> Option.defaultValue dbName,
+                tref.Alias |> Option.defaultValue tref.Table,
+                table.Columns)
+        | _ -> None
+
+    match items |> List.collect FromItem.leaves |> List.map describeSource |> tryAllSome with
+    | Some [] -> outer
+    | Some sources ->
+        let bindings = sources |> List.map (fun (_, alias, columns) -> alias, columns)
+        let columns = bindings |> List.collect snd
+        let context =
+            contextFactory store registry dbName (columnIndexOf columns) (qualifierRanges bindings)
+                (outer |> Option.map _.Context) (probeRow columns)
+        Some { Context = context; Sources = sources; Outer = outer }
+    | None -> None
+
+let rec private explainOuterReference scope expression =
+    scope |> Option.bind (fun current ->
+        let reference (schema, alias, columns) =
+            match expression with
+            | QualifiedCol(qualifier, name) when equalsIgnoreCase qualifier alias -> Some(schema, alias, name, columns)
+            | Col name -> Some(schema, alias, name, columns)
+            | _ -> None
+
+        let candidates = List.choose reference current.Sources
+        let matches =
+            candidates |> List.collect (fun (schema, alias, name, columns) ->
+                columns
+                |> List.choose (fun column ->
+                    if equalsIgnoreCase column.Name name then Some(String.concat "." [ schema; alias; column.Name ])
+                    else None))
+
+        match matches, expression with
+        | [ label ], _ -> Some label
+        | [], QualifiedCol _ when not candidates.IsEmpty -> None
+        | [], _ -> explainOuterReference current.Outer expression
+        | _ -> None)
+
+let private explainCorrelatedOrder store registry dbName outer tref select =
+    // The planner needs a key domain, while execution supplies the row value.
+    let readOuter _ _ expression column =
+        explainOuterReference outer expression
+        |> Option.bind (fun _ ->
+            column |> Option.bind (fun definition ->
+                if isExactIntegerIndexType definition.Type then Some(VInt 0L)
+                elif isTextColumn (Some definition) then Some(VString "")
+                else None))
+
+    let allowed = indexAllowedForOrderedAccess IndexOrderBy tref
+    bindCorrelatedTopOrder store registry dbName tref select (outer |> Option.map _.Context) readOuter
+    |> Option.bind (fun (_, _, predicate, terms, pins, references) ->
+        let correlatedPins = references |> List.map fst |> Set.ofList
+        let labels = references |> Map.ofList
+        orderedIndexPrefixMatches IndexOrderBy store registry dbName tref (Some predicate) terms pins
+        |> List.tryPick (fun resolved ->
+            fixedPrefixOrderDirections terms correlatedPins resolved.Match
+            |> Option.bind (fun directions ->
+                let indexTerms =
+                    List.map2 (fun (term: IndexOrderTerm) direction -> { term with Direction = direction }) resolved.Match.Terms directions
+                    |> storageOrderTerms
+
+                Storage.tryOrderedIndexNameWith allowed resolved.Table indexTerms
+                |> Option.bind (fun name ->
+                    let prefix = List.take resolved.Match.PinnedCount resolved.Match.Terms
+                    let columns = resolved.Table.Columns
+                    prefix
+                    |> traverse (fun term -> resolveColumn columns term.Column)
+                    |> Result.toOption
+                    |> Option.map (fun indices ->
+                        let references =
+                            prefix
+                            |> List.map (fun term ->
+                                Map.tryFind (term.Column.ToLowerInvariant()) labels
+                                |> Option.bind (explainOuterReference outer)
+                                |> Option.defaultValue "const")
+                        let length = explainIndexKeyLen (Some resolved.Table) name columns indices (List.replicate indices.Length None)
+                        explainKey name length, references)))))
+
 let rec private explainJoinBlock
     (store: Store)
     (registry: Registry)
@@ -28955,8 +29044,13 @@ let rec private explainJoinBlock
     (earlySubqueryCount: int)
     (indexOrderPlan: IndexOrderPlan option)
     (consumption: JoinConsumption)
+    (outer: ExplainOuterScope option)
+    (correlatedOrder: (ExplainRendering.ExplainKey option * string list) option)
     : Result<unit, QueryResult> =
     let tableCount = (from |> Option.toList |> List.length) + joins.Length
+    let items = Option.toList from @ (joins |> List.map _.Table)
+    let scopeFor items =
+        if analysis.IsSome then None else explainOuterScope store registry dbName outer items
     // MySQL numbers projection subqueries before materialized FROM sources;
     // predicate and later-clause subqueries follow those sources.
     let earlySubqueries, laterSubqueries =
@@ -29047,7 +29141,7 @@ let rec private explainJoinBlock
                       Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                       Type = Some(if plan.Unique then "const" else "ref")
                       Key = sourceKey plan.KeyName plan.Columns plan.ColumnIndices plan.PrefixLengths
-                      Ref = Some(String.concat "," (List.replicate plan.ColumnIndices.Length "const"))
+                      Ref = Some(List.replicate plan.ColumnIndices.Length "const")
                       Rows = Some(uint64 plan.CandidateCount)
                       Extra = if plan.Unique then accessExtra |> List.filter ((<>) "Using where") else accessExtra }
             | MembershipAccess plan ->
@@ -29111,12 +29205,24 @@ let rec private explainJoinBlock
     /// One `FromItem`'s row(s): a real table's stats, or a derived table's
     /// `<derivedN>` placeholder plus its own recursive `DERIVED` block.
     let explainFromItem (joinPlans: Map<int, IndexedJoinPlan>) (idx: int) (item: FromItem) : Result<unit, QueryResult> =
-        match item with
-        | FromJoinGroup(source, innerJoins) ->
+        match item, correlatedOrder with
+        | FromJoinGroup(source, innerJoins), _ ->
             let groupExtra = if idx = tableCount - 1 then extra else []
             explainJoinBlock store registry dbName nextId acc analysis id selectType
                 (Some source) innerJoins None groupExtra (innerJoins |> List.map _.On) 0 None consumption
-        | FromTable tref ->
+                (scopeFor (List.take idx items)) None
+        | FromTable tref, Some(key, reference) ->
+            acc.Add
+                { Id = Some id
+                  SelectType = selectType
+                  Table = Some(tref.Alias |> Option.defaultValue tref.Table)
+                  Type = Some "ref"
+                  Key = key
+                  Ref = Some reference
+                  Rows = None
+                  Extra = extra }
+            Ok()
+        | FromTable tref, None ->
             explainTableStats store registry dbName tref
             |> Result.map (fun (n, ty) ->
                 let sourcePredicate = Map.tryFind ((tref.Alias |> Option.defaultValue tref.Table).ToLowerInvariant()) sourcePredicates
@@ -29141,7 +29247,7 @@ let rec private explainJoinBlock
                             explainKey
                                 plan.KeyName
                                 (explainIndexKeyLen (Some plan.Table) plan.KeyName plan.Table.Columns plan.ColumnIndices plan.PrefixLengths)
-                          Ref = Some(String.concat "," plan.References)
+                          Ref = Some plan.References
                           Rows = Some 1UL
                           Extra =
                               (if idx = tableCount - 1 then extra else [])
@@ -29149,20 +29255,23 @@ let rec private explainJoinBlock
                               |> List.distinct }
                 | false, None ->
                     emitTableRow idx (tref.Alias |> Option.defaultValue tref.Table) n ty)
-        | FromSubquery(PlainSelect sub, _alias)
-        // LATERAL uses the same plan traversal as other derived tables.
-        | FromLateral(PlainSelect sub, _alias) ->
+        | FromSubquery(PlainSelect sub, _), _ ->
             let derivedId = nextId ()
             emitTableRow idx (sprintf "<derived%d>" derivedId) None "ALL"
-            explainSelectBlock store registry dbName nextId acc analysis derivedId "DERIVED" sub
-        | FromJsonTable(_, _, _, alias) ->
+            explainSelectBlock store registry dbName nextId acc analysis derivedId "DERIVED" sub outer
+        | FromLateral(PlainSelect sub, _), _ ->
+            let derivedId = nextId ()
+            emitTableRow idx (sprintf "<derived%d>" derivedId) None "ALL"
+            let lateralOuter = scopeFor (List.take idx items)
+            explainSelectBlock store registry dbName nextId acc analysis derivedId "DERIVED" sub lateralOuter
+        | FromJsonTable(_, _, _, alias), _ ->
             // A table function has no stats and no derived block — one
             // "ALL" row under its alias, close enough to MySQL's
             // materialized-table-function row for EXPLAIN's purposes.
             emitTableRow idx alias None "ALL"
             Ok()
-        | FromSubquery(UnionSelect(first, rest, _, _, _), _alias)
-        | FromLateral(UnionSelect(first, rest, _, _, _), _alias) ->
+        | FromSubquery(UnionSelect(first, rest, _, _, _), _), _
+        | FromLateral(UnionSelect(first, rest, _, _, _), _), _ ->
             // Same "DERIVED" + "UNION" per-branch shape as a top-level
             // `Union`'s own `EXPLAIN` (see `explainStatement`'s `Union`
             // case) — a derived table's body can be a `UNION` too
@@ -29171,8 +29280,12 @@ let rec private explainJoinBlock
             let derivedId = nextId ()
             emitTableRow idx (sprintf "<derived%d>" derivedId) None "ALL"
 
-            explainSelectBlock store registry dbName nextId acc analysis derivedId "DERIVED" first
-            |> Result.bind (fun () -> rest |> traverse (fun (_, s) -> explainSelectBlock store registry dbName nextId acc analysis (nextId ()) "UNION" s))
+            let derivedOuter =
+                match item with
+                | FromLateral _ -> scopeFor (List.take idx items)
+                | _ -> outer
+            explainSelectBlock store registry dbName nextId acc analysis derivedId "DERIVED" first derivedOuter
+            |> Result.bind (fun () -> rest |> traverse (fun (_, s) -> explainSelectBlock store registry dbName nextId acc analysis (nextId ()) "UNION" s derivedOuter))
             |> Result.map ignore
 
 
@@ -29197,10 +29310,11 @@ let rec private explainJoinBlock
         let expressionSubqueries =
             reservedSubqueries @ (laterSubqueries |> List.map (fun subquery -> nextId (), subquery))
 
+        let queryScope = lazy (scopeFor items)
         expressionSubqueries
         |> traverse (fun (sid, sub) ->
             let stype = if Expression.hasQualifiedOuterReference sub then "DEPENDENT SUBQUERY" else "SUBQUERY"
-            explainSelectBlock store registry dbName nextId acc analysis sid stype sub)
+            explainSelectBlock store registry dbName nextId acc analysis sid stype sub queryScope.Value)
         |> Result.map ignore)
 
 /// One `SELECT`'s (or `FROM (SELECT ...)` derived table's) `EXPLAIN` block.
@@ -29214,6 +29328,7 @@ and private explainSelectBlock
     (id: int)
     (selectType: string)
     (select: SelectStmt)
+    (outer: ExplainOuterScope option)
     : Result<unit, QueryResult> =
     analysis |> Option.iter (fun observed ->
         match observed.CorrelatedQueries.TryGetValue select with
@@ -29221,6 +29336,18 @@ and private explainSelectBlock
         | _ -> ())
 
     let joins = planJoinOrder store dbName select
+
+    let correlatedOrder =
+        match select.From, joins, outer with
+        | Some(FromTable tref), [], Some _ -> explainCorrelatedOrder store registry dbName outer tref select
+        | _ -> None
+
+    let selectType =
+        match correlatedOrder, selectType with
+        | Some _, "DERIVED" -> "DEPENDENT DERIVED"
+        | Some _, "SUBQUERY" -> "DEPENDENT SUBQUERY"
+        | None, "DERIVED" when outer.IsSome && Expression.hasQualifiedOuterReference select -> "DEPENDENT DERIVED"
+        | _ -> selectType
 
     let indexOrderPlan =
         match select.From, joins with
@@ -29265,7 +29392,7 @@ and private explainSelectBlock
 
     let extra =
         [ if select.Where.IsSome then "Using where"
-          if not select.OrderBy.IsEmpty && selectedIndexOrderPlan.IsNone then "Using filesort"
+          if not select.OrderBy.IsEmpty && selectedIndexOrderPlan.IsNone && correlatedOrder.IsNone then "Using filesort"
           if (not select.GroupBy.IsEmpty && selectedIndexOrderPlan.IsNone) || select.Distinct then "Using temporary" ]
 
     let consumption = joinConsumptionFor select.Limit
@@ -29287,6 +29414,8 @@ and private explainSelectBlock
         (select.Projections |> List.sumBy (fun projection -> collectSubqueries projection.Expression |> List.length))
         selectedIndexOrderPlan
         consumption
+        outer
+        correlatedOrder
 
 /// Renders collected plan rows into `EXPLAIN`'s classic 12-column
 /// resultset — `id` ascending, `None -> NULL` in every `option` cell the
@@ -29309,7 +29438,7 @@ let private renderExplainRows (rows: ExplainRendering.ExplainRow list) : QueryRe
           r.Key |> Option.map (fun key -> String.concat "," key.Names)
           r.Key |> Option.map (fun key -> String.concat "," key.Names)
           r.Key |> Option.bind (fun key -> key.Length |> Option.map string)
-          r.Ref
+          r.Ref |> Option.map (String.concat ",")
           r.Rows |> Option.map string
           (r.Type |> Option.map (fun _ -> "100.00"))
           (if r.Extra.IsEmpty then None else Some(String.concat "; " r.Extra)) ]
@@ -29358,6 +29487,11 @@ let private renderExplainTree (limit: Expr option) (offset: Expr option) (append
             let access = row.Type |> Option.defaultValue row.SelectType
             let estimate = row.Rows |> Option.map string |> Option.defaultValue "unknown"
             let details = if row.Extra.IsEmpty then "" else sprintf " (%s)" (String.concat "; " row.Extra)
+            let source =
+                match row.SelectType, row.Key, row.Ref with
+                | ("DEPENDENT DERIVED" | "DEPENDENT SUBQUERY"), Some key, Some references ->
+                    sprintf "%s using %s (%s)" source (String.concat "," key.Names) (String.concat "," references)
+                | _ -> source
             sprintf "-> %s on %s  (rows=%s)%s" access source estimate details)
 
     let lines =
@@ -29757,14 +29891,18 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
 
         let selectType =
             let isDerived = match select.From with Some(FromSubquery _) -> true | _ -> false
-            if (selectSubqueryExprs select |> List.exists containsSubqueryExpr) || isDerived then "PRIMARY" else "SIMPLE"
+            let hasLateral =
+                (Option.toList select.From @ (select.Joins |> List.map _.Table))
+                |> List.collect FromItem.leaves
+                |> List.exists (function FromLateral _ -> true | _ -> false)
+            if (selectSubqueryExprs select |> List.exists containsSubqueryExpr) || isDerived || hasLateral then "PRIMARY" else "SIMPLE"
 
         if select.Limit |> Option.exists (fun limit -> rowCount limit = 0) then
             match checkSelect select with
             | Error error -> error
             | Ok() -> renderExplainZeroLimit format
         else
-            finish (checkSelect select |> Result.bind (fun () -> explainSelectBlock store registry dbName nextId acc analysis id selectType select))
+            finish (checkSelect select |> Result.bind (fun () -> explainSelectBlock store registry dbName nextId acc analysis id selectType select None))
     | Union(first, rest, orderBy, limit, _) ->
         let id1 = nextId ()
         let materializesResult = unionMaterializesResult orderBy rest
@@ -29774,12 +29912,12 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
         finish (
             checkSelect first
             |> Result.bind (fun () -> rest |> traverse (fun (_, s) -> checkSelect s) |> Result.map ignore)
-            |> Result.bind (fun () -> explainSelectBlock store registry dbName nextId acc analysis id1 "PRIMARY" first)
+            |> Result.bind (fun () -> explainSelectBlock store registry dbName nextId acc analysis id1 "PRIMARY" first None)
             |> Result.bind (fun () ->
                 rest
                 |> traverse (fun (_, s) ->
                     let sid = nextId ()
-                    explainSelectBlock store registry dbName nextId acc analysis sid "UNION" s |> Result.map (fun () -> sid)))
+                    explainSelectBlock store registry dbName nextId acc analysis sid "UNION" s None |> Result.map (fun () -> sid)))
             |> Result.map (fun restIds ->
                 if materializesResult && not restIds.IsEmpty then
                     let label = sprintf "<union%s>" (id1 :: restIds |> List.map string |> String.concat ",")
@@ -29816,7 +29954,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             validate ()
             |> Result.bind (fun () ->
                 let consumption = joinConsumptionFor u.Limit
-                explainJoinBlock store registry dbName nextId acc analysis id "UPDATE" (Some(FromTable u.From)) u.Joins u.Where extra subqueryExprs 0 None consumption)
+                explainJoinBlock store registry dbName nextId acc analysis id "UPDATE" (Some(FromTable u.From)) u.Joins u.Where extra subqueryExprs 0 None consumption None None)
             |> finish
     | Delete d when not d.Ctes.IsEmpty ->
         match validateJoinedDeleteTargets store registry dbName d with
@@ -29836,7 +29974,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             |> Result.bind (fun () ->
                 let consumption = joinConsumptionFor d.Limit
 
-                explainJoinBlock store registry dbName nextId acc analysis id "DELETE" (Some d.From) d.Joins d.Where extra subqueryExprs 0 None consumption)
+                explainJoinBlock store registry dbName nextId acc analysis id "DELETE" (Some d.From) d.Joins d.Where extra subqueryExprs 0 None consumption None None)
         )
     | Insert(table, _, rowsExprs, _, _)
     | Replace(table, _, rowsExprs) ->
@@ -29855,7 +29993,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
                 |> List.collect collectSubqueries
                 |> traverse (fun sub ->
                     let sid = nextId ()
-                    explainSelectBlock store registry dbName nextId acc analysis sid (if Expression.hasQualifiedOuterReference sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
+                    explainSelectBlock store registry dbName nextId acc analysis sid (if Expression.hasQualifiedOuterReference sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub None)
                 |> Result.map ignore)
         )
     | ReplaceSet(table, assignments) ->
@@ -29869,7 +30007,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
                 |> List.collect (snd >> collectSubqueries)
                 |> traverse (fun sub ->
                     let sid = nextId ()
-                    explainSelectBlock store registry dbName nextId acc analysis sid (if Expression.hasQualifiedOuterReference sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
+                    explainSelectBlock store registry dbName nextId acc analysis sid (if Expression.hasQualifiedOuterReference sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub None)
                 |> Result.map ignore)
         )
     | InsertSelect(table, _, select, _, _)
@@ -29887,7 +30025,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = selectType; Table = Some table; Type = None; Key = None; Ref = None; Rows = None; Extra = [] })
             |> Result.bind (fun () ->
                 let sid = nextId ()
-                explainSelectBlock store registry dbName nextId acc analysis sid "SUBQUERY" select)
+                explainSelectBlock store registry dbName nextId acc analysis sid "SUBQUERY" select None)
         )
     | Explain(nestedFormat, inner) -> explainStatement nestedFormat store registry account dbName inner
     | _ -> Err(1064, "EXPLAIN is not supported for this statement")

@@ -117,3 +117,8 @@ after one warm-up per build. Validation was running on the same host.
 | --- | ---: | ---: | ---: |
 | Lateral top-N | 1,673 ms | 25 ms | 9 |
 | Scalar top-N | 1,723 ms | 35 ms | 6 |
+
+Changing only the suffix to `utf8mb4_0900_ai_ci` keeps both queries on
+a scan. The same fixture matched MySQL and took about 1.7 seconds per
+query in the native in-memory Debug build. Streaming these folded suffixes
+would require preserving the later key order across equivalent spellings.

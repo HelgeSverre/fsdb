@@ -40,5 +40,5 @@ The ordered path still requires a supported physical index suffix.
 Other text expressions and comparisons that use a different collation
 fall back to the ordinary execution path.
 [`EXPLAIN ANALYZE`](2026-11-27-explain-analyze-correlated-top-n.md) now
-reports the ordered lookup when it executes. Static EXPLAIN still
-estimates a scan for these accesses.
+reports the ordered lookup when it executes. [Static `EXPLAIN`](2026-11-27-explain-analyze-correlated-top-n.md#static-explain)
+shows the index and the columns bound to its prefix.

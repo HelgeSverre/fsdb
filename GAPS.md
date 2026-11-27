@@ -3116,7 +3116,8 @@ implementation effort:
    The lateral fixture examines 46 rows, down from 1,159.
    [`EXPLAIN ANALYZE`](torture/findings/2026-11-27-explain-analyze-correlated-top-n.md)
    reports the observed ordered index, rows per loop, and fallback
-   invocations. Static `EXPLAIN` still estimates a scan for these accesses.
+   invocations. [Static `EXPLAIN`](torture/findings/2026-11-27-explain-analyze-correlated-top-n.md#static-explain)
+   reports the eligible correlated index and prefix references from schema metadata.
    Other computed lookup keys, residual predicates, and broader
    aggregate shapes still need work.
 

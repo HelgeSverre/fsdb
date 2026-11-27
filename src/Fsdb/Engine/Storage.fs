@@ -8197,6 +8197,30 @@ type OrderedKeyTerm =
       OrderedTransform: IndexTransform option
       OrderedDirection: Direction }
 
+let private tryOrderedKeyTraversal allowed table (terms: OrderedKeyTerm list) indices =
+    let transforms = terms |> List.map _.OrderedTransform
+    let directions = terms |> List.map _.OrderedDirection
+    let width = List.length indices
+
+    orderedKeyGroups table
+    |> visibleGroups
+    |> List.filter (fun group -> allowed group.Name)
+    |> List.tryPick (fun group ->
+        if width > 0 && width <= group.Indices.Length
+           && List.take width group.Indices = indices
+           && List.take width group.Transforms = transforms then
+            tryIndexTraversal directions (List.take width group.Directions)
+            |> Option.map (fun traversal -> group, traversal)
+        else None)
+
+let internal tryOrderedIndexNameWith allowed (table: Table) terms =
+    terms
+    |> traverse (fun term -> resolveColumn table.Columns term.OrderedColumnName)
+    |> Result.toOption
+    |> Option.bind (tryOrderedKeyTraversal allowed table terms)
+    |> Option.filter (fun (group, _) -> Map.containsKey group.Name table.SecondaryOrder)
+    |> Option.map (fun (group, _) -> group.Name)
+
 let private tryOrderedIndexWithPrefix
     (allowed: string -> bool)
     (store: Store)
@@ -8208,29 +8232,11 @@ let private tryOrderedIndexWithPrefix
     =
     table
     |> Option.bind (fun table ->
-        let columnNames = terms |> List.map _.OrderedColumnName
-        let transforms = terms |> List.map _.OrderedTransform
-        let directions = terms |> List.map _.OrderedDirection
-
-        columnNames
-        |> traverse (resolveColumn table.Columns)
+        terms
+        |> traverse (fun term -> resolveColumn table.Columns term.OrderedColumnName)
         |> Result.toOption
         |> Option.bind (fun indices ->
-            orderedKeyGroups table
-            |> visibleGroups
-            |> List.filter (fun group -> allowed group.Name)
-            |> List.tryPick (fun group ->
-                if indices.Length > 0 && indices.Length <= group.Indices.Length then
-                    let indexedPrefix = List.take indices.Length group.Indices
-                    let transformedPrefix = List.take indices.Length group.Transforms
-
-                    if indexedPrefix = indices && transformedPrefix = transforms then
-                        tryIndexTraversal directions (List.take indices.Length group.Directions)
-                        |> Option.map (fun traversal -> group, traversal)
-                    else
-                        None
-                else
-                    None)
+            tryOrderedKeyTraversal allowed table terms indices
             |> Option.bind (fun (group, traversal) ->
                 let rec normalizePrefix values columnIndices prefixLengths transforms =
                     match values, columnIndices, prefixLengths, transforms with
