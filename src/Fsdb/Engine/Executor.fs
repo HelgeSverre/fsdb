@@ -36210,6 +36210,7 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
 
 let private transactionWriteTargetsIn
     (temporaryCatalog: Catalog option)
+    (recordPointSearch: (string * string * string) -> unit)
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -36274,7 +36275,10 @@ let private transactionWriteTargetsIn
                             orderedValuesForColumns table candidate.ColumnIndices names values
                             |> Option.bind (Storage.tryUniqueWriteLockTargets store table candidate.Index)
                         else None)
-                    |> Option.map (fun claims -> source.Database |> Option.defaultValue dbName, source.Table, claims))
+                    |> Option.map (fun claims ->
+                        let database = source.Database |> Option.defaultValue dbName
+                        claims.Keys |> List.iter (fun key -> recordPointSearch (database, source.Table, key))
+                        database, source.Table, claims))
 
         // A bound key can become visible after a concurrent insert or key move.
         point |> Option.orElseWith (fun () -> targets source predicate)
@@ -37180,10 +37184,12 @@ let private transactionWriteTargetsIn
     | _ -> []
 
 let transactionWriteTargets store registry dbName statement =
-    transactionWriteTargetsIn None store registry dbName statement
+    transactionWriteTargetsIn None ignore store registry dbName statement
 
-let internal transactionWriteTargetsWithTemporaryCatalog catalog store registry dbName statement =
-    transactionWriteTargetsIn (Some catalog) store registry dbName statement
+let internal transactionWritePlan temporaryCatalog store registry dbName statement =
+    let pointSearches = ResizeArray<string * string * string>()
+    let targets = transactionWriteTargetsIn temporaryCatalog pointSearches.Add store registry dbName statement
+    targets, List.ofSeq pointSearches
 
 [<RequireQualifiedAccess>]
 type internal WriteReadScope =

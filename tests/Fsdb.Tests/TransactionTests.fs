@@ -8307,18 +8307,30 @@ let tests =
                       | ResultSet(_, actual) -> Expect.equal actual (if outcome = "COMMIT" then committed else rolledBack) write
                       | other -> failtestf "expected final rows after %s, got %A" write other
 
-          testCase "two transactions can write to the same absent point key"
+          testCase "point write misses share the gap and block inserts until both transactions finish"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let setup, _ = handle (create 3 store) "CREATE TABLE t(id INT PRIMARY KEY,n INT)"
               let _, _ = handle setup "INSERT INTO t VALUES(1,1),(9,9)"
               let first, _ = handle (create 1 store) "BEGIN"
+              let first, _ = handle first "SELECT id FROM t WHERE id=1"
+              let first, _ = handle first "SAVEPOINT before_miss"
               let first, missed = handle first "UPDATE t SET n=n+1 WHERE id=4"
               Expect.equal missed (Affected 0UL) "the first write misses"
+              let first, rolledBack = handle first "ROLLBACK TO SAVEPOINT before_miss"
+              Expect.equal rolledBack (Affected 0UL) "return to an already active savepoint"
 
               let second, _ = handle (create 2 store) "SET innodb_lock_wait_timeout=1"
               let second, _ = handle second "BEGIN"
               let second, missed = handle second "UPDATE t SET n=n+1 WHERE id=4"
+              Expect.equal missed (Affected 0UL) "both transactions can seek the missing key"
+
+              let insert, _ = handle (create 4 store) "SET innodb_lock_wait_timeout=1"
+              let blocked = handle insert "INSERT INTO t VALUES(5,5)" |> snd
               (handle first "ROLLBACK" |> snd) |> ignore
+              let stillBlocked = handle insert "INSERT INTO t VALUES(6,6)" |> snd
               (handle second "ROLLBACK" |> snd) |> ignore
-              Expect.equal missed (Affected 0UL) "a completed miss does not retain the exclusive probe key" ]
+              let released = handle insert "INSERT INTO t VALUES(7,7)" |> snd
+              TestSupport.Sql.expectError 1205 blocked "the first neighboring insert waits"
+              TestSupport.Sql.expectError 1205 stillBlocked "the second holder retains the gap"
+              Expect.equal released (Affected 1UL) "inserts resume when both holders finish" ]

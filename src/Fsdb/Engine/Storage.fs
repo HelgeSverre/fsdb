@@ -1127,9 +1127,14 @@ let internal transactionGapLocks (store: Store) =
         lock context.HeldStripes (fun () ->
             context.HeldStripes |> Seq.filter (fun stripe -> stripe.Gap.IsSome) |> List.ofSeq)
 
+let private writePointGapPrefix = "write-point:"
+
 let internal releaseLaterGapLocks (store: Store) (retained: RowLockStripe list) =
     store.TransactionLocks |> Option.iter (fun context ->
         transactionGapLocks store
+        // A write's gap survives rollback to an already active engine savepoint.
+        |> List.filter (fun stripe ->
+            stripe.Gap |> Option.forall (fun (name, _) -> not (name.StartsWith(writePointGapPrefix, StringComparison.Ordinal))))
         |> List.filter (fun stripe -> not (retained |> List.exists (fun saved -> obj.ReferenceEquals(saved, stripe))))
         |> releaseLockStripes context)
 
@@ -4545,6 +4550,7 @@ let private primaryGapBlockers (cache: KeyLockCache) owner key =
 let private withWriteLocksForContext
     (transactionLocks: TransactionLockContext option)
     (timeout: TimeSpan)
+    checkPrimaryGaps
     (store: Store)
     (dbName: string)
     (tableName: string)
@@ -4668,8 +4674,8 @@ let private withWriteLocksForContext
                 acquire stripe (fun () -> [])
             for stripe, primary in keyStripes do
                 match primary with
-                | Some(cache, key) -> acquire stripe (fun () -> primaryGapBlockers cache context.Owner key)
-                | None -> acquire stripe (fun () -> [])
+                | Some(cache, key) when checkPrimaryGaps -> acquire stripe (fun () -> primaryGapBlockers cache context.Owner key)
+                | _ -> acquire stripe (fun () -> [])
 
             if store.TransactionLocks.IsSome then
                 lock context.LockClaims (fun () ->
@@ -4692,7 +4698,7 @@ let private withWriteLocksForContext
             releaseLockStripes context claimed
 
 let private withWriteLocksFor timeout (store: Store) dbName tableName rowIds keys body =
-    withWriteLocksForContext store.TransactionLocks timeout store dbName tableName rowIds keys body
+    withWriteLocksForContext store.TransactionLocks timeout true store dbName tableName rowIds keys body
 
 let private withRowLocks store dbName tableName rowIds body =
     withWriteLocksFor (Fsdb.Limits.statementLockWaitTimeout ()) store dbName tableName rowIds [] body
@@ -4719,6 +4725,13 @@ let acquireTransactionWriteTargets
     : unit =
     match store.TransactionLocks with
     | Some _ -> withWriteLocksFor timeout store dbName tableName rowIds keys ignore
+    | None -> invalidArg (nameof store) "transaction write claims require a transaction snapshot"
+
+/// An exact write search can wait for a key without requesting insertion
+/// into an existing gap. Destination keys still use the normal write path.
+let internal acquireTransactionWriteSearchTargets timeout (store: Store) database tableName rowIds keys =
+    match store.TransactionLocks with
+    | Some _ -> withWriteLocksForContext store.TransactionLocks timeout false store database tableName rowIds keys ignore
     | None -> invalidArg (nameof store) "transaction write claims require a transaction snapshot"
 
 type OrderedIndexKeyPart =
@@ -6678,6 +6691,7 @@ let internal compareIntegerPrimaryValues = compareIndexedValues None
 
 type private PrimaryGapScan =
     | OrdinaryGap
+    | WritePointGap
     | LimitedGap of direction: PrimaryScanDirection * stoppedAtRecord: bool
     | EmptyReversePrefixGap
     | RetainedRangeGap of PrimaryScanDirection
@@ -6763,6 +6777,7 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                             Option.map (fun (values, inclusive) -> values, not inclusive) upper
                         else Option.map anchor lower, Option.map anchor upper
                     prefix + identity lower + ":" + identity upper, lowerAnchor, upperAnchor
+            let gapIdentity = if scan = WritePointGap then writePointGapPrefix + probe else probe
             let needsGap table =
                 match read with
                 | PrimaryRange _ -> true
@@ -6822,7 +6837,7 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                     let mutable alreadyHeld = false
                     visitLivePrimaryGaps cache (fun stripe ->
                         if stripe.SharedOwners.Contains context.Owner
-                           && (stripe.Gap |> Option.exists (fun (key, _) -> key = probe)) then
+                           && (stripe.Gap |> Option.exists (fun (key, _) -> key = gapIdentity)) then
                             alreadyHeld <- true)
                     if not alreadyHeld then
                         let boundary key = { Values = key; LockKey = encode observed key }
@@ -6868,7 +6883,7 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                               ExclusiveOwner = None
                               SharedOwners = HashSet([ context.Owner ])
                               KeyActivity = None
-                              Gap = Some(probe, blocks) }
+                              Gap = Some(gapIdentity, blocks) }
                         cache.Gaps.Add(WeakReference<RowLockStripe>(stripe))
                         lock context.HeldStripes (fun () -> context.HeldStripes.Add stripe |> ignore)
                 | _ -> ()
@@ -6952,6 +6967,14 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
 
 let internal acquireMissingPrimaryGap timeout live snapshot database tableName values =
     acquirePrimaryReadGap timeout live snapshot database tableName OrdinaryGap false (PrimaryPoint values) |> ignore
+
+let internal protectMissingPrimaryWriteKey timeout live snapshot database tableName key =
+    if primaryLockKey key then
+        tableAt snapshot database tableName
+        |> Option.iter (fun table ->
+            tryIntegerPrimaryLockValues (primaryKeyColumns table).Length key
+            |> Option.iter (fun values ->
+                acquirePrimaryReadGap timeout live snapshot database tableName WritePointGap false (PrimaryPoint values) |> ignore))
 
 let private primaryRangeRows (table: Table) lower upper limit =
     match Map.tryFind "PRIMARY" table.SecondaryOrder with
@@ -13468,7 +13491,7 @@ let private withUpdateLockOwner (store: Store) body =
         finally releaseAllLockStripes owner
 
 let private withUpdateLocks owner store database table rowIds keys body =
-    withWriteLocksForContext (Some owner) (Fsdb.Limits.statementLockWaitTimeout ())
+    withWriteLocksForContext (Some owner) (Fsdb.Limits.statementLockWaitTimeout ()) true
         store database table rowIds keys body
 
 let private withMovedUniqueKeys owner (store: Store) groups publish =

@@ -3133,12 +3133,10 @@ let private prepareTransactionWrite (temporaryCatalog: Catalog option) (statemen
             retainPrimaryGaps timeout transaction database table keys
 
         let readTargets = readTargets |> List.filter (fun (_, _, claims) -> not claims.RetainedRows.IsEmpty || claims.Materialized.IsSome)
-        let planTargets =
-            match temporaryCatalog with
-            | Some catalog -> Executor.transactionWriteTargetsWithTemporaryCatalog catalog
-            | None -> Executor.transactionWriteTargets
+        let plannedTargets, pointSearches =
+            Executor.transactionWritePlan temporaryCatalog transaction.Snapshot registry dbName statement
         let targets =
-            planTargets transaction.Snapshot registry dbName statement
+            plannedTargets
             |> List.filter (fun (_, _, target) -> not target.RowIds.IsEmpty || not target.Keys.IsEmpty)
 
         match targets, readTargets with
@@ -3150,14 +3148,26 @@ let private prepareTransactionWrite (temporaryCatalog: Catalog option) (statemen
                     else transaction
                 { session with Tx = Some snapshot }
         | _ ->
-            let pendingProbes =
+            let writeSearch =
                 match statement with
-                | (Update _ | Delete _) when canRefresh ->
-                    targets |> List.choose (fun (database, table, target) ->
-                        match target.RowIds, target.Keys with
-                        | [], [ key ] -> Storage.prepareUniqueProbeRelease transaction.Snapshot database table key
-                        | _ -> None)
-                | _ -> []
+                | Update _ | Delete _ -> canRefresh
+                | _ -> false
+            let pendingProbes =
+                if writeSearch then
+                    let otherProbes =
+                        targets |> List.choose (fun (database, table, target) ->
+                            match target.RowIds, target.Keys with
+                            | [], [ key ] -> Some(database, table, key)
+                            | _ -> None)
+                    pointSearches @ otherProbes
+                    |> List.distinct
+                    |> List.choose (fun (database, table, key) ->
+                        Storage.prepareUniqueProbeRelease transaction.Snapshot database table key)
+                else []
+
+            let acquireTargets =
+                if writeSearch then Storage.acquireTransactionWriteSearchTargets
+                else Storage.acquireTransactionWriteTargets
 
             readTargets
             |> List.iter (fun (database, table, claims) ->
@@ -3166,7 +3176,7 @@ let private prepareTransactionWrite (temporaryCatalog: Catalog option) (statemen
                 acquireReadRows timeout transaction database table rows)
             targets
             |> List.iter (fun (database, table, target) ->
-                Storage.acquireTransactionWriteTargets
+                acquireTargets
                     timeout
                     transaction.Snapshot
                     database
@@ -3174,8 +3184,7 @@ let private prepareTransactionWrite (temporaryCatalog: Catalog option) (statemen
                     target.RowIds
                     target.Keys)
 
-            match statement with
-            | (Update _ | Delete _) when canRefresh ->
+            if writeSearch then
                 for database, table, target in targets do
                     // The protected key may now name a row absent from the
                     // old write view. Wait for that row before refreshing its image.
@@ -3186,9 +3195,12 @@ let private prepareTransactionWrite (temporaryCatalog: Catalog option) (statemen
                         let unclaimed = rows |> List.filter (fun row -> not (Set.contains row held))
                         if not unclaimed.IsEmpty then
                             Storage.acquireTransactionWriteTargets timeout transaction.Snapshot database table unclaimed []
-            | _ -> ()
             if canRefresh then
                 let refreshed = refreshReadRows transaction
+                // Take the shared gap before dropping the short-lived probe key.
+                if writeSearch && (transaction.Isolation = RepeatableRead || transaction.Isolation = Serializable) then
+                    for database, table, key in pointSearches do
+                        Storage.protectMissingPrimaryWriteKey timeout session.Store refreshed.Snapshot database table key
                 pendingProbes |> List.iter (fun release -> release refreshed.Snapshot)
                 { session with Tx = Some refreshed }
             else session

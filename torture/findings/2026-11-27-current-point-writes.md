@@ -27,8 +27,7 @@ key, an insertion, and key moves. Each form covered a prior commit and
 waiting through commit or rollback. Six additional schedules placed a
 second writer on the row after its key move had already committed.
 
-A genuine miss still differs in lock coverage. With existing primary
-keys 1 and 9, a repeatable-read `UPDATE ... WHERE id=4` affects zero rows.
-MySQL then blocks another session from inserting key 5 until the first
-transaction ends. Fsdb allows the neighboring insert. Range and gap
-locks for these writes remain separate from the exact-key refresh.
+The [missing primary-key follow-up](2026-11-27-missing-primary-write-gaps.md)
+adds the surrounding gap after a genuine miss. With integer primary keys
+1 and 9, an `UPDATE ... WHERE id=4` can affect zero rows and block a
+neighboring insert at key 5 until the repeatable-read transaction ends.

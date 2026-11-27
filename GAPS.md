@@ -955,8 +955,9 @@ UNION, and a join to a session temporary table.
 [Point UPDATE and DELETE](torture/findings/2026-11-27-current-point-writes.md)
 can seek an exact unique key absent from the transaction's old write
 view. The audited writes wait for a pending key or its current row and
-refresh before evaluating the mutation. A genuinely missing point key
-still lacks MySQL's surrounding gap lock.
+refresh before evaluating the mutation. [Missing integer primary-key
+writes](torture/findings/2026-11-27-missing-primary-write-gaps.md) also
+retain the surrounding gap under REPEATABLE READ and SERIALIZABLE.
 
 A [current write-path control](benchmarks/results/2026-10-14-write-path-control.md)
 measures keyless inserts at one, four, and eight writers with WAL-backed and
