@@ -684,7 +684,10 @@ interiors. Geographic SQL results and `HEX(geometry)` emit longitude
 first. Successful validation preserves raw big-endian and mixed-endian
 WKB. Geometry storage rejects those encodings. Equality against binary
 operands and binary casts use the same bytes as SQL result output.
-Ordered comparison diagnostics and prepared equality metadata still differ.
+Scalar ordering, `BETWEEN`, `LIKE`, and extrema reject typed geometry
+operands during binding. Geometry equality advertises the audited prepared
+metadata and accepts BLOB bindings. Numeric coercion warnings and
+empty-pattern `REGEXP` diagnostics still differ.
 
 [`ST_IsSimple`](torture/findings/2026-11-27-spatial-simplicity.md) checks
 repeated coordinates, line intersections, and collection member

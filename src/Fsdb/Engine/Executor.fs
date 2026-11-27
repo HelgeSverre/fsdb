@@ -3644,6 +3644,37 @@ let private opSymbol =
     | IntDiv -> "DIV"
     | NullSafeEq -> "<=>"
 
+let private geometryRestrictedArguments = function
+    | BinOp((Lt | Lte | Gt | Gte as operator), left, right) ->
+        // Row comparison permits geometry members, even when scalar comparison does not.
+        match left, right with
+        | Row _, _ | _, Row _ -> None
+        | _ -> Some(opSymbol operator, [ left; right ])
+    | QuantifiedComparison(value, (Lt | Lte | Gt | Gte as operator), quantifier, query) ->
+        // ALL resolves the opposite comparison inside the quantified predicate.
+        let operation =
+            match quantifier, operator with
+            | All, Lt -> ">="
+            | All, Lte -> ">"
+            | All, Gt -> "<="
+            | All, Gte -> "<"
+            | _ -> opSymbol operator
+        Some(operation, [ value; Subquery query ])
+    | Between(value, lower, upper) -> Some("between", [ value; lower; upper ])
+    | Like(value, pattern, _, _) -> Some("like", [ value; pattern ])
+    | FuncCall(name, arguments)
+    | WindowOver(WinAggregate(name, arguments), _) ->
+        match name.ToLowerInvariant() with
+        | ("min" | "max" | "least" | "greatest") as operation -> Some(operation, arguments)
+        | _ -> None
+    | _ -> None
+
+let private geometryArgumentDiagnostic isGeometry expression =
+    geometryRestrictedArguments expression
+    |> Option.bind (fun (operation, operands) ->
+        if List.exists isGeometry operands then Some(1210, sprintf "Incorrect arguments to %s" operation)
+        else None)
+
 /// Fallback names for expressions without a parsed projection source name.
 let rec internal exprLabel (expr: Expr) : string =
     match expr with
@@ -7771,7 +7802,10 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         match aliasNodeDiagnostic (fun name -> tryProjectionAlias ctx name |> Option.map snd) expr with
         | Some error -> Error error
         | None -> eval e
-    | BinaryCast e -> eval e
+    | BinaryCast e ->
+        eval e |> Result.map (function
+            | VGeometry geometry -> VBytes(Value.geometryToSqlBinary geometry)
+            | value -> value)
     | CastCharset(_, Some length, charset)
         when uint64 length * uint64 (Charset.maxBytes charset |> Option.defaultValue 1) > uint64 System.UInt32.MaxValue ->
         Error(1690, "char(n) value is out of range in 'cast_as_char'")
@@ -8219,6 +8253,11 @@ and private trySourceFreeScalarSubquery (ctx: EvalContext) (select: SelectStmt) 
         | Some _ -> None
 
 and private validateExpressionInContext ctx expression =
+    let nodeDiagnostic node =
+        Expression.tryLiteralNodeDiagnostic node
+        |> Option.orElseWith (fun () ->
+            geometryArgumentDiagnostic (fun argument ->
+                metadataOfExpr ctx argument |> Option.exists (fun metadata -> metadata.TypeId = TypeGeometry)) node)
     validateExpressionBindings
         (validateColumnReference ctx)
         (fun nested ->
@@ -8226,7 +8265,7 @@ and private validateExpressionInContext ctx expression =
             match describeQueryColumnsInScope ctx.Store ctx.Registry ctx.DbName (QueryBody(PlainSelect nested)) (Some ctx) (fun _ -> Ok()) with
             | Error(InvalidDescription(Err(code, message))) -> Error(code, message)
             | _ -> Ok())
-        Expression.tryLiteralNodeDiagnostic id (fun _ -> Ok()) expression
+        nodeDiagnostic id (fun _ -> Ok()) expression
 
 and private evalCaseResult ctx caseExpression subject whens elseBranch evaluateResult =
     let eval = evalExpr ctx
@@ -8962,6 +9001,11 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | Col _
     | QualifiedCol _ -> tryColumnDefForExpr ctx expr |> Option.map ColumnWire.metadataOfColumn
     | Row _ -> None
+    | BinOp((Eq | Neq | NullSafeEq as operator), left, right)
+        when [ left; right ] |> List.exists (fun operand ->
+            metadataOfExpr ctx operand |> Option.exists (fun metadata -> metadata.TypeId = TypeGeometry)) ->
+        let flags = if operator = NullSafeEq then BinaryFlag ||| NotNullFlag else BinaryFlag
+        Some { Value.columnMetadata TypeLongLong with ColumnLength = 1u; Flags = flags }
     | BinOp((And | Or | Xor | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), _, _)
     | Not _
     | IsNull _
@@ -9112,7 +9156,10 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         let charset, collation = castCharacterCollation ctx.Store.ExecutionSettings.ConnectionCharset modifiers
         withCollation (CastCharset(value, length, charset)) collation
     | CastAsBinary(value, length) -> metadataOfExpr ctx (CastCharset(value, length, "binary"))
-    | BinaryCast inner -> withCollation inner "binary"
+    | BinaryCast inner ->
+        match withCollation inner "binary" with
+        | Some metadata when metadata.TypeId = TypeGeometry -> metadataOfExpr ctx (CastAsBinary(inner, None))
+        | metadata -> metadata
     | Collate(inner, collation) -> withCollation inner collation
     | Distinct inner
     | OrderBy(inner, _) -> metadataOfExpr ctx inner
@@ -11337,6 +11384,13 @@ and private describeQueryColumnDescriptorsInScope
           LogicalColumns = left.LogicalColumns @ right.LogicalColumns
           ProjectionAliases = Map.empty }
 
+    let contextOfScope dbName (scope: DescribedJoinScope) outer =
+        let sources = scope.Sources |> List.map (fun (qualifier, descriptors) -> qualifier, descriptors |> List.map _.Column)
+        let columns = sources |> List.collect snd
+        let context = contextFactory store registry dbName (columnIndexOf columns) (qualifierRanges sources) outer (probeRow columns)
+        { context with ProjectionAliases = scope.ProjectionAliases |> Map.map (fun _ binding -> binding |> Result.map (fun expression -> expression, VNull)) }
+        |> withMergedColumns (mergedColumnExpressions scope.LogicalColumns)
+
     let resolveReference (scopes: DescribedJoinScope list) clause (qualifier, name) =
         let label = qualifier |> Option.map (fun qualifier -> qualifier + "." + name) |> Option.defaultValue name
         let missing =
@@ -11514,12 +11568,26 @@ and private describeQueryColumnDescriptorsInScope
                 match Map.tryFind (name.ToLowerInvariant()) scope.ProjectionAliases with
                 | Some binding -> Result.toOption binding
                 | None -> aliasSource name rest
+        let context = lazy (
+            List.foldBack (fun scope outer -> Some(contextOfScope dbName scope outer)) scopes None
+            |> Option.defaultWith (fun () -> contextFactory store registry dbName Map.empty Map.empty None [||]))
+        let isGeometry = function
+            | Subquery nested ->
+                match describeSelect seen dbName ctes scopes nested with
+                | Ok [ descriptor ] ->
+                    match descriptor.Column.Type with TGeometry _ -> true | _ -> false
+                | _ -> false
+            | argument ->
+                metadataOfExpr context.Value argument |> Option.exists (fun metadata -> metadata.TypeId = TypeGeometry)
+        let nodeDiagnostic node =
+            aliasNodeDiagnostic (fun name -> aliasSource name scopes) node
+            |> Option.orElseWith (fun () -> geometryArgumentDiagnostic isGeometry node)
         validateExpressionBindings resolve
             (fun nested ->
                 match describeSelect seen dbName ctes scopes nested with
                 | Error(InvalidDescription error) -> Error(InvalidDescription error)
                 | _ -> Ok())
-            (aliasNodeDiagnostic (fun name -> aliasSource name scopes))
+            nodeDiagnostic
             (Err >> InvalidDescription)
             validateCall
             expression
@@ -11659,13 +11727,7 @@ and private describeQueryColumnDescriptorsInScope
                     |> Result.map (fun () -> rewritten)))
             |> Result.map (fun select ->
                 let descriptors = sources |> List.collect snd
-                let contextOfScope (scope: DescribedJoinScope) outer =
-                    let sources = scope.Sources |> List.map (fun (qualifier, descriptors) -> qualifier, descriptors |> List.map _.Column)
-                    let columns = sources |> List.collect snd
-                    let context = contextFactory store registry dbName (columnIndexOf columns) (qualifierRanges sources) outer (probeRow columns)
-                    { context with ProjectionAliases = scope.ProjectionAliases |> Map.map (fun _ binding -> binding |> Result.map (fun expression -> expression, VNull)) }
-                    |> withMergedColumns (mergedColumnExpressions scope.LogicalColumns)
-                let outer = List.foldBack (fun scope outer -> Some(contextOfScope scope outer)) outerScopes None
+                let outer = List.foldBack (fun scope outer -> Some(contextOfScope dbName scope outer)) outerScopes None
                 let context =
                     contextFactory store registry dbName columnIndex qualifiers outer (probeRow columns)
                     |> withMergedColumns (mergedColumnExpressions scope.LogicalColumns)
@@ -29816,7 +29878,7 @@ let private foundRowsWithOffset offset result =
 /// `EvalContext` in its own signature. SQL_CALC_FOUND_ROWS executes the
 /// unbounded query once and slices that result afterward, so expressions
 /// with side effects are not evaluated a second time merely to count rows.
-let runTopLevelSelect
+let private runTopLevelSelectCore
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -29856,7 +29918,7 @@ let runTopLevelSelect
             | None -> runSelectStmt store registry dbName executable None
         result, types, foundRowsWithOffset offset result, values
 
-let runTopLevelUnion
+let private runTopLevelUnionCore
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -30001,6 +30063,48 @@ let private validateBindingsWith describeColumns validateFunction store registry
 let private validateBindings store registry schema functionDatabase statement =
     let validateFunction = validateFunctionName registry functionDatabase
     validateBindingsWith (describeQueryColumnsCheckingFunctions functionDatabase) validateFunction store registry schema statement
+
+let private geometryBindingError store registry schema statement =
+    let mutable geometrySyntax = false
+    let needsTypedArguments =
+        statement |> Expression.statementExists (fun expression ->
+            if not geometrySyntax then
+                geometrySyntax <-
+                    match expression with
+                    | LiteralValue(VGeometry _) | Cast(_, TGeometry _) -> true
+                    | FuncCall(name, _) ->
+                        name.StartsWith("ST_", System.StringComparison.OrdinalIgnoreCase)
+                        || Functions.isGeometryConstructor name
+                        || (Functions.lookupScalarMetadata name registry
+                            |> Option.exists (fun metadata -> metadata.TypeId = TypeGeometry))
+                    | _ -> false
+            (geometryRestrictedArguments expression).IsSome)
+
+    let canExposeGeometry () =
+        TableLocks.directStatementAccesses schema statement
+        |> List.exists (fun access ->
+            match tableSnapshot store access.Database access.Table with
+            | Ok table -> table.Columns |> List.exists (fun column -> match column.Type with TGeometry _ -> true | _ -> false)
+            | Error _ -> true) // Includes stored views, whose output types are resolved by the binder.
+
+    // Bind before planning or short-circuit evaluation only when a restricted
+    // expression can see geometry. Ordinary comparisons stay on the usual path.
+    if needsTypedArguments && (geometrySyntax || canExposeGeometry ()) then
+        match validateBindings store registry schema schema statement with
+        | Error(1210, message) when message.StartsWith("Incorrect arguments to ", System.StringComparison.Ordinal) ->
+            Some(Err(1210, message))
+        | _ -> None
+    else None
+
+let runTopLevelSelect store registry dbName select =
+    match geometryBindingError store registry dbName (Select select) with
+    | Some error -> error, [], None, []
+    | None -> runTopLevelSelectCore store registry dbName select
+
+let runTopLevelUnion store registry dbName first rest orderBy limit offset =
+    match geometryBindingError store registry dbName (Union(first, rest, orderBy, limit, offset)) with
+    | Some error -> error, [], None, []
+    | None -> runTopLevelUnionCore store registry dbName first rest orderBy limit offset
 
 type private MutationViewReadScope = UpdateRoot | DeleteRoot | DeleteSubquery
 
@@ -36524,7 +36628,10 @@ let rec private executeAsWithViewSources
 
 and executeAs store registry dbName ids foundRows currentAccount stmt =
     withStatementViewMerge store dbName stmt (fun () ->
-        executeAsWithViewSources { Aliases = Set.empty; Conditions = []; CallerSubqueries = None } store registry dbName ids foundRows currentAccount stmt)
+        match geometryBindingError store registry dbName stmt with
+        | Some error -> ids, error
+        | None ->
+            executeAsWithViewSources { Aliases = Set.empty; Conditions = []; CallerSubqueries = None } store registry dbName ids foundRows currentAccount stmt)
 
 let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (statement: Statement) =
     let unsafeError =

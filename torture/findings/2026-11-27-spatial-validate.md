@@ -64,12 +64,29 @@ An additional 19 SELECTs matched on tables with an indexed VARBINARY
 column, including joins and correlated subqueries. The same SELECTs
 matched after a durable restart.
 
-Prepared equality matched the 16 executed results with BLOB bindings.
-MySQL advertises a GEOMETRY parameter for `ST_Validate(...) = ?` and
-sets the binary flag on the integer result. Fsdb still advertises
-VAR_STRING and omits that result flag. MySQL also returns 1210 for an
-execute packet that declares a `MYSQL_TYPE_GEOMETRY` parameter, which
-fsdb accepts. Typed geometry ordering operators and BETWEEN still
-return values where MySQL rejects the expressions with 1210. Audited
-geometry-to-number equality returns the same values with a missing
-1292 warning in fsdb.
+## Geometry argument binding
+
+MySQL rejects typed geometry in scalar ordering comparisons,
+`BETWEEN`, `LIKE`, and the audited extrema functions with 1210.
+Binding checks these types before row evaluation, even for an empty
+source, `LIMIT 0`, or an unused conditional branch. Comparisons of
+rows and explicitly cast binary values are still accepted. The audited
+`BINARY` shorthand returns the same bytes and accepts ordering, with
+the existing difference in its deprecation warning.
+[MySQL comparison type resolution](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/item_cmpfunc.cc#L687-L755)
+
+Ordering and related probes improved from 10 to 47 exact matches out
+of 50 in memory and with durable storage. The remaining differences
+are missing warnings for two numeric coercions and the diagnostic for
+an empty `REGEXP` pattern. The same empty-pattern difference occurs
+with ordinary text. Saved-view ordering errors and binary
+comparison results also matched after reloading a durable checkpoint.
+
+Binary PREPARE advertises GEOMETRY for the audited equality parameters,
+including markers beside `ST_Validate`, `POINT`, and WKT constructors.
+The integer result carries the binary flag, and NULL-safe equality
+also carries the not-null flag. Both servers accept the geometry bytes
+as a BLOB and reject `MYSQL_TYPE_GEOMETRY` as an execute packet type
+with 1210, even for a NULL parameter. Metadata and result packets
+matched for six geometry-specific statements and their four bindings
+in both storage modes.

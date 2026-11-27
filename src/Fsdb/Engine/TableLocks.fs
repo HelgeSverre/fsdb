@@ -938,7 +938,7 @@ let private deleteAccesses defaultDb (delete: DeleteStmt) =
     @ (delete.OrderBy |> List.collect (fst >> expressionAccesses boundCtes defaultDb))
     @ optionalExpressionAccesses boundCtes defaultDb delete.Limit
 
-let rec private directStatementAccesses defaultDb =
+let rec internal directStatementAccesses defaultDb =
     function
     | Select select -> selectAccesses Set.empty defaultDb select
     | Union(first, rest, orderBy, limit, offset) ->

@@ -2381,6 +2381,9 @@ let private handleConnection
 
                                             match typesResult with
                                             | Result.Error error -> Result.Error error
+                                            | Result.Ok types when types |> List.exists (fun (typeId, _) -> typeId = TypeGeometry) ->
+                                                // MySQL advertises GEOMETRY descriptors but accepts geometry parameter bytes as BLOB.
+                                                Result.Error(1210, "Incorrect arguments to mysqld_stmt_execute")
                                             | Result.Ok types ->
                                                 let isNull i =
                                                     (int nullBitmap.[i / 8] >>> (i % 8)) &&& 1 = 1
@@ -2398,10 +2401,6 @@ let private handleConnection
                                                             let bytes = buffer.ToArray()
                                                             if typeId = TypeBlob then
                                                                 VBytes bytes
-                                                            elif typeId = TypeGeometry then
-                                                                match tryGeometryFromMySqlBinary bytes with
-                                                                | Some geometry -> VGeometry geometry
-                                                                | None -> raise (GeometryError "Invalid GIS data provided to binary parameter")
                                                             else
                                                                 stringValueOfBytes bytes
                                                         | None -> if isNull i then VNull else readBinaryValue r typeId unsigned)

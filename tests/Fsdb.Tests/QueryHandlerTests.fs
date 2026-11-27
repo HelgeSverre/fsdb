@@ -5906,6 +5906,44 @@ let tests =
               let join = "SELECT a.id AS id FROM byte_shapes a JOIN byte_shapes b ON a.g=b.b ORDER BY a.id"
               Expect.equal (run join) (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ])) join
 
+          testCase "geometry argument errors bind before evaluating ordered expressions"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE geom_order(id INT PRIMARY KEY, g GEOMETRY, b VARBINARY(100))"
+                        "CREATE VIEW geom_order_view AS SELECT g AS shape,b FROM geom_order" ]
+              for sql, operation in
+                  [ "SELECT POINT(1,2)<POINT(1,2)", "<"
+                    "SELECT IF(0,POINT(NULL,2)>NULL,1)", ">"
+                    "SELECT shape>b FROM geom_order_view LIMIT 0", ">"
+                    "SELECT id FROM geom_order WHERE 0 AND g<=NULL", "<="
+                    "SELECT 1 BETWEEN 0 AND POINT(1,2)", "between"
+                    "SELECT (SELECT g FROM geom_order)>NULL", ">"
+                    "SELECT 1>ALL(SELECT g FROM geom_order)", "<="
+                    "SELECT MIN(g) FROM geom_order", "min"
+                    "SELECT MAX(g) OVER () FROM geom_order", "max"
+                    "SELECT LEAST(g,b) FROM geom_order", "least"
+                    "SELECT g LIKE b FROM geom_order", "like"
+                    "UPDATE geom_order SET id=0 WHERE g<b", "<"
+                    "DELETE FROM geom_order WHERE g<b", "<"
+                    "EXPLAIN SELECT g<b FROM geom_order", "<"
+                    "PREPARE s FROM 'SELECT POINT(1,2) < ?'", "<" ] do
+                  Expect.equal (run sql) (Err(1210, $"Incorrect arguments to {operation}")) sql
+
+              let control =
+                  "SELECT (1,POINT(1,2)) <= (1,POINT(1,2)) AS row_test, CAST(POINT(1,2) AS BINARY)<X'00' AS byte_test, BINARY POINT(1,2)<X'00' AS unary_test"
+              Expect.equal (run control)
+                  (ResultSet([ "row_test"; "byte_test"; "unary_test" ], [ [ Some "1"; Some "0"; Some "0" ] ])) control
+
+              let session = create 1 (Fsdb.Storage.create ())
+              match prepareStatementForSession session "SELECT POINT(1,2) = ? AS ordinary, ? <=> POINT(1,2) AS nullable" with
+              | Ok(statement, count) ->
+                  let parameters, columns = preparedMetadata session statement count
+                  Expect.equal (parameters |> List.map _.TypeId) [ TypeGeometry; TypeGeometry ] "comparison parameters inherit geometry types"
+                  Expect.equal (columns |> List.map (fun column -> column.Metadata.TypeId, column.Metadata.ColumnLength, column.Metadata.Flags))
+                      [ TypeLongLong, 1u, BinaryFlag; TypeLongLong, 1u, BinaryFlag ||| NotNullFlag ] "geometry comparison result flags"
+              | Error error -> failtestf "expected geometry equality to prepare, got %A" error
+
           testCase "ST_IsSimple distinguishes repeated coordinates and intersecting interiors from validity"
           <| fun _ ->
               let run = queryFixture [ "USE fsdb" ]

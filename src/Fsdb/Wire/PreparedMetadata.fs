@@ -224,7 +224,15 @@ let private inferParameters
             | CastCharAlias(_, length, _) -> Some(ColumnWire.parameterMetadataOfType(TChar(castWidth length)))
             | CastCharTarget(_, length, _) -> Some(ColumnWire.parameterMetadataOfType(TChar(castWidth length)))
             | CastAsBinary(_, length) -> Some(ColumnWire.parameterMetadataOfType(TBinary(castWidth length)))
-            | BinaryCast inner
+            | FuncCall(name, _) when
+                Functions.isGeometryConstructor name
+                || (Functions.lookupScalarMetadata name registry
+                    |> Option.exists (fun metadata -> metadata.TypeId = TypeGeometry)) ->
+                Some geometry
+            | BinaryCast inner ->
+                match loop inner with
+                | Some metadata when metadata.TypeId = TypeGeometry -> Some binary
+                | metadata -> metadata
             | Collate(inner, _)
             | Distinct inner
             | OrderBy(inner, _) -> loop inner
