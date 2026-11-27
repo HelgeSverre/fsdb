@@ -35923,8 +35923,8 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
             let range () =
                 let prefix =
                     keys |> Seq.map boundFor |> Seq.takeWhile Option.isSome |> Seq.choose id |> List.ofSeq
-                match List.skip prefix.Length keys, rangeLimit prefix.Length with
-                | key :: remaining, Some limit when prefix.Length = equalities.Length ->
+                match List.skip prefix.Length keys with
+                | key :: remaining when prefix.Length = equalities.Length ->
                     let keyColumn = predicateColumn >> Option.filter (equalsIgnoreCase key)
                     let predicates =
                         conditions |> List.filter (equality >> Option.isNone)
@@ -35950,16 +35950,28 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                         let exactBound = Option.forall (fun (values, _) -> Storage.isExactPrimaryKeyPrefix store table values)
                         let physicalLower, physicalUpper =
                             if keyDirection key = Desc then edge upper, edge lower else edge lower, edge upper
-                        let rangeRead = Some(Storage.PrimaryRange(physicalLower, physicalUpper), limit)
+                        let access = Storage.PrimaryRange(physicalLower, physicalUpper)
+                        let limit = rangeLimit prefix.Length
+                        let rangeRead = limit |> Option.map (fun scan -> access, scan)
                         if not (exactBound physicalLower && exactBound physicalUpper) then None
                         else
                             match lower, upper with
                             | Some(low, includeLow), Some(high, includeHigh) when compare low high = 0 ->
                                 if not (includeLow && includeHigh) then None
-                                elif remaining.IsEmpty then point (prefix @ [ low ]) |> Option.map (fun access -> access, None)
-                                // Separate inequalities that collapse to a prefix can choose a wider backward scan.
-                                elif not select.OrderBy.IsEmpty && not (limit |> Option.exists (fun (direction, _) -> direction = Storage.ForwardScan)) then None
-                                else rangeRead
+                                elif remaining.IsEmpty then
+                                    limit |> Option.bind (fun _ -> point (prefix @ [ low ])) |> Option.map (fun access -> access, None)
+                                else
+                                    let primaryIsOnlyChoice =
+                                        not source.IndexHints.IsEmpty
+                                        || not (table.Indexes |> List.exists (fun index ->
+                                            index.Visible && index.Kind = BTree && not (equalsIgnoreCase "PRIMARY" index.Name)))
+                                    match limit with
+                                    | Some(Some(Storage.ForwardScan, _)) -> rangeRead
+                                    | Some None when select.OrderBy.IsEmpty || primaryIsOnlyChoice -> rangeRead
+                                    // Separate inequalities keep the collapsed column as a range key.
+                                    // Ordering just its suffix uses filesort after scanning the whole prefix.
+                                    | None when primaryIsOnlyChoice && (rangeLimit (prefix.Length + 1)).IsSome -> Some(access, None)
+                                    | _ -> None
                             | Some(low, _), Some(high, _) when compare low high > 0 -> None
                             | _ -> rangeRead
                 | _ -> None

@@ -338,13 +338,39 @@ ordered parts with the first index part's direction when deciding
 whether to use a backward range scan. A differently ordered interior
 equality-bound part can be skipped. A single `BETWEEN` with identical
 integer endpoints can extend the equality prefix. Separate inequalities
-that collapse to a partial key can use different scans and remain open,
-as do unordered limits.
+that collapse to a partial key can use different scans. The suffix sort
+case is covered below. Access paths whose index scan choice depends on
+cost and unordered limits remain open.
 [MySQL 8.4.11 optimizer source](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_optimizer.cc#L1706-L1804).
 
 MySQL and both Fsdb modes matched all 328 maintained schedule checks.
 Another 3,558 row, record-lock, and sampled gap checks matched across
 208 two- and three-column scans.
+
+#### Collapsed ranges sorted by the remaining key
+
+On a primary key `(a,b)`, MySQL 8.4.11 uses a range scan and filesort for
+`WHERE a>=2 AND a<=2 ORDER BY b DESC LIMIT 1`. The inequalities bound
+`a` to `2` but the optimizer still treats `a` as a range key for ordering.
+The scan locks every row with `a=2` and the gaps through the prefix,
+including the gap to its physical successor. An absent prefix protects
+its containing gap and leaves neighboring records writable.
+
+With rows `(2,10)` through `(2,40)`, the query returns `(2,40)`. A
+concurrent `UPDATE` through a joined view that targets `(2,10)` gets lock
+timeout 1205 while the reader is open, and succeeds after rollback.
+The prior Fsdb plan returned `(2,40)` without the range locks, so the
+update succeeded during the read transaction. Fsdb now uses the same
+full-range lock path as the other audited filesorts. The maintained
+oracle covers both index directions, a projected ORDER BY alias with
+OFFSET, and an empty prefix. MySQL, in-memory Fsdb, and durable Fsdb
+each passed all 606 maintained schedule checks.
+
+An expanded comparison matched all 364 result, record-lock, and gap
+checks across 24 two- and three-column scans. It covered implicit
+SERIALIZABLE reads and explicit `FOR SHARE` and `FOR UPDATE` reads
+under REPEATABLE READ. With two qualifying inserts pending, both
+engines waited for the second writer even after the first committed.
 
 #### Table replacement with a live snapshot
 

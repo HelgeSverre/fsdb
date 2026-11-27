@@ -1205,6 +1205,36 @@ let tests =
                   finally
                       run reader "ROLLBACK" (Affected 0UL) |> ignore
 
+          testCase "sorting a collapsed primary prefix locks rows outside the limit"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let admin = run (create 1 store) "CREATE TABLE gate(a INT,b INT,n INT DEFAULT 1,PRIMARY KEY(a,b))" (Affected 0UL)
+              run admin "INSERT INTO gate(a,b) VALUES(1,40),(2,10),(2,20),(2,30),(2,40),(4,10)" (Affected 6UL) |> ignore
+              run admin "CREATE TABLE tags(a INT PRIMARY KEY,delta INT)" (Affected 0UL) |> ignore
+              run admin "INSERT INTO tags VALUES(2,10)" (Affected 1UL) |> ignore
+              run admin "CREATE VIEW writable AS SELECT g.a,g.b,g.n,t.delta FROM gate g JOIN tags t ON t.a=g.a" (Affected 0UL) |> ignore
+              let writer = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let reader = run (create 3 store) "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE" (Affected 0UL)
+              let reader = run reader "BEGIN" (Affected 0UL)
+              let reader = run reader "SELECT b FROM gate FORCE INDEX (PRIMARY) WHERE a>=2 AND a<=2 ORDER BY b DESC LIMIT 1"
+                               (ResultSet([ "b" ], [ [ Some "40" ] ]))
+              let write = "UPDATE writable SET n=n+delta WHERE a=2 AND b=10"
+              try
+                  for sql in [ write; "INSERT INTO gate(a,b) VALUES (3,20)" ] do
+                      match handle writer sql |> snd with
+                      | Err(1205, _) -> ()
+                      | result -> failtestf "%s should wait on the scanned prefix, got %A" sql result
+                  run writer "INSERT INTO gate(a,b) VALUES (4,50)" (Affected 1UL) |> ignore
+              finally
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+              run writer write (Affected 1UL) |> ignore
+              run writer "SELECT n FROM gate WHERE a=2 AND b=10" (ResultSet([ "n" ], [ [ Some "11" ] ])) |> ignore
+
           testCase "table DDL waits for a transaction that accessed its target"
           <| fun _ ->
               let run session sql expected =

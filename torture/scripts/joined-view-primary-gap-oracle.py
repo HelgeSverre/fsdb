@@ -880,6 +880,33 @@ def check(port, mysql):
             (("a=2 AND b=20 AND c=5", 3572), ("a=2 AND b=20 AND c=10", 1)),
             (("(2,20,7)", TIMEOUT), ("(2,25,5)", TIMEOUT), ("(2,15,5)", 1)),
         ),
+        (
+            "collapsed ascending prefix filesorts before the limit",
+            ("CREATE TABLE gate(a INT,b INT,PRIMARY KEY(a,b))", composite_rows),
+            "SELECT b FROM gate FORCE INDEX(PRIMARY) WHERE a>=2 AND a<=2 ORDER BY b DESC LIMIT 1",
+            ((40,),),
+            (("a=2 AND b=10", 3572), ("a=2 AND b=40", 3572), ("a=4 AND b=10", 1)),
+            (("(2,15)", TIMEOUT), ("(3,20)", TIMEOUT), ("(4,50)", 1)),
+        ),
+        (
+            "collapsed descending prefix filesorts in suffix order",
+            (
+                "CREATE TABLE gate(a INT,b INT,PRIMARY KEY(a DESC,b DESC))",
+                composite_rows,
+            ),
+            "SELECT b AS newest FROM gate WHERE a>=2 AND a<=2 ORDER BY newest DESC LIMIT 1 OFFSET 1",
+            ((30,),),
+            (("a=2 AND b=10", 3572), ("a=2 AND b=40", 3572), ("a=4 AND b=10", 1)),
+            (("(2,15)", TIMEOUT), ("(3,20)", TIMEOUT), ("(4,50)", 1)),
+        ),
+        (
+            "absent collapsed prefix locks its gap",
+            composite_range,
+            "SELECT b FROM gate FORCE INDEX(PRIMARY) WHERE a>=3 AND a<=3 ORDER BY b ASC LIMIT 1",
+            (),
+            (("a=2 AND b=10", 1), ("a=4 AND b=10", 1)),
+            (("(2,5)", TIMEOUT), ("(3,20)", TIMEOUT), ("(2,15)", 1)),
+        ),
     ):
         with fixture(port, schema, mysql, setup) as (_, _, reader, _, probe):
             execute(reader, "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE")
