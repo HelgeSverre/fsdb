@@ -1703,6 +1703,30 @@ let tests =
               let reloaded = load dir
               Expect.equal (rowsOf reloaded defaultDatabase "t") [ [| VInt 1L; VInt 30L |] ] "the last candidate survives replay"
 
+          testCase "WAL replay preserves repeated duplicate-key updates in one upsert"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let setup = Fsdb.Session.create 1 store
+              run setup "CREATE TABLE t(id INT PRIMARY KEY,u INT NOT NULL, p INT, UNIQUE KEY ux(u))" (Affected 0UL) |> ignore
+              run setup "INSERT INTO t VALUES(20,2,0),(40,4,0)" (Affected 2UL) |> ignore
+              run setup "INSERT INTO t VALUES(40,4,7),(20,2,4),(40,4,2) ON DUPLICATE KEY UPDATE u=VALUES(p)"
+                  (Affected 6UL)
+              |> ignore
+              let query = "SELECT id,u FROM t ORDER BY id"
+              let swapped = ResultSet([ "id"; "u" ], [ [ Some "20"; Some "4" ]; [ Some "40"; Some "2" ] ])
+              run setup query swapped |> ignore
+              let recovered = Fsdb.Session.create 2 (load dir)
+              run recovered query swapped |> ignore
+              run recovered "SELECT id FROM t FORCE INDEX(ux) WHERE u=2"
+                  (ResultSet([ "id" ], [ [ Some "40" ] ]))
+              |> ignore
+
           testCase "snapshot and WAL recovery rebuild non-unique equality and ordered indexes"
           <| fun _ ->
               let dir = tempDataDir ()

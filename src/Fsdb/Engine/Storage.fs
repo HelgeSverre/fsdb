@@ -15229,6 +15229,7 @@ let private resolveReplayIdentity
 
 let private mutationsById table items identity before after onMissing =
     let consumed = HashSet<RowId>()
+    let latest = Dictionary<RowId, ReplayMutation>()
     let fallbackRows = lazy (
         let rows = Dictionary<Value[], Queue<RowId>>(HashIdentity.Structural)
         for rowId, row in table.RowsArray.Indexed do
@@ -15245,12 +15246,22 @@ let private mutationsById table items identity before after onMissing =
         let preferred = identity item
         let expected = before item
 
-        match resolveReplayIdentity table consumed fallbackRows preferred expected with
+        // Later candidates in an upsert can update a row already resolved
+        // within this event. Check its preceding image and keep the remapped id.
+        let resolved =
+            match latest.TryGetValue preferred with
+            | true, preceding when preceding.After = Some expected -> Some preceding.RowId
+            | true, _ -> None
+            | false, _ -> resolveReplayIdentity table consumed fallbackRows preferred expected
+
+        match resolved with
         | Some rowId ->
-            Some
+            let mutation =
                 { RowId = rowId
                   Before = expected
                   After = after item }
+            latest.[preferred] <- mutation
+            Some mutation
         | None ->
             onMissing (sprintf "row identity %d does not match its WAL image" (RowId.value preferred))
             None)
