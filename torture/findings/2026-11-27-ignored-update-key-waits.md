@@ -40,8 +40,37 @@ per candidate. The regression also checks the committed rows after
 WAL replay.
 
 The [joined UPDATE follow-up](2026-11-27-joined-update-key-waits.md)
-fixes the corresponding wait in audited autocommit joins. If an
-initial duplicate and a newly committed duplicate affect the same
-batch, Fsdb can report the initial duplicate first even when its row
-came later in the statement. The tested mixed batch retained the
-correct rows and warning contents.
+fixes the corresponding wait in audited autocommit joins.
+
+## Warning order and retention
+
+Add row `(4,7,5)` before starting either session, then use this update
+in session B.
+
+```sql
+UPDATE IGNORE ai
+SET k=CASE id WHEN 1 THEN 2 WHEN 2 THEN 1 WHEN 3 THEN 7 ELSE 8 END,
+    qty=qty+1
+WHERE id<9
+ORDER BY id;
+SHOW COUNT(*) WARNINGS;
+SHOW WARNINGS;
+```
+
+If session A commits, row 3 encounters key 7 while the batch is
+staged. The post-wait check finds duplicates for keys 2 and 1 in rows
+1 and 2. Fsdb now records the late warnings at their original row
+positions, so the order is 2, 1, 7 and row 4 still changes. With
+`max_error_count=2`, MySQL and Fsdb both retain warnings 2 and 1 and
+report three warnings in total. [MySQL SHOW WARNINGS reference](https://dev.mysql.com/doc/refman/8.4/en/show-warnings.html)
+
+Thirty-two schedules matched MySQL 8.4.11 in memory and on disk.
+They covered retention limits of 64, 2, 1, and 0, autocommit and
+explicit transactions, and both outcomes for the key holder.
+The variant with `qty=CASE id WHEN 1 THEN 1/0 ELSE qty+1 END`
+also verified that the division warning stays ahead of the first
+late duplicate.
+
+A separate coercion gap remains even without contention. Assigning
+`'bad'` to an INT column under UPDATE IGNORE stores zero with warning
+1366 in MySQL. Fsdb returns error 1366 and leaves the old value.

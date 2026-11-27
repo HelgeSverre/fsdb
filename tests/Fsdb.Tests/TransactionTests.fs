@@ -7074,6 +7074,44 @@ let tests =
                   | ResultSet(_, actual) -> Expect.equal actual (expected |> List.map (List.map (string >> Some))) ending
                   | other -> failtestf "expected committed rows, got %A" other
 
+          testCase "UPDATE IGNORE retains duplicate warnings in row order after a key wait"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              for maxWarnings in [ 64; 2; 1; 0 ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  run setup "CREATE TABLE moved_key(id INT PRIMARY KEY,k INT UNIQUE,qty INT)" (Affected 0UL) |> ignore
+                  run setup "INSERT INTO moved_key VALUES(1,1,5),(2,3,5),(3,5,5),(4,7,5)" (Affected 4UL) |> ignore
+                  let owner = run (create 2 store) "START TRANSACTION" (Affected 0UL)
+                  let owner = run owner "INSERT INTO moved_key VALUES(9,2,7)" (Affected 1UL)
+                  let waiter = run (create 3 store) $"SET SESSION max_error_count={maxWarnings}" (Affected 0UL)
+
+                  use started = new Threading.ManualResetEventSlim()
+                  let pending =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter "UPDATE IGNORE moved_key SET k=CASE id WHEN 1 THEN 2 WHEN 2 THEN 1 WHEN 3 THEN 7 ELSE 8 END,qty=qty+1 WHERE id<9 ORDER BY id")
+                  Expect.isTrue (started.Wait 5000) "the UPDATE starts"
+                  let blocked = not (pending.Wait 100)
+                  run owner "COMMIT" (Affected 0UL) |> ignore
+                  Expect.isTrue (pending.Wait 5000) "the UPDATE resumes"
+                  let waiter, result = pending.GetAwaiter().GetResult()
+                  Expect.isTrue blocked "the update waits for the held destination key"
+                  Expect.equal result (Affected 1UL) "only the last candidate changes"
+                  let waiter, warningCount = handle waiter "SHOW COUNT(*) WARNINGS"
+                  match warningCount with
+                  | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ] ] "the total counts retained and discarded warnings"
+                  | other -> failtestf "expected the warning count, got %A" other
+                  let warning key = [ Some "Warning"; Some "1062"; Some $"Duplicate entry '{key}' for key 'moved_key.k'" ]
+                  match handle waiter "SHOW WARNINGS" |> snd with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows ([ 2; 1; 7 ] |> List.truncate maxWarnings |> List.map warning) $"retention limit {maxWarnings}"
+                  | other -> failtestf "expected retained warnings, got %A" other
+
           testCase "joined updates see the key committed during their wait with permanent or temporary sources"
           <| fun _ ->
               let run session sql expected =

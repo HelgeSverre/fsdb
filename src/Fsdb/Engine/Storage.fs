@@ -13215,9 +13215,15 @@ type private UniqueKeyMoves =
       Changes: RowUpdate list
       Moves: UniqueKeyMove list }
 
-let private movedUniqueKeys dbName tableName
-    (changes: RowUpdate list, cascaded: Map<TableAddress, RowUpdate list>, catalog: Catalog) =
-    Map.change (tableAddress dbName tableName) (fun affected -> Some(changes @ Option.defaultValue [] affected)) cascaded
+type private StagedUpdate =
+    { Changes: RowUpdate list
+      Cascaded: Map<TableAddress, RowUpdate list>
+      OriginalCatalog: Catalog
+      WarningPositions: Dictionary<RowId, int> option }
+
+let private movedUniqueKeys dbName tableName (batch: StagedUpdate) =
+    let catalog = batch.OriginalCatalog
+    Map.change (tableAddress dbName tableName) (fun affected -> Some(batch.Changes @ Option.defaultValue [] affected)) batch.Cascaded
     |> Map.toList
     |> List.choose (fun (address, rows) ->
         tryCatalogTable address catalog
@@ -13330,7 +13336,7 @@ let private recheckIgnoredKeyMoves database (original: Table) (current: Table) c
                 | None -> raise (LockWaitTimeout database)
                 | Some rowId ->
                     match validateUpdatedUniqueKeys current uniqueGroups index rowId change.After with
-                    | Error error -> index, kept, error :: rejected
+                    | Error error -> index, kept, (change.RowId, error) :: rejected
                     | Ok row ->
                         let index = reindexUniqueRow current.Columns uniqueGroups (Some(rowId, change.Before)) (Some(rowId, row)) index
                         index, change :: kept, rejected)
@@ -13356,22 +13362,33 @@ let private rebuildAcceptedUpdates (original: Table) changes =
             SecondaryIndex = secondary
             SecondaryOrder = order }
 
-let private withCheckedUpdateDestinations owner store policy groups replaceTable (batch, ((changes, cascades, catalog) as result)) publish =
+let private withCheckedUpdateDestinations owner store policy groups replaceTable (batch, result: StagedUpdate) publish =
     withMovedUniqueKeys owner store groups (fun () ->
         match policy, groups with
         | _, [] -> publish (batch, result)
         | RejectConstraintViolation, _ ->
             validateMovedUniqueKeys (currentUpdateCatalog store) groups
             |> Result.bind (fun () -> publish (batch, result))
-        | SkipConstraintViolation, [group] when Map.isEmpty cascades ->
+        | SkipConstraintViolation, [group] when Map.isEmpty result.Cascaded ->
             match tryCatalogTable group.Address (currentUpdateCatalog store) with
             | Some current when not (obj.ReferenceEquals(current, group.Original)) && sameTableSchema current group.Original ->
-                let kept, rejected = recheckIgnoredKeyMoves group.Address.Database group.Original current changes
+                let kept, rejected = recheckIgnoredKeyMoves group.Address.Database group.Original current result.Changes
                 if rejected.IsEmpty then publish (batch, result)
                 else
-                    rejected |> List.iter (tryIgnoreUpdateConstraintError >> ignore)
+                    let position rowId =
+                        match result.WarningPositions with
+                        | Some positions ->
+                            match positions.TryGetValue rowId with
+                            | true, before -> ValueSome before
+                            | _ -> ValueNone
+                        | None -> ValueNone
+                    rejected
+                    |> List.map (fun (rowId, error) ->
+                        let code, message = toMySqlError error
+                        position rowId, code, message)
+                    |> Diagnostics.recordWarningsAt
                     let table = rebuildAcceptedUpdates group.Original kept
-                    publish (replaceTable group.Address table batch, (kept, cascades, catalog))
+                    publish (replaceTable group.Address table batch, { result with Changes = kept })
             | _ -> publish (batch, result)
         | SkipConstraintViolation, _ -> publish (batch, result))
 
@@ -13454,17 +13471,13 @@ let private updateRowsCore
     (predicate: RowId -> Value[] -> Result<bool, StorageError>)
     (updater: Value[] -> Result<Value[], StorageError>)
     : Result<int, StorageError> =
-    let eventsOf
-        ((changes: RowUpdate list),
-         (cascaded: Map<TableAddress, RowUpdate list>),
-         (catalog: Catalog))
-        =
-        [ if not changes.IsEmpty then
-              RowsUpdatedById(dbName, tableName, changes)
+    let eventsOf (batch: StagedUpdate) =
+        [ if not batch.Changes.IsEmpty then
+              RowsUpdatedById(dbName, tableName, batch.Changes)
 
-          for KeyValue(address, updates) in cascaded do
+          for KeyValue(address, updates) in batch.Cascaded do
               if not updates.IsEmpty then
-                  let database, table = catalogTableIdentity catalog address
+                  let database, table = catalogTableIdentity batch.OriginalCatalog address
                   RowsUpdatedById(database, table, updates) ]
 
     let apply candidateRows catalog db =
@@ -13477,6 +13490,14 @@ let private updateRowsCore
             let uniqueGroups = uniqueKeyGroups table
             let secondaryGroups = secondaryKeyGroups table
             let checkFks = store.ForeignKeyChecks
+            let warningPositions =
+                if constraintPolicy = SkipConstraintViolation && not uniqueGroups.IsEmpty then
+                    Some(Dictionary<RowId, int>())
+                else None
+            let warningKeyColumns =
+                match warningPositions with
+                | Some _ -> uniqueGroups |> List.collect _.Indices |> List.distinct
+                | None -> []
             // Failed statements discard the private builder, keeping
             // partial page rewrites outside the published catalog.
             let builder = table.RowsArray.ToBuilder()
@@ -13528,6 +13549,12 @@ let private updateRowsCore
                                         | Some(newRow, index', secondaryIndex', secondaryOrder', cascadeCatalog', visited', cascaded') ->
                                             builder.[rowId] <- newRow
                                             (if newRow <> row then
+                                                 match warningPositions with
+                                                 | Some positions when warningKeyColumns |> List.exists (fun i -> row.[i] <> newRow.[i]) ->
+                                                     match Diagnostics.warningPosition () with
+                                                     | ValueSome position -> positions.[rowId] <- position
+                                                     | ValueNone -> ()
+                                                 | _ -> ()
                                                  { RowId = rowId
                                                    Before = row
                                                    After = newRow }
@@ -13546,7 +13573,12 @@ let private updateRowsCore
             |> foldWithCancellation step (Ok([], table.UniqueIndex, table.SecondaryIndex, table.SecondaryOrder, catalog, Map.empty, Map.empty))
             |> Result.map (fun (changesRev, index, secondaryIndex, secondaryOrder, cascadeCatalog, _visited, cascaded) ->
                 let updated = publishRows table { table with RowsArray = builder.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder }
-                setCatalogTable address updated cascadeCatalog, (List.rev changesRev, cascaded, catalog)))
+                let batch =
+                    { Changes = List.rev changesRev
+                      Cascaded = cascaded
+                      OriginalCatalog = catalog
+                      WarningPositions = warningPositions }
+                setCatalogTable address updated cascadeCatalog, batch))
 
     let publish owner =
         let qualifiedForeignKeys =
@@ -13592,7 +13624,7 @@ let private updateRowsCore
             withIndexExpressionDiagnostics store (fun () -> withUpdateLockOwner store publish))
 
     match result with
-    | Ok(changes, _, _) -> Ok changes.Length
+    | Ok batch -> Ok batch.Changes.Length
     | Error e -> Error e
 
 /// Updates matching rows atomically, failing the statement on a constraint violation.

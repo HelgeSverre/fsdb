@@ -51,13 +51,43 @@ let record (condition: Condition) : unit =
 let withRetainedLimit limit body =
     DynamicScope.withValue retainedLimit (Some(max 0 (min 65535 limit))) body
 
-let warning code message =
-    record
-        { Level = Warning
-          Code = code
-          State = SqlState.forCode code
-          Message = message
-          Information = Map.empty }
+let private warningCondition code message =
+    { Level = Warning
+      Code = code
+      State = SqlState.forCode code
+      Message = message
+      Information = Map.empty }
+
+let warning code message = record (warningCondition code message)
+
+let internal warningPosition () =
+    match active.Value with
+    | Some collector when collector.Count < collector.Limit -> ValueSome collector.Count
+    | _ -> ValueNone
+
+/// Merge warnings in row order at positions taken before any insertion.
+/// Positions beyond the retained prefix still contribute to the total count.
+let internal recordWarningsAt (warnings: (int voption * int * string) list) =
+    active.Value
+    |> Option.iter (fun collector ->
+        collector.Count <- collector.Count + warnings.Length
+        let conditions = collector.Conditions
+        if conditions.Count < collector.Limit || (warnings |> List.exists (fun (position, _, _) -> position.IsSome)) then
+            let original = conditions.ToArray()
+            conditions.Clear()
+            let mutable next = 0
+            let copyThrough position =
+                while next < position && conditions.Count < collector.Limit do
+                    conditions.Add(original.[next])
+                    next <- next + 1
+
+            for position, code, message in warnings do
+                let before = min original.Length (position |> ValueOption.defaultValue original.Length)
+                copyThrough before
+                if conditions.Count < collector.Limit then
+                    conditions.Add(boundedCondition (warningCondition code message))
+
+            copyThrough original.Length)
 
 let internal numericConversionCondition code message =
     if strictNumericConversion.Value then raise (RaisedCondition(SqlState.create code message))

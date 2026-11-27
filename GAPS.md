@@ -936,8 +936,8 @@ keeps unrelated updates after the wait. [Wrapped autocommit updates](torture/fin
 now do the same for audited joins, CTEs and correlated filters.
 [Joins through temporary sources](torture/findings/2026-11-27-joined-update-key-waits.md#session-local-join-sources)
 also refresh permanent keys after a wait, including when a temporary
-table shadows a permanent source. Warning order can differ when some
-conflicts were visible before the wait.
+table shadows a permanent source. [Batched warning retention](torture/findings/2026-11-27-ignored-update-key-waits.md#warning-order-and-retention)
+now combines duplicates from before and after a wait in row order.
 
 A [current write-path control](benchmarks/results/2026-10-14-write-path-control.md)
 measures keyless inserts at one, four, and eight writers with WAL-backed and
