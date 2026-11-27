@@ -3481,6 +3481,10 @@ implementation effort:
    The digest-pinned Linux image still differs on mixed-latitude and polar
    fixtures. Multipart overlay differences and spatial cost estimates remain
    open.
+   [Cartesian mixed-collection overlays](torture/findings/2026-11-27-cartesian-collection-overlays.md)
+   split nested members by dimension and match MySQL spatial equality in the
+   audited SRID 0 and EPSG 3857 cases. Some WKT member ordering, ring starts,
+   and line segmentation still differ.
    [Point-only predicates](torture/findings/2026-11-25-geographic-point-overlays.md#point-set-predicates)
    agree with the oracle for the audited near-equality, duplicate, and empty cases.
    [Point-only geometry collections](torture/findings/2026-11-25-geographic-point-overlays.md#point-only-geometry-collections)

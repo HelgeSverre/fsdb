@@ -575,6 +575,25 @@ let tests =
                         | Fsdb.Functions.SqlError(1210, _) -> ()
                         | error -> failtestf "expected overflowing coordinates to be rejected, got %A" error)
 
+                testCase "Cartesian overlays accept nested collections with mixed dimensions"
+                <| fun _ ->
+                    let collection = "GEOMETRYCOLLECTION(LINESTRING(0 0,4 4),POINT(6 6),GEOMETRYCOLLECTION(POINT(1 1)))"
+                    let crossing = "LINESTRING(0 4,4 0)"
+                    let polygon = "POLYGON((2 2,2 6,6 6,6 2,2 2))"
+                    let cases =
+                        [ "ST_Union", crossing, collection, "GEOMETRYCOLLECTION(LINESTRING(0 0,4 4),LINESTRING(0 4,4 0),POINT(6 6))"
+                          "ST_Intersection", collection, polygon, "GEOMETRYCOLLECTION(LINESTRING(2 2,4 4),POINT(6 6))"
+                          "ST_Intersection", collection, "MULTIPOINT(1 1,6 6)", "GEOMETRYCOLLECTION(POINT(1 1),POINT(6 6))"
+                          "ST_Difference", collection, polygon, "LINESTRING(0 0,2 2)"
+                          "ST_SymDifference", "POINT(2 2)", collection,
+                              "GEOMETRYCOLLECTION(MULTIPOINT((6 6)),MULTILINESTRING((0 0,4 4)))" ]
+                    for srid in [ 0L; 3857L ] do
+                        let geometry text = call "ST_GeomFromText" [ VString text; VInt srid ]
+                        for name, first, second, expected in cases do
+                            let result = call name [ geometry first; geometry second ]
+                            Expect.equal (call "ST_AsText" [ result ]) (VString expected) name
+                            Expect.equal (call "ST_SRID" [ result ]) (VInt srid) name
+
                 testCase "geographic overlays keep point order and geodesic boundary membership"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"

@@ -1938,15 +1938,205 @@ let private attempt srid operation =
     | :? ParseException as error -> Error error.Message
     | :? ArgumentException as error -> Error error.Message
 
-let internal overlay kind (first: Geometry) (second: Geometry) =
-    let spatialFunction =
-        match kind with
-        | OverlayKind.Intersection -> SpatialFunction.Intersection
-        | OverlayKind.Union -> SpatialFunction.Union
-        | OverlayKind.Difference -> SpatialFunction.Difference
-        | OverlayKind.SymmetricDifference -> SpatialFunction.SymDifference
+let private collectionParts shape =
+    let prependAll retained values = List.fold (fun rest value -> value :: rest) retained values
+    let rec split (points, lines, polygons) = function
+        | GEmpty -> points, lines, polygons
+        | GPoint(latitude, longitude) -> (latitude, longitude) :: points, lines, polygons
+        | GMultiPoint members -> prependAll points members, lines, polygons
+        | GLineString line -> points, line :: lines, polygons
+        | GMultiLineString members -> points, prependAll lines members, polygons
+        | GPolygon polygon -> points, lines, polygon :: polygons
+        | GMultiPolygon members -> points, lines, prependAll polygons members
+        | GGeometryCollection members -> List.fold (fun parts geometry -> split parts geometry.Shape) (points, lines, polygons) members
 
-    attempt first.Srid (fun () -> OverlayNGRobust.Overlay(geometryToNts first, geometryToNts second, spatialFunction))
+    let points, lines, polygons = split ([], [], []) shape
+    List.rev points, List.rev lines, List.rev polygons
+
+let private planarOverlayFunction = function
+    | OverlayKind.Intersection -> SpatialFunction.Intersection
+    | OverlayKind.Union -> SpatialFunction.Union
+    | OverlayKind.Difference -> SpatialFunction.Difference
+    | OverlayKind.SymmetricDifference -> SpatialFunction.SymDifference
+
+let private overlayPlanarCollection kind srid first second =
+    let geometry shape = { Srid = srid; Shape = shape }
+    let toNts = geometry >> geometryToNts
+    let collection = List.map geometry >> GGeometryCollection
+    let isCollection = function GGeometryCollection _ | GEmpty -> true | _ -> false
+
+    let narrow = function
+        | GMultiPoint [ (x, y) ] -> GPoint(x, y)
+        | GMultiLineString [ line ] -> GLineString line
+        | GMultiPolygon [ polygon ] -> GPolygon polygon
+        | shape -> shape
+
+    let group points lines polygons =
+        [ if not (List.isEmpty polygons) then GMultiPolygon polygons
+          if not (List.isEmpty lines) then GMultiLineString lines
+          if not (List.isEmpty points) then GMultiPoint points ]
+
+    let pack = function
+        | [] -> GEmpty
+        | [ shape ] -> narrow shape
+        | shapes -> collection shapes
+
+    let packMembers (points, lines, polygons) =
+        match group points lines polygons with
+        | [] -> GEmpty
+        | [ shape ] -> narrow shape
+        | _ -> collection [ yield! List.map GPolygon polygons
+                            yield! List.map GLineString lines
+                            for x, y in points do GPoint(x, y) ]
+
+    let orientPolygon = List.mapi (fun index ring ->
+        let expectedSign = if index = 0 then 1 else -1
+        if planarRingAreaSign ring = -expectedSign then List.rev ring else ring)
+
+    let pair operation left right =
+        let output =
+            OverlayNGRobust.Overlay(toNts left, toNts right, planarOverlayFunction operation)
+            |> fromNts srid
+        match output with
+        | Ok result -> result.Shape
+        | Error detail -> invalidArg "geometry" detail
+
+    let clipLine mask line =
+        let _, lines, _ = collectionParts (pair OverlayKind.Difference (GLineString line) mask)
+        lines
+
+    let pointSelection keep masks points =
+        match masks with
+        | [] -> if keep then [] else points
+        | masks ->
+            let masks = masks |> List.map (toNts >> RelateNG.Prepare)
+            points
+            |> List.mapi (fun index ((x, y) as coordinates) ->
+                Limits.checkQueryCancellation index
+                let point = toNts (GPoint(x, y))
+                let hit = masks |> List.exists (fun mask -> mask.Evaluate(point, RelatePredicate.Intersects()))
+                if hit = keep then Some coordinates else None)
+            |> List.choose id
+
+    let normalize (points, lines, polygons) =
+        let polygons =
+            polygons
+            |> List.indexed
+            |> List.fold (fun area (index, polygon) ->
+                Limits.checkQueryCancellation index
+                let polygon = GPolygon(orientPolygon polygon)
+                if area = GEmpty then polygon else pair OverlayKind.Union area polygon) GEmpty
+            |> collectionParts |> fun (_, _, polygons) -> List.map orientPolygon polygons
+        let lines =
+            let exterior =
+                if polygons.IsEmpty then lines
+                else List.collect (clipLine (GMultiPolygon polygons)) lines
+            exterior |> List.distinctBy (fun line -> min line (List.rev line))
+        let points =
+            points |> List.distinct
+            |> pointSelection false (group [] lines polygons)
+        points, lines, polygons
+
+    let parts shape =
+        let points, lines, polygons = collectionParts shape
+        if isCollection shape then normalize (points, lines, polygons)
+        else points, lines, List.map orientPolygon polygons
+
+    let subtract (points, lines, polygons) (otherPoints, otherLines, otherPolygons) =
+        let area = if List.isEmpty otherPolygons then None else Some(GMultiPolygon otherPolygons)
+        let polygons =
+            match area, polygons with
+            | Some mask, _ :: _ ->
+                let _, _, exterior = collectionParts (pair OverlayKind.Difference (GMultiPolygon polygons) mask)
+                List.map orientPolygon exterior
+            | _ -> polygons
+        let lines =
+            let subtractLine segments mask =
+                segments |> List.collect (fun line ->
+                    // A point contact leaves the original line intact.
+                    let _, overlap, _ = collectionParts (pair OverlayKind.Intersection (GLineString line) mask)
+                    if overlap.IsEmpty then [ line ] else clipLine mask line)
+            let exterior = area |> Option.map (fun mask -> List.collect (clipLine mask) lines) |> Option.defaultValue lines
+            List.fold subtractLine exterior (List.map GLineString otherLines)
+        let points = pointSelection false (group otherPoints otherLines otherPolygons) points
+        points, lines, polygons
+
+    let intersect left right =
+        let intersectGroup first second =
+            match first, second with
+            | GMultiPoint points, mask
+            | mask, GMultiPoint points ->
+                GMultiPoint(pointSelection true [ mask ] points)
+            | _ -> pair OverlayKind.Intersection first second
+
+        let grouping (points, lines, polygons) = group points lines polygons
+        let leftGroups, rightGroups = grouping left, grouping right
+        let members =
+            [ for first in leftGroups do
+                for second in rightGroups do
+                    let points, lines, polygons = intersectGroup first second |> collectionParts
+                    yield! List.map (orientPolygon >> GPolygon) polygons
+                    yield! List.map GLineString lines
+                    for x, y in points do GPoint(x, y) ]
+            |> List.distinct
+        match leftGroups, rightGroups with
+        // MySQL emits the results of each dimension as collection members.
+        | _ :: _ :: _, _ | _, _ :: _ :: _ -> pack members
+        | _ -> members |> collection |> collectionParts |> packMembers
+
+    let append (p1, l1, a1) (p2, l2, a2) = p1 @ p2, l1 @ l2, a1 @ a2
+
+    let rec cleanTree = function
+        | GGeometryCollection members ->
+            match members |> List.map (fun memberGeometry -> cleanTree memberGeometry.Shape) |> List.filter ((<>) GEmpty) |> List.distinct with
+            | [] -> GEmpty
+            | shapes -> collection shapes
+        | GPolygon polygon -> GPolygon(orientPolygon polygon)
+        | GMultiPolygon polygons -> GMultiPolygon(List.map orientPolygon polygons)
+        | shape -> shape
+
+    match kind with
+    | OverlayKind.Union ->
+        // The collection supplies the first members even when SQL puts it on the right.
+        let left, right = if isCollection first then first, second else second, first
+        append (collectionParts left) (collectionParts right) |> normalize |> packMembers
+    | OverlayKind.Intersection ->
+        if isCollection first then intersect (parts first) (parts second)
+        else intersect (parts second) (parts first)
+    | OverlayKind.Difference -> subtract (parts first) (parts second) |> packMembers
+    | OverlayKind.SymmetricDifference ->
+        match first, second with
+        | GEmpty, GGeometryCollection _ -> cleanTree second
+        | _ ->
+            let left, right =
+                if isCollection first then parts first, parts second
+                else parts second, parts first
+            let points, lines, polygons = append (subtract left right) (subtract right left)
+            let points, lines, polygons = normalize (points, lines, polygons)
+            match first, second with
+            | (GPoint _ | GMultiPoint _), GGeometryCollection _
+            | GGeometryCollection _, (GPoint _ | GMultiPoint _) ->
+                group points lines polygons |> List.rev |> pack
+            | GGeometryCollection _, GEmpty when polygons.IsEmpty -> packMembers (points, lines, polygons)
+            | GGeometryCollection _, (GGeometryCollection _ | GEmpty) ->
+                group points lines polygons |> List.rev |> pack
+            | GGeometryCollection _, (GLineString _ | GMultiLineString _)
+            | (GLineString _ | GMultiLineString _), GGeometryCollection _ ->
+                group points lines polygons
+                |> List.map (function GMultiLineString _ as shape -> narrow shape | shape -> shape)
+                |> pack
+            | _ ->
+                group points lines polygons
+                |> List.map (function GMultiPolygon _ as shape -> narrow shape | shape -> shape)
+                |> pack
+
+let internal overlay kind (first: Geometry) (second: Geometry) =
+    attempt first.Srid (fun () ->
+        match first.Shape, second.Shape with
+        | (GGeometryCollection _ | GEmpty), _
+        | _, (GGeometryCollection _ | GEmpty) ->
+            geometryToNts { first with Shape = overlayPlanarCollection kind first.Srid first.Shape second.Shape }
+        | _ -> OverlayNGRobust.Overlay(geometryToNts first, geometryToNts second, planarOverlayFunction kind))
 
 // Points compare in radians. A cell is wider than the relative comparison
 // tolerance anywhere in the geographic coordinate domain.
@@ -3447,21 +3637,6 @@ let private cleanGeographicPointTree shape =
         | shape -> narrowGeographicOverlayShape shape
 
     shape |> removeDuplicates |> narrow
-
-let private collectionParts shape =
-    let prependAll retained values = List.fold (fun rest value -> value :: rest) retained values
-    let rec split (points, lines, polygons) = function
-        | GEmpty -> points, lines, polygons
-        | GPoint(latitude, longitude) -> (latitude, longitude) :: points, lines, polygons
-        | GMultiPoint members -> prependAll points members, lines, polygons
-        | GLineString line -> points, line :: lines, polygons
-        | GMultiLineString members -> points, prependAll lines members, polygons
-        | GPolygon polygon -> points, lines, polygon :: polygons
-        | GMultiPolygon members -> points, lines, prependAll polygons members
-        | GGeometryCollection members -> List.fold (fun parts geometry -> split parts geometry.Shape) (points, lines, polygons) members
-
-    let points, lines, polygons = split ([], [], []) shape
-    List.rev points, List.rev lines, List.rev polygons
 
 let internal geometryIsSimple referenceSystem (geometry: Geometry) =
     let geographic = referenceSystem.SemiMajorAxis.IsSome
