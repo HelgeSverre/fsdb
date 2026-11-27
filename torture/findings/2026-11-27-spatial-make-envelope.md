@@ -29,11 +29,27 @@ table column declarations, and results of an MBR query over an indexed
 column. Prepared execution matched the parameter and result metadata
 and returned the same binary geometry.
 
-A separate 128-row fixture found an access-path gap. With
-`MBRCONTAINS(ST_MakeEnvelope(POINT(63.5,-1),POINT(65.5,1)),p)`, MySQL
-lists the spatial index as possible and selects it with `FORCE INDEX`.
-Fsdb scans the table. Fsdb uses the index for the equivalent
-`ST_GeomFromText` polygon and examines two candidates.
+## Spatial index probes
+
+In a table of 128 indexed points at `(id, 0)`, the predicate
+`MBRCONTAINS(ST_MakeEnvelope(POINT(63.5,-1),POINT(65.5,1)),p)`
+now supplies a spatial range with two candidate rows in Fsdb's plan. The
+previous plan scanned all 128 rows. MySQL lists the index as possible
+and uses it with `FORCE INDEX` on this fixture.
+[MySQL spatial index selection](https://dev.mysql.com/doc/refman/8.4/en/using-spatial-indexes.html)
+
+The planner can evaluate built-in geometry constructors with literal
+arguments, including projected points and point WKB. Row-dependent
+arguments and text-to-number coordinate coercion continue through normal
+expression evaluation. An invalid constant can still report its SQL error
+during execution.
+
+The 25-statement wire comparison matched MySQL 8.4.11 before and after,
+including SELECT with and without index hints, UPDATE, DELETE, and
+mismatched-SRID diagnostics. The new range plan also appeared with WAL
+enabled.
+
+## Materialized sources
 
 MySQL enforces the polygon subtype when materializing a derived source.
 For example, selecting a point envelope from a derived SELECT with a
@@ -42,3 +58,6 @@ a constant view, and an explicit `ALGORITHM=TEMPTABLE` view. Merged views
 and mergeable derived queries return the point. Fsdb currently returns
 the point in all of those cases. Explicit table creation from the same
 degenerate envelope already returns error 1416 in both engines.
+MySQL also reports 1416 if the outer query omits the invalid geometry
+column from a required materialization or filters out the affected row
+after a derived `LIMIT`.

@@ -16796,34 +16796,37 @@ and private functionalRangeUsesStoredCollation
 and private spatialLookupPredicates scope registry (tref: TableRef) whereExpr : SpatialLookupPredicate list =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
-    let isStaticGeometryConstructor (name: string) args =
-        match name.ToUpperInvariant() with
-        | "ST_GEOMFROMTEXT"
-        | "ST_GEOMETRYFROMTEXT"
-        | "GEOMFROMTEXT"
-        | "GEOMETRYFROMTEXT" -> Functions.isUnmodifiedBuiltinScalar name registry
-        | "POINT" ->
-            Functions.isUnmodifiedBuiltinScalar name registry
-            && (args |> List.forall (function
-                | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VBit _ | VBinaryLiteral _) -> true
-                | LiteralValue(VDouble number) -> System.Double.IsFinite number
-                | _ -> false))
-        | _ -> false
-
     let columnName = function
         | Col name when scope = BareOrQualifiedColumn -> Some name
         | QualifiedCol(qualifier, name) when qualifier.Equals(selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
         | _ -> None
 
-    let geometry expression =
+    let literal = function LiteralValue value -> Some value | _ -> None
+
+    // POINT text coercion may emit warnings. Only fold numeric literals
+    // whose scalar evaluation agrees with normal expression evaluation.
+    let coordinate = function
+        | LiteralValue((VInt _ | VUInt _ | VDecimal _ | VBit _ | VBinaryLiteral _) as value) -> Some value
+        | LiteralValue(VDouble number as value) when System.Double.IsFinite number -> Some value
+        | _ -> None
+
+    let rec geometry expression =
         match expression with
         | LiteralValue(VGeometry value) when SpatialReferenceSystems.tryFind value.Srid |> Option.isSome ->
             Some value
-        | FuncCall(name, args) when isStaticGeometryConstructor name args ->
-            let literals =
-                args |> traverse (function LiteralValue value -> Ok value | _ -> Error())
-            match literals, Functions.lookup name registry with
-            | Ok values, Some construct ->
+        | FuncCall(name, args) when Functions.isUnmodifiedBuiltinScalar name registry ->
+            let envelopePoint = function
+                | LiteralValue((VBytes _ | VBinaryLiteral _) as value) -> Some value
+                | argument -> geometry argument |> Option.map VGeometry
+
+            let arguments =
+                if equalsIgnoreCase name "ST_MAKEENVELOPE" then args |> List.map envelopePoint |> tryAllSome
+                elif equalsIgnoreCase name "POINT" then args |> List.map coordinate |> tryAllSome
+                elif Functions.isGeometryConstructor name then args |> List.map literal |> tryAllSome
+                else None
+
+            match arguments, Functions.lookup name registry with
+            | Some values, Some construct ->
                 try
                     match construct values with
                     | VGeometry value -> Some value

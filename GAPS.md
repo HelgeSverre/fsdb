@@ -670,11 +670,11 @@ spatial functions.
 [`ST_MakeEnvelope`](torture/findings/2026-11-27-spatial-make-envelope.md)
 constructs points, segments, and rectangles from Cartesian point pairs,
 including projected inputs. Text and prepared execution, geometry
-diagnostics, and table creation from the result are covered. Fsdb does
-not yet use a constant point-pair envelope as a spatial index probe.
-Degenerate results in derived tables, CTEs, and views that MySQL
-materializes can still differ because MySQL enforces the declared
-polygon subtype there.
+diagnostics, and table creation from the result are covered. Constant
+envelopes built from point constructors or geometry literals can probe
+the spatial index. Degenerate results in derived tables, CTEs, and views
+that MySQL materializes can still differ because MySQL enforces the
+declared polygon subtype there.
 
 [`ST_Validate`](torture/findings/2026-11-27-spatial-validate.md) preserves
 valid geometry and shares topology checks with `ST_IsValid`. The

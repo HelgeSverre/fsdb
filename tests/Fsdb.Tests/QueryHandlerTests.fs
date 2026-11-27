@@ -1788,6 +1788,45 @@ let tests =
                   Expect.equal (run (query + " ORDER BY id")) expected (charset + " indexed results")
                   Expect.equal (run (scan + " ORDER BY id")) expected (charset + " scan results")
 
+          testCase "constant point-pair envelopes probe a spatial index"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE places (id INT PRIMARY KEY, p POINT NOT NULL SRID 0, SPATIAL KEY sx(p))"
+                        "INSERT INTO places VALUES (1,POINT(1,1)),(2,POINT(2,2)),(3,POINT(3,3)),(9,POINT(9,9))" ]
+
+              for predicate, expectedIds in
+                  [ "MBRCONTAINS(ST_MakeEnvelope(POINT(0.5,0.5),POINT(2.5,2.5)),p)", [ "1"; "2" ]
+                    "MBRWITHIN(p,ST_MakeEnvelope(ST_PointFromText('POINT(0.5 0.5)',3857),ST_PointFromText('POINT(2.5 2.5)',3857)))", [ "1"; "2" ]
+                    "MBRINTERSECTS(p,ST_MakeEnvelope(ST_PointFromWKB(X'010100000000000000000000000000000000000000'),POINT(2.5,2.5)))", [ "1"; "2" ]
+                    "MBREQUALS(p,ST_MakeEnvelope(POINT(2,2),POINT(2,2)))", [ "2" ] ] do
+                  let query hint = $"SELECT id FROM places{hint} WHERE {predicate}"
+                  let plan = run ("EXPLAIN " + query "") |> TestSupport.Sql.explainRow
+                  Expect.equal plan.AccessType (Some "range") predicate
+                  Expect.equal plan.Key (Some "sx") predicate
+                  let result = ResultSet([ "id" ], expectedIds |> List.map (fun id -> [ Some id ]))
+                  Expect.equal (run (query "" + " ORDER BY id")) result predicate
+                  Expect.equal (run (query " IGNORE INDEX (sx)" + " ORDER BY id")) result predicate
+
+              let variableBounds = "SELECT id FROM places WHERE MBRCONTAINS(ST_MakeEnvelope(POINT(id-0.5,id-0.5),POINT(3.5,3.5)),p)"
+              let plan = run ("EXPLAIN " + variableBounds) |> TestSupport.Sql.explainRow
+              Expect.equal plan.Key None "row-dependent bounds cannot supply a constant probe"
+              Expect.equal (run (variableBounds + " ORDER BY id")) (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]))
+                  "the envelope is evaluated for each row"
+
+              let invalid = "SELECT id FROM places WHERE MBRINTERSECTS(p,ST_MakeEnvelope(POINT(1,2),ST_PointFromText('POINT(1 2)',4326)))"
+              TestSupport.Sql.expectError 3033 (run invalid) "a failed planning probe preserves the SQL error"
+
+              let coerced = "SELECT id FROM places WHERE MBREQUALS(p,ST_MakeEnvelope(POINT('2x',2),POINT(2,2)))"
+              let coercionPlan = run ("EXPLAIN " + coerced) |> TestSupport.Sql.explainRow
+              Expect.equal coercionPlan.Key None "warning-bearing coordinates are evaluated by the query"
+              Expect.equal (run coerced) (ResultSet([ "id" ], [ [ Some "2" ] ])) "text coordinates retain their runtime coercion"
+              match run "SHOW WARNINGS" with
+              | ResultSet(_, rows) ->
+                  Expect.isNonEmpty rows "runtime coercion reports warnings"
+                  Expect.all rows (fun row -> row.[1] = Some "1292") "the coordinate warning is preserved"
+              | other -> failtestf "expected coordinate warnings, got %A" other
+
           testCase "grouped ON outer references mark dependent subqueries"
           <| fun _ ->
               let run = groupedJoinQuery ()
