@@ -42,6 +42,51 @@ waiting while another session held the base row. Their binary PREPARE
 diagnostics also matched, including after a durable restart.
 
 Remaining differences include some INSERTs through views with indirect
-self-reads, unused top-level CTEs, dependent outer predicates, and conflicts introduced by
-joining a separate read-side view whose predicate reads the mutation
-target.
+self-reads, unused top-level CTEs, and dependent outer predicates.
+
+## Direct joined updates
+
+MySQL checks subqueries owned by a directly merged read-side view
+against the physical assignment targets of an UPDATE. The check
+includes predicates, ordering, and scalar projections, even when the
+outer statement ignores the projection or its WHERE is false.
+[MySQL duplicate-target check](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_update.cc#L1723-L1743)
+
+```sql
+CREATE TABLE items (id INT PRIMARY KEY, n INT);
+CREATE TABLE labels (id INT PRIMARY KEY, tag INT);
+CREATE VIEW matching_labels AS
+  SELECT l.id, l.tag FROM labels l
+  WHERE EXISTS (SELECT 1 FROM items p WHERE p.id = l.id);
+
+UPDATE items i JOIN matching_labels r ON i.id = r.id
+SET i.n = 11 WHERE 0;
+```
+
+Both engines return 1443 with `r` as the read-side view and `i` as
+the leading leaf. When the leading leaf owns the conflicting read,
+MySQL returns 1288 instead. A RIGHT JOIN can make its right operand
+the leading leaf. A materialized derived operand uses its exposed
+alias, while a merged derived operand can report its first base
+table. [MySQL duplicate-target diagnostics](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_base.cc#L2305-L2338)
+
+A materialized read-side view, a nested view with no subquery of its
+own, and assignments to an unrelated physical table remain allowed.
+The audited dependent and volatile projections materialize by
+default, and explicit merge directives can change whether their
+reads enter the check. [MySQL merge rules](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_resolver.cc#L3367-L3386)
+
+The 30-case UPDATE matrix improved from 9 to 30 exact matches on
+acceptance or error code and message in both Fsdb storage modes.
+Additional right-join, optimizer-hint, and projection probes agreed
+with MySQL. Binary PREPARE and prepared EXPLAIN returned the same
+diagnostics. A conflicting UPDATE was rejected while another
+session held the target row locked, and the stored value stayed
+unchanged. The prepared and locked-row probes also agreed after
+loading a checkpoint containing the view definitions.
+
+Joined DELETE still has differences for scalar subqueries and for
+predicates that MySQL keeps as subqueries during view resolution.
+The direct correlated EXISTS control remains allowed. A separate
+saved joined-view UPDATE can also fail with 1054 in Fsdb when the
+outer definition renames the read-side view's source qualifier.

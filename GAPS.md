@@ -1088,8 +1088,10 @@ including through a nested or joined view. Ordinary derived and materialized
 view reads remain available, as do reads of unwritten join components.
 [Subqueries in saved view definitions](torture/findings/2026-11-27-saved-view-self-reads.md)
 now distinguish catalog updateability and CHECK OPTION eligibility from
-the individual UPDATE, DELETE, and INSERT decisions. Broader conflicts
-from a separate view used as a read-side join source remain open.
+the individual UPDATE, DELETE, and INSERT decisions. A direct joined UPDATE
+also checks the expressions of a merged read-side view against the physical
+assignment targets. Some joined DELETE cases and predicates whose qualifiers
+change during a saved joined-view write still differ.
 
 Uncorrelated scalar projection subqueries can leave direct columns writable
 while preventing insertion. Dependent projection subqueries refuse writes.

@@ -5705,6 +5705,51 @@ let tests =
                     "DELETE FROM mutation_layer WHERE k IN (SELECT id FROM mutation_copy WHERE id=1)" ] do
                   Expect.equal (run sql) (Affected 1UL) sql
 
+          testCase "joined updates reject target reads owned by a directly merged view"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE target(id INT PRIMARY KEY,n INT)"
+                        "CREATE TABLE labels(id INT PRIMARY KEY,tag INT)"
+                        "INSERT INTO target VALUES(1,10),(2,20)"
+                        "INSERT INTO labels VALUES(1,100),(2,200)"
+                        "CREATE VIEW filtered AS SELECT l.* FROM labels l WHERE EXISTS (SELECT 1 FROM target p WHERE p.id=l.id)"
+                        "CREATE ALGORITHM=MERGE VIEW ranked AS SELECT l.*, (SELECT MAX(n) FROM target) AS score FROM labels l"
+                        "CREATE VIEW dependent AS SELECT l.*, (SELECT MAX(n) FROM target t WHERE t.id=l.id) AS score FROM labels l"
+                        "CREATE VIEW random_score AS SELECT l.*, (SELECT MAX(RAND()) FROM target) AS score FROM labels l"
+                        "CREATE ALGORITHM=TEMPTABLE VIEW copied AS SELECT l.* FROM labels l WHERE EXISTS (SELECT 1 FROM target t WHERE t.id=l.id)"
+                        "CREATE VIEW layer AS SELECT * FROM filtered"
+                        "CREATE VIEW saved_join AS SELECT t.id,t.n,l.tag FROM target t JOIN filtered l ON l.id=t.id" ]
+
+              for sql, source, first in
+                  [ "UPDATE target t JOIN filtered r ON r.id=t.id SET t.n=12 WHERE 0", "r", "t"
+                    "UPDATE target t LEFT JOIN ranked r ON r.id=t.id SET t.n=12 WHERE t.id=1", "r", "t"
+                    "UPDATE /*+ MERGE(r) */ target t JOIN dependent r ON r.id=t.id SET t.n=12 WHERE t.id=1", "r", "t"
+                    "UPDATE target t RIGHT JOIN (SELECT id FROM labels LIMIT 2) d ON t.id=d.id JOIN filtered r ON r.id=d.id SET t.n=12", "r", "d"
+                    "UPDATE target t RIGHT JOIN (SELECT id FROM labels) d ON t.id=d.id JOIN filtered r ON r.id=d.id SET t.n=12", "r", "labels"
+                    "UPDATE labels l JOIN target t ON l.id=t.id JOIN filtered r ON t.id=r.id SET t.n=12 WHERE t.id=1", "r", "l"
+                    "UPDATE target t JOIN filtered r ON r.id=t.id SET t.n=(SELECT MAX(n) FROM target)", "r", "t" ] do
+                  Expect.equal (run sql)
+                      (Err(1443, $"The definition of table '{source}' prevents operation UPDATE on table '{first}'.")) sql
+
+              Expect.equal (run "UPDATE filtered r JOIN target t ON r.id=t.id SET t.n=12 WHERE t.id=1")
+                  (Err(1288, "The target table r of the UPDATE is not updatable")) "the leading view owns the conflicting read"
+              Expect.equal (run "UPDATE target t RIGHT JOIN filtered r ON r.id=t.id SET t.n=12 WHERE t.id=1")
+                  (Err(1288, "The target table r of the UPDATE is not updatable")) "RIGHT JOIN places the view first"
+              Expect.equal (run "SELECT n FROM target ORDER BY id")
+                  (ResultSet([ "n" ], [ [ Some "10" ]; [ Some "20" ] ])) "rejected writes leave the target intact"
+
+              for sql in
+                  [ "UPDATE target t JOIN copied r ON t.id=r.id SET t.n=t.n+1 WHERE t.id=1"
+                    "UPDATE target t JOIN layer r ON t.id=r.id SET t.n=t.n+1 WHERE t.id=1"
+                    "UPDATE target t JOIN dependent r ON t.id=r.id SET t.n=t.n+1 WHERE t.id=1"
+                    "UPDATE target t JOIN random_score r ON t.id=r.id SET t.n=t.n+1 WHERE t.id=1"
+                    "UPDATE /*+ NO_MERGE(r) */ target t JOIN filtered r ON t.id=r.id SET t.n=t.n+1 WHERE t.id=1"
+                    "UPDATE target t JOIN filtered r ON t.id=r.id SET r.tag=r.tag+1 WHERE t.id=1"
+                    "UPDATE saved_join SET n=n+1 WHERE id=1"
+                    "DELETE t FROM target t JOIN filtered r ON t.id=r.id WHERE t.id=2" ] do
+                  Expect.equal (run sql) (Affected 1UL) sql
+
           testCase "geometry equality and binary casts use the SQL geometry bytes"
           <| fun _ ->
               let cartesian = "00000000010100000000000000000024400000000000004E40"
