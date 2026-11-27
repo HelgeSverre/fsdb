@@ -3123,6 +3123,9 @@ implementation effort:
    [Exact decimal prefixes and suffixes](torture/findings/2026-11-27-correlated-decimal-top-n.md)
    also stream the ordered slice for audited DECIMAL and integer comparisons.
    The lateral fixture examines 19 rows, down from 1,310.
+   [Derived projections with renamed columns](torture/findings/2026-11-27-correlated-derived-top-n.md)
+   can retain the physical index order through audited filters and aliases.
+   The scalar fixture examines 40 rows, down from 1,610.
    [`EXPLAIN ANALYZE`](torture/findings/2026-11-27-explain-analyze-correlated-top-n.md)
    reports the observed ordered index, rows per loop, and fallback
    invocations. [Static `EXPLAIN`](torture/findings/2026-11-27-explain-analyze-correlated-top-n.md#static-explain)

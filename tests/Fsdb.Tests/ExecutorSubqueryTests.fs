@@ -14,7 +14,39 @@ let private newStore () = create ()
 let tests =
     testList
         "correlated subqueries"
-        [ testCase "correlated top-N seeks exact decimal keys before applying its limit"
+        [ testCase "correlated top-N streams the ordered index through renamed derived columns"
+          <| fun _ ->
+              let store = newStore ()
+              for sql in
+                  [ "CREATE TABLE digit(n INT PRIMARY KEY)"
+                    "INSERT INTO digit VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)"
+                    "CREATE TABLE requests(id INT PRIMARY KEY,k INT)"
+                    "INSERT INTO requests SELECT n,n FROM digit"
+                    "CREATE TABLE events(id INT PRIMARY KEY,k INT,stamp INT,visible INT,KEY recent(k,stamp DESC,id))"
+                    "INSERT INTO events SELECT a.n*100+b.n*10+c.n,a.n,b.n*10+c.n,c.n%3 FROM digit a CROSS JOIN digit b CROSS JOIN digit c" ] do
+                  runDefault store sql |> fun result -> TestSupport.Sql.expectOk result sql
+
+              let query hint =
+                  "SELECT o.id,(SELECT d.event_id FROM (SELECT e.id event_id,e.k tenant,e.stamp tick FROM events e "
+                  + hint + " WHERE e.visible>0) d WHERE d.tenant=k ORDER BY d.tick DESC,d.event_id LIMIT 1 OFFSET 1) AS chosen "
+                  + "FROM requests o ORDER BY o.id"
+              let result, examined = withExaminedRows (fun () -> runDefault store (query ""))
+              let expected = [ for id in 0..9 -> [ Some(string id); Some(string (id * 100 + 97)) ] ]
+              Expect.equal result (ResultSet([ "id"; "chosen" ], expected)) "inner filter applies before offset"
+              Expect.equal (runDefault store (query "IGNORE INDEX (recent)")) result "the scan agrees"
+              Expect.isLessThan examined 100L "the physical suffix streams through the projection"
+              let plan = runDefault store ("EXPLAIN " + query "") |> TestSupport.Sql.explainRows
+              let access = plan |> List.find (fun row -> row.Table = Some "e")
+              Expect.equal (access.SelectType, access.AccessType, access.Key, access.Reference)
+                  (Some "DEPENDENT SUBQUERY", Some "ref", Some "recent", Some "fsdb.o.k") "the plan binds the bare outer key"
+              match runDefault store ("EXPLAIN ANALYZE " + query "") with
+              | ResultSet(_, rows) ->
+                  let analyzed = rows |> List.choose (List.tryHead >> Option.flatten) |> String.concat "\n"
+                  Expect.stringContains analyzed "Ordered index lookup on e using recent (actual rows=3.00 loops=10)" "the physical reads include rejected rows"
+                  Expect.isFalse (analyzed.Contains "ALL on e") "execution never materialized the source"
+              | other -> failtestf "expected an analyzed plan, got %A" other
+
+          testCase "correlated top-N seeks exact decimal keys before applying its limit"
           <| fun _ ->
               let store = newStore ()
               for sql in

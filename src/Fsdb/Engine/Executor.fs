@@ -503,6 +503,14 @@ type private PhysicalProjection =
       SilentFilters: (Value[] -> bool) list option
       Steps: PhysicalProjectionStep list }
 
+type private CorrelatedTopOrderPlan =
+    { TableRef: TableRef
+      Predicate: Expr option
+      Terms: IndexOrderTerm list
+      Pins: PointEquality list
+      References: (string * Expr) list
+      Projection: (PhysicalProjection * (Value[] -> bool) list) option }
+
 let private projectionFilterColumn (projection: PhysicalProjection) index =
     let column = projection.PhysicalOutputs.[index]
     let signed =
@@ -1142,7 +1150,8 @@ type private AnalyzedIndexLookup =
 
 type private AnalyzedCorrelatedOrder =
     { Indexes: Dictionary<string, AnalyzedIndexLookup>
-      mutable OtherLoops: int64 }
+      mutable OtherLoops: int64
+      mutable ProjectedTable: TableRef option }
 
 type private AnalyzeExecution =
     { CorrelatedQueries: Dictionary<SelectStmt, AnalyzedCorrelatedOrder>
@@ -1150,7 +1159,7 @@ type private AnalyzeExecution =
 
 let private analyzedCorrelatedQueries = System.Threading.AsyncLocal<Dictionary<SelectStmt, AnalyzedCorrelatedOrder> option>()
 
-let private observeCorrelatedOrder (select: SelectStmt) correlated (lookup: Storage.OrderedLookup option) =
+let private observeCorrelatedOrder (select: SelectStmt) correlated (projectedTable: TableRef option) (lookup: Storage.OrderedLookup option) =
     match analyzedCorrelatedQueries.Value with
     | Some queries when correlated && select.Limit.IsSome && not select.OrderBy.IsEmpty
                         && not metadataProbe.Value && not planningProbe.Value ->
@@ -1158,7 +1167,7 @@ let private observeCorrelatedOrder (select: SelectStmt) correlated (lookup: Stor
             match queries.TryGetValue select with
             | true, observation -> observation
             | false, _ ->
-                let observation = { Indexes = Dictionary(); OtherLoops = 0L }
+                let observation = { Indexes = Dictionary(); OtherLoops = 0L; ProjectedTable = None }
                 queries.Add(select, observation)
                 observation
 
@@ -1167,6 +1176,7 @@ let private observeCorrelatedOrder (select: SelectStmt) correlated (lookup: Stor
             observation.OtherLoops <- observation.OtherLoops + 1L
             None
         | Some lookup ->
+            if projectedTable.IsSome then observation.ProjectedTable <- projectedTable
             let index =
                 match observation.Indexes.TryGetValue lookup.OrderedIndexName with
                 | true, index -> index
@@ -16444,9 +16454,8 @@ and private runUnlockedSelectStmt
                             physicalAccessRows access
 
                         let orderedPrefix =
-                            tryCorrelatedTopOrder store registry dbName tref select outer
-                            |> observeCorrelatedOrder select outer.IsSome
-                            |> Option.map (fun lookup -> lookup.OrderedColumns, lookup.OrderedRows, select)
+                            tryCorrelatedTopOrder store registry dbName fromItem select outer
+                            |> Option.map (fun (columns, rows) -> columns, rows, select)
                             |> Option.orElseWith (fun () ->
                                 tryEqualityPrefixOrder store registry dbName tref select equalityAccess
                                 |> Option.map (fun plan -> plan.Columns, plan.Rows, coveredSelect (equalityAccess |> Option.map EqualityAccess)))
@@ -16503,18 +16512,21 @@ and private runUnlockedSelectStmt
             | Error e -> e, [], []
             | Ok(columns, rows) -> runArbitrary columns rows None select
         | _ ->
-            let projectedLookup =
-                tryCorrelatedSourceLookup store registry dbName fromItem select outer
-                |> Option.orElseWith (fun () ->
-                    tryProjectedPhysicalLiteralLookup store registry dbName fromItem select.Where
-                    |> Option.map (fun (columns, rows) -> columns, rows, select))
-
-            match projectedLookup with
-            | Some(columns, rows, planned) -> runArbitrary columns rows None planned
+            match tryCorrelatedTopOrder store registry dbName fromItem select outer with
+            | Some(columns, rows) -> runArbitrary columns rows None { select with OrderBy = [] }
             | None ->
-                match resolveFromItemWithOuter store registry dbName outer fromItem with
-                | Error e -> e, [], []
-                | Ok(columns, rows) -> runArbitrary columns rows None select
+                let projectedLookup =
+                    tryCorrelatedSourceLookup store registry dbName fromItem select outer
+                    |> Option.orElseWith (fun () ->
+                        tryProjectedPhysicalLiteralLookup store registry dbName fromItem select.Where
+                        |> Option.map (fun (columns, rows) -> columns, rows, select))
+
+                match projectedLookup with
+                | Some(columns, rows, planned) -> runArbitrary columns rows None planned
+                | None ->
+                    match resolveFromItemWithOuter store registry dbName outer fromItem with
+                    | Error e -> e, [], []
+                    | Ok(columns, rows) -> runArbitrary columns rows None select
 
 /// Literal equalities eligible for a single-table index candidate path.
 and private literalPointLookupEqualities (registry: Registry) (tref: TableRef) (whereExpr: Expr option) : PointEquality list =
@@ -21303,7 +21315,7 @@ and private tryIndexOrder
                 tryFixedPrefixIndexOrder store registry dbName tref select.Where orderedColumns Set.empty []
                 |> Option.bind planLookup))
 
-and private bindCorrelatedTopOrder store registry dbName (tref: TableRef) (select: SelectStmt) (outer: EvalContext option) readOuter =
+and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull (select: SelectStmt) (outer: EvalContext option) readOuter =
     let directProjection (projection: Projection) =
         match projection.Expression with
         | Col _ | QualifiedCol _ | Star _ -> true
@@ -21319,13 +21331,12 @@ and private bindCorrelatedTopOrder store registry dbName (tref: TableRef) (selec
        || select.Having.IsSome || not (List.forall directProjection select.Projections) || shadowsColumn () then
         None
     else
-        Option.map3 (fun context predicate table -> context, predicate, table) outer select.Where (physicalFastPathTable store dbName tref)
-        |> Option.filter (fun (_, _, table) -> storedRowsMatchReadRows store table.Columns)
-        |> Option.bind (fun (context, predicate, table) ->
+        Option.map2 (fun context predicate -> context, predicate) outer select.Where
+        |> Option.bind (fun (context, predicate) ->
             let qualifier = tref.Alias |> Option.defaultValue tref.Table
-            let source = correlatedProbeSource qualifier table.Columns
+            let source = correlatedProbeSource qualifier columns
             let innerColumn name =
-                resolveColumn table.Columns name |> Result.toOption |> Option.map (fun index -> table.Columns.[index])
+                resolveColumn columns name |> Result.toOption |> Option.map (fun index -> columns.[index])
             let columnOf expression =
                 match tryCorrelatedInnerColumn source expression with
                 | Some name -> innerColumn name
@@ -21364,7 +21375,7 @@ and private bindCorrelatedTopOrder store registry dbName (tref: TableRef) (selec
                         match readOuter source context bound boundColumn with
                         | Some(VInt _ | VUInt _ | VDecimal _ as value) when numericKey -> Some(key column value, Some bound)
                         | Some(VString _ as value) when textKey () -> Some(key column value, Some bound)
-                        | Some VNull when comparison = NullSafeEq && (numericKey || textKey ()) ->
+                        | Some VNull when (comparison = NullSafeEq || canSeekNull) && (numericKey || textKey ()) ->
                             Some(key column VNull, Some bound)
                         | _ -> None
                     | _ -> None)
@@ -21394,25 +21405,103 @@ and private bindCorrelatedTopOrder store registry dbName (tref: TableRef) (selec
 
                 if correlatedPins.IsEmpty then None
                 else
-                    let qualifiers = singleQualifier qualifier table.Columns
-                    let orderProjections = expandOrderProjections table.Columns qualifiers select.Projections
-                    let orderIsValid = validateOrderAliases (columnIndexOf table.Columns) qualifiers orderProjections select.OrderBy |> Result.isOk
+                    let qualifiers = singleQualifier qualifier columns
+                    let orderProjections = expandOrderProjections columns qualifiers select.Projections
+                    let orderIsValid = validateOrderAliases (columnIndexOf columns) qualifiers orderProjections select.OrderBy |> Result.isOk
                     indexOrderTerms registry tref select
                     |> Option.filter (fun terms -> orderIsValid && List.forall safeOrder terms)
                     |> Option.map (fun terms -> source, context, predicate, terms, List.map fst pins, correlatedPins))
 
-/// Bind physical predicates to the current outer row for index planning.
-/// Keep the SQL predicate for residual evaluation before LIMIT and OFFSET.
-and private tryCorrelatedTopOrder store registry dbName tref select outer : Storage.OrderedLookup option =
+and private planCorrelatedTopOrder store registry dbName fromItem (select: SelectStmt) outer readOuter bindPredicate =
+    let scopedSource =
+        match fromItem with
+        | FromTable tref ->
+            physicalFastPathTable store dbName tref
+            |> Option.filter (fun table -> storedRowsMatchReadRows store table.Columns)
+            |> Option.map (fun table -> tref, table.Columns, None)
+        | FromSubquery(PlainSelect _, qualifier) ->
+            tryPhysicalProjection store registry dbName fromItem
+            |> Option.filter (fun projection -> (tryLockingReadRows projection.PhysicalTableRef).IsNone)
+            |> Option.bind (fun projection ->
+                projection.SilentFilters
+                |> Option.map (fun filters -> correlatedSourceRef qualifier, projection.OutputColumns, Some(projection, filters)))
+        | _ -> None
+
+    if select.Limit.IsNone || select.OrderBy.IsEmpty || Option.isNone outer
+       || not select.Joins.IsEmpty || not select.Locking.IsEmpty then None
+    else
+        scopedSource
+        |> Option.bind (fun (tref, columns, projected) ->
+            // A NULL equality probe can only reject rows. Recheck the actual
+            // predicate on nullable keys rather than scanning the projection.
+            bindCorrelatedTopOrder registry tref columns projected.IsSome select outer readOuter
+            |> Option.bind (fun (source, context, predicate, terms, pins, references) ->
+                let bound = bindPredicate source context predicate
+                let plan tref predicate terms pins references =
+                    { TableRef = tref
+                      Predicate = predicate
+                      Terms = terms
+                      Pins = pins
+                      References = references
+                      Projection = projected }
+
+                match projected with
+                | None -> Some(plan tref (Some bound) terms pins references)
+                | Some(projection, _) ->
+                    let physicalRef = projection.PhysicalTableRef
+                    let qualifier = physicalRef.Alias |> Option.defaultValue physicalRef.Table
+                    let column name = tryPhysicalProjectionColumn projection name |> Option.map _.Name
+                    let rebaseColumn expr =
+                        tryCorrelatedInnerColumn source expr |> Option.bind column |> Option.map (fun name -> QualifiedCol(qualifier, name))
+
+                    let physicalConjuncts =
+                        conjuncts bound
+                        |> List.choose (fun clause ->
+                            if Expression.exists (function (Col _ | QualifiedCol _) as expr -> (rebaseColumn expr).IsNone | _ -> false) clause then
+                                None
+                            else Some(Expression.rewrite rebaseColumn clause))
+
+                    let physicalPins =
+                        pins |> List.choose (fun pin -> column pin.Column |> Option.map (fun name -> { pin with Column = name }))
+                    let physicalReferences =
+                        references |> List.choose (fun (name, expr) -> column name |> Option.map (fun physical -> physical.ToLowerInvariant(), expr))
+                    let physicalTerms =
+                        terms |> List.map (fun term -> column term.Column |> Option.map (fun name -> { term with Column = name }))
+                        |> tryAllSome
+
+                    physicalTerms
+                    |> Option.filter (fun _ -> not physicalReferences.IsEmpty)
+                    |> Option.map (fun order -> plan physicalRef (combineConjuncts physicalConjuncts) order physicalPins physicalReferences)))
+
+/// The original source and predicates still decide which rows reach LIMIT and OFFSET.
+and private tryCorrelatedTopOrder store registry dbName fromItem select outer =
     let readOuter source context expression _ = tryCorrelatedOuterValue source context expression
-    bindCorrelatedTopOrder store registry dbName tref select outer readOuter
-    |> Option.bind (fun (source, context, predicate, terms, pins, references) ->
-        let bound =
-            Expression.rewrite (function
-                | (Col _ | QualifiedCol _) as expression -> tryCorrelatedOuterValue source context expression |> Option.map Lit
-                | _ -> None) predicate
-        let correlatedPins = references |> List.map fst |> Set.ofList
-        tryFixedPrefixIndexOrder store registry dbName tref (Some bound) terms correlatedPins pins)
+    let bindPredicate source context =
+        Expression.rewrite (function
+            | (Col _ | QualifiedCol _) as expression -> tryCorrelatedOuterValue source context expression |> Option.map Lit
+            | _ -> None)
+    let plan = planCorrelatedTopOrder store registry dbName fromItem select outer readOuter bindPredicate
+    let lookup =
+        plan |> Option.bind (fun plan ->
+            let correlatedPins = plan.References |> List.map fst |> Set.ofList
+            tryFixedPrefixIndexOrder store registry dbName plan.TableRef plan.Predicate plan.Terms correlatedPins plan.Pins)
+
+    let projectedTable =
+        plan |> Option.bind (fun plan -> plan.Projection |> Option.map (fun _ -> plan.TableRef))
+
+    observeCorrelatedOrder select outer.IsSome projectedTable lookup
+    |> Option.map (fun lookup ->
+        match plan |> Option.bind _.Projection with
+        | None -> lookup.OrderedColumns, lookup.OrderedRows
+        | Some(projection, filters) ->
+            let rows =
+                lookup.OrderedRows
+                |> Seq.filter (fun row ->
+                    let keep = filters |> List.forall (fun filter -> filter row)
+                    if not keep then countExaminedRow ()
+                    keep)
+                |> Seq.map (fun row -> projection.PhysicalOutputs |> Array.map (readProjectionColumn row))
+            projection.OutputColumns, rows)
 
 and private tryEqualityPrefixOrder
     (store: Store)
@@ -29053,7 +29142,7 @@ let rec private explainOuterReference scope expression =
         | [], _ -> explainOuterReference current.Outer expression
         | _ -> None)
 
-let private explainCorrelatedOrder store registry dbName outer tref select =
+let private explainCorrelatedOrder store registry dbName outer fromItem select =
     // The planner needs a key domain, while execution supplies the row value.
     let readOuter _ _ expression column =
         explainOuterReference outer expression
@@ -29065,12 +29154,14 @@ let private explainCorrelatedOrder store registry dbName outer tref select =
                 | _ when isTextColumn (Some definition) -> Some(VString "")
                 | _ -> None))
 
-    let allowed = indexAllowedForOrderedAccess IndexOrderBy tref
-    bindCorrelatedTopOrder store registry dbName tref select (outer |> Option.map _.Context) readOuter
-    |> Option.bind (fun (_, _, predicate, terms, pins, references) ->
-        let correlatedPins = references |> List.map fst |> Set.ofList
-        let labels = references |> Map.ofList
-        orderedIndexPrefixMatches IndexOrderBy store registry dbName tref (Some predicate) terms pins
+    planCorrelatedTopOrder store registry dbName fromItem select (outer |> Option.map _.Context) readOuter (fun _ _ predicate -> predicate)
+    |> Option.bind (fun plan ->
+        let tref = plan.TableRef
+        let terms = plan.Terms
+        let allowed = indexAllowedForOrderedAccess IndexOrderBy tref
+        let correlatedPins = plan.References |> List.map fst |> Set.ofList
+        let labels = plan.References |> Map.ofList
+        orderedIndexPrefixMatches IndexOrderBy store registry dbName tref plan.Predicate terms plan.Pins
         |> List.tryPick (fun resolved ->
             fixedPrefixOrderDirections terms correlatedPins resolved.Match
             |> Option.bind (fun directions ->
@@ -29093,7 +29184,7 @@ let private explainCorrelatedOrder store registry dbName outer tref select =
                                 |> Option.bind (explainOuterReference outer)
                                 |> Option.defaultValue "const")
                         let length = explainIndexKeyLen (Some resolved.Table) name columns indices (List.replicate indices.Length None)
-                        explainKey name length, references)))))
+                        tref, (explainKey name length, references))))))
 
 let rec private explainJoinBlock
     (store: Store)
@@ -29418,10 +29509,13 @@ and private explainSelectBlock
     (select: SelectStmt)
     (outer: ExplainOuterScope option)
     : Result<unit, QueryResult> =
-    analysis |> Option.iter (fun observed ->
-        match observed.CorrelatedQueries.TryGetValue select with
-        | true, access when access.Indexes.Count > 0 -> observed.CorrelatedBlocks.Add(id, access)
-        | _ -> ())
+    let observedProjection =
+        analysis |> Option.bind (fun observed ->
+            match observed.CorrelatedQueries.TryGetValue select with
+            | true, access when access.Indexes.Count > 0 ->
+                observed.CorrelatedBlocks.Add(id, access)
+                access.ProjectedTable
+            | _ -> None)
 
     let cteBindings = extendExplainCtes store registry dbName outer select.Ctes
     let isCte = function FromTable tref -> (explainCteBinding cteBindings tref).IsSome | _ -> false
@@ -29433,8 +29527,17 @@ and private explainSelectBlock
 
     let correlatedOrder =
         match select.From, joins, outer with
-        | Some(FromTable tref), [], Some _ when not usesCte -> explainCorrelatedOrder store registry dbName outer tref select
+        | Some fromItem, [], Some _ when not usesCte ->
+            explainCorrelatedOrder store registry dbName outer fromItem select
+            |> Option.filter (fun (tref, _) -> (explainCteBinding cteBindings tref).IsNone)
         | _ -> None
+
+    let explainedFrom =
+        correlatedOrder
+        |> Option.map fst
+        |> Option.orElse observedProjection
+        |> Option.map FromTable
+        |> Option.orElse select.From
 
     let hasBareOuterFilter () =
         match select.From, joins, outer, select.Where with
@@ -29450,13 +29553,13 @@ and private explainSelectBlock
         | _ -> false
 
     let selectType =
-        match correlatedOrder, selectType with
+        match correlatedOrder.IsSome || observedProjection.IsSome, selectType with
         | _, "SIMPLE" when usesCte -> "PRIMARY"
-        | Some _, "DERIVED" -> "DEPENDENT DERIVED"
-        | Some _, "SUBQUERY" -> "DEPENDENT SUBQUERY"
-        | None, "DERIVED" when outer.IsSome && (Expression.hasQualifiedOuterReference select || hasBareOuterFilter ()) ->
+        | true, "DERIVED" -> "DEPENDENT DERIVED"
+        | true, "SUBQUERY" -> "DEPENDENT SUBQUERY"
+        | false, "DERIVED" when outer.IsSome && (Expression.hasQualifiedOuterReference select || hasBareOuterFilter ()) ->
             "DEPENDENT DERIVED"
-        | None, "SUBQUERY" when hasBareOuterFilter () -> "DEPENDENT SUBQUERY"
+        | false, "SUBQUERY" when hasBareOuterFilter () -> "DEPENDENT SUBQUERY"
         | _ -> selectType
 
     let indexOrderPlan =
@@ -29517,7 +29620,7 @@ and private explainSelectBlock
             analysis
             id
             selectType
-            select.From
+            explainedFrom
             joins
             select.Where
             extra
@@ -29526,7 +29629,8 @@ and private explainSelectBlock
             selectedIndexOrderPlan
             consumption
             outer
-            correlatedOrder)
+            (correlatedOrder |> Option.map snd
+             |> Option.orElseWith (fun () -> observedProjection |> Option.map (fun _ -> None, []))))
 
 and private explainUnionBlocks store registry dbName nextId acc analysis firstId firstType (first: SelectStmt) rest outer =
     let explainBranches first =
