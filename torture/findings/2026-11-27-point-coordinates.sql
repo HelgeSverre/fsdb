@@ -1,0 +1,43 @@
+SET @p = ST_GeomFromText('POINT(-75 45)', 4326, 'axis-order=long-lat');
+SELECT ST_X(@p), ST_Y(@p), ST_Latitude(@p), ST_Longitude(@p);
+SELECT ST_AsText(ST_X(@p, 89)), ST_AsText(ST_Y(@p, -180));
+SELECT ST_AsText(ST_Latitude(@p, -90)), ST_AsText(ST_Longitude(@p, 180));
+SELECT ST_AsText(ST_X(@p, 90.00000000000001)), ST_AsText(ST_Y(@p, -180.00000000000003));
+SELECT ST_X(@p, 90.000000000001);
+SELECT ST_Y(@p, -180.000000000001);
+
+SET @c = ST_GeomFromText('POINT(1 2)');
+SET @m = ST_GeomFromText('POINT(1 2)', 3857);
+SELECT ST_X(@c), ST_Y(@c), ST_AsText(ST_X(@c, .25)), ST_AsText(ST_Y(@c, .75));
+SELECT ST_X(@m), ST_Y(@m), ST_AsText(ST_Y(@m, .75)), ST_SRID(ST_Y(@m, .75));
+SELECT ST_Latitude(@c);
+SELECT ST_Longitude(@m, 12);
+SELECT ST_X(ST_GeomFromText('LINESTRING(0 0,1 1)'));
+SELECT ST_Y(ST_GeomFromText('GEOMETRYCOLLECTION(POINT(1 2))'));
+SELECT ST_X('bad');
+SELECT ST_Y(0xFFFFFFFF);
+SELECT ST_Longitude(0xE610000001010000000000000000A066400000000000000000, 10);
+SELECT ST_X(NULL), ST_Latitude(@c, NULL), ST_Y(NULL, 'bad');
+SHOW WARNINGS;
+SELECT ST_AsText(ST_Longitude(@p, '12.5z'));
+SHOW WARNINGS;
+
+PREPARE coords FROM 'SELECT ST_Latitude(?), HEX(ST_Longitude(?,?))';
+SET @value = 17.25;
+EXECUTE coords USING @p, @p, @value;
+DEALLOCATE PREPARE coords;
+SELECT ST_AsText(@p);
+
+CREATE DATABASE fsdb_point_coordinates_fixture;
+USE fsdb_point_coordinates_fixture;
+CREATE TABLE places(id INT PRIMARY KEY, p POINT NOT NULL SRID 4326, SPATIAL INDEX (p));
+INSERT INTO places VALUES (1, ST_GeomFromText('POINT(45 -75)', 4326));
+UPDATE places SET p = ST_Longitude(p, 'bad') WHERE id = 1;
+SHOW WARNINGS;
+SELECT ST_AsText(p) FROM places;
+UPDATE IGNORE places SET p = ST_Longitude(p, ' 86.5z') WHERE id = 1;
+SHOW WARNINGS;
+SELECT ST_AsText(p) FROM places;
+UPDATE places SET p = ST_Latitude(p, 91) WHERE id = 1;
+SELECT ST_AsText(p), ST_SRID(p) FROM places;
+DROP DATABASE fsdb_point_coordinates_fixture;

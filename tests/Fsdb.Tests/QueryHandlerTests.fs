@@ -5469,6 +5469,47 @@ let tests =
                       [ TypeLongLong, 1u, BinaryFlag ] "prepared Boolean result"
               | Error error -> failtestf "expected simplicity to prepare, got %A" error
 
+          testCase "point coordinates follow SRS axes and support typed setters"
+          <| fun _ ->
+              let run = queryFixture [ "USE fsdb"; "SET @p=ST_GeomFromText('POINT(-75 45)',4326,'axis-order=long-lat')" ]
+              let rows sql expected =
+                  match run sql with
+                  | ResultSet(_, [ actual ]) -> Expect.equal actual expected sql
+                  | other -> failtestf "%s returned %A" sql other
+
+              rows "SELECT ST_X(@p),ST_Y(@p),ST_Latitude(@p),ST_Longitude(@p)"
+                  [ Some "45"; Some "-75"; Some "45"; Some "-75" ]
+              rows "SELECT ST_AsText(ST_X(@p,89)),ST_AsText(ST_Y(@p,-180)),ST_AsText(ST_Latitude(@p,-90)),ST_AsText(ST_Longitude(@p,180))"
+                  [ Some "POINT(89 -75)"; Some "POINT(45 -180)"; Some "POINT(-90 -75)"; Some "POINT(45 180)" ]
+              rows "SELECT ST_AsText(ST_X(ST_GeomFromText('POINT(1 2)'),.25)),ST_SRID(ST_Y(ST_GeomFromText('POINT(1 2)',3857),.75)),ST_Latitude(ST_GeomFromText('POINT(1 2)'),NULL)"
+                  [ Some "POINT(0.25 2)"; Some "3857"; None ]
+              rows "SELECT ST_AsText(ST_Longitude(@p,'12.5z')), ST_Y(NULL,'bad')"
+                  [ Some "POINT(45 12.5)"; None ]
+              match run "SHOW WARNINGS" with
+              | ResultSet(_, warnings) ->
+                  Expect.equal (warnings |> List.map (fun row -> row[1])) [ Some "1292"; Some "1292" ] "setter argument warnings"
+              | other -> failtestf "expected coordinate warnings, got %A" other
+
+              for expression, code in
+                  [ "ST_Latitude(ST_GeomFromText('POINT(1 2)'))", 3726
+                    "ST_X(ST_GeomFromText('LINESTRING(0 0,1 1)'))", 3516
+                    "ST_X('bad')", 3037
+                    "ST_Y(0xFFFFFFFF)", 3548
+                    "ST_X(@p,91)", 3617
+                    "ST_Longitude(@p,181)", 3616
+                    "ST_Longitude(0xE610000001010000000000000000A066400000000000000000,10)", 3731 ] do
+                  TestSupport.Sql.expectError code (run ("SELECT " + expression)) expression
+
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT ST_Latitude(?) AS coord, ST_Longitude(?,?) AS shape"
+              match prepareStatementForSession session sql with
+              | Ok(statement, count) ->
+                  let parameters, columns = preparedMetadata session statement count
+                  Expect.equal (parameters |> List.map _.TypeId) [ TypeGeometry; TypeGeometry; TypeDouble ] "prepared inputs"
+                  Expect.equal (columns |> List.map (fun column -> column.Metadata.TypeId, column.Metadata.ColumnLength, column.Metadata.Flags))
+                      [ TypeDouble, 23u, BinaryFlag; TypeGeometry, UInt32.MaxValue, BinaryFlag ] "prepared getter and setter results"
+              | Error error -> failtestf "expected coordinates to prepare, got %A" error
+
           testCase "planar geometry functions retain result metadata without rows"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

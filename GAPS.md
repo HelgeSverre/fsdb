@@ -674,6 +674,11 @@ interiors in audited Cartesian and geographic reference systems.
 Polygon simplicity follows MySQL's ring coordinate rules separately
 from validity.
 
+[`ST_X`, `ST_Y`, `ST_Latitude`, and `ST_Longitude`](torture/findings/2026-11-27-point-coordinates.md)
+read and replace point coordinates using the audited SRS axis orders.
+Setters preserve the SRID and return geometry, and geographic arguments
+follow MySQL's input and replacement range checks.
+
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets, `SYSTEM`,
 and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones
 (`Use_leap_seconds = Y`) remain unsupported.

@@ -8966,6 +8966,10 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         weightStringMetadata source (Some length)
     | NamedFunction "WEIGHT_STRING" [ source ] ->
         weightStringMetadata source None
+    | FuncCall(name, [ _; _ ]) when Functions.isPointCoordinateFunction name && Functions.isUnmodifiedBuiltinScalar name ctx.Registry ->
+        geometry
+        |> Option.map (fun metadata ->
+            { metadata with ColumnLength = System.UInt32.MaxValue; Flags = BinaryFlag; Decimals = 0uy })
     | FuncCall(RegisteredScalarResult metadata, _) -> Some metadata
     | FuncCall(name, args) ->
         match name.ToUpperInvariant(), args with

@@ -6291,6 +6291,18 @@ let private gisGeometryArgument functionName value =
     |> Option.defaultWith (fun () -> raise (SqlError(3037, $"Invalid GIS data provided to function {functionName}.")))
     |> validateGeometryParameter functionName
 
+let private gisStringGeometryArgument functionName value =
+    match value with
+    | VGeometry _ -> gisGeometryArgument functionName value
+    | _ ->
+        let bytes = stringBytes value
+        if bytes.Length >= sizeof<uint32> then
+            let srid = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan())
+            if srid > uint32 Int32.MaxValue then
+                raise (SqlError(3548, $"There's no spatial reference system with SRID {srid}."))
+            spatialReferenceSystem functionName (int srid) |> ignore
+        gisGeometryArgument functionName (VBytes bytes)
+
 let private gisGeometryTypeName shape =
     match geometryKind shape with
     | GeometryCollection -> "GEOMCOLLECTION"
@@ -6320,22 +6332,76 @@ let private geometrySimplicityFn: Scalar =
     | [ VNull ] -> VNull
     | [ value ] ->
         let name = "st_issimple"
-        let argument =
-            match value with
-            | VGeometry _ -> value
-            | _ ->
-                let bytes = stringBytes value
-                if bytes.Length >= sizeof<uint32> then
-                    let srid = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan())
-                    if srid > uint32 Int32.MaxValue then
-                        raise (SqlError(3548, $"There's no spatial reference system with SRID {srid}."))
-                    spatialReferenceSystem name (int srid) |> ignore
-                VBytes bytes
-        let geometry = gisGeometryArgument name argument
+        let geometry = gisStringGeometryArgument name value
         let referenceSystem = spatialReferenceSystem name geometry.Srid
         requireWellFormedGisGeometry name geometry
         VInt(if geometryIsSimple referenceSystem geometry then 1L else 0L)
     | _ -> nativeParameterCountError "ST_IsSimple"
+
+let private geometryNumericArgument = function
+    | (VString _ | VBytes _ | VEncodedString _) as value ->
+        let text = toText value |> Option.defaultValue ""
+        let number, truncated = Value.coerceLeadingDouble text
+        if truncated then Diagnostics.numericConversion "DOUBLE" text
+        number
+    | value -> toDouble value
+
+type private PointCoordinate = XCoordinate | YCoordinate | LatitudeCoordinate | LongitudeCoordinate
+
+let private pointCoordinateFunctions =
+    [ "ST_X", XCoordinate; "ST_Y", YCoordinate
+      "ST_Latitude", LatitudeCoordinate; "ST_Longitude", LongitudeCoordinate ]
+
+let internal isPointCoordinateFunction (name: string) =
+    pointCoordinateFunctions |> List.exists (fun (functionName, _) -> String.Equals(name, functionName, StringComparison.OrdinalIgnoreCase))
+
+let private pointPropertyFn (functionName: string) coordinate: Scalar =
+    let name = functionName.ToLowerInvariant()
+    let radiansRoundTrip value = value * geographicRadiansPerDegree / geographicRadiansPerDegree
+
+    let evaluate value replacement =
+        let geometry = gisStringGeometryArgument name value
+        let referenceSystem = spatialReferenceSystem name geometry.Srid
+        requireWellFormedGisGeometry name geometry
+        let x, y =
+            match geometry.Shape with
+            | GPoint(x, y) -> x, y
+            | shape -> raise (SqlError(3516, $"POINT value is a geometry of unexpected type {gisGeometryTypeName shape} in {name}."))
+
+        let geographic = referenceSystem.SemiMajorAxis.IsSome
+        if not geographic && (coordinate = LatitudeCoordinate || coordinate = LongitudeCoordinate) then
+            raise (SqlError(3726, $"Function {name} is only defined for geographic spatial reference systems, but one of its arguments is in SRID {geometry.Srid}, which is not geographic."))
+
+        // Internally a geographic point is latitude, longitude. ST_X and
+        // ST_Y use the order declared in the SRS regardless of input order.
+        let swapped = geographic && referenceSystem.AxisOrder = LongitudeLatitude
+        let first =
+            match coordinate with
+            | XCoordinate -> not swapped
+            | YCoordinate -> swapped
+            | LatitudeCoordinate -> true
+            | LongitudeCoordinate -> false
+        let roundTrip number = if geographic then radiansRoundTrip number else number
+        match replacement with
+        | None -> VDouble(roundTrip (if first then x else y))
+        | Some number ->
+            if not (Double.IsFinite number) then
+                raise (SqlError(1690, $"DOUBLE value is out of range in '{name}'"))
+            let nextX, nextY = if first then number, y else x, number
+            let updated = { geometry with Shape = GPoint(nextX, nextY) }
+            SpatialReferenceSystems.tryGeometryParameterDomainError updated
+            |> Option.iter (function
+                | LatitudeOutOfRange _ -> raiseCoordinateDomainError name (LatitudeOutOfRange number)
+                | LongitudeOutOfRange _ -> raiseCoordinateDomainError name (LongitudeOutOfRange number))
+            VGeometry { updated with Shape = GPoint(roundTrip nextX, roundTrip nextY) }
+
+    function
+    | [ VNull ] -> VNull
+    | [ value ] -> evaluate value None
+    | [ value; newValue ] ->
+        let replacement = geometryNumericArgument newValue
+        if value = VNull || newValue = VNull then VNull else evaluate value (Some replacement)
+    | _ -> nativeParameterCountError functionName
 
 let private geometryVertexDistanceFn (name: string) quantity measure : Scalar =
     let functionName = name.ToLowerInvariant()
@@ -6606,14 +6672,7 @@ let private geometryConvexHullFn: Scalar =
 let private geometrySimplifyFn: Scalar =
     function
     | [ value; toleranceValue ] ->
-        let tolerance =
-            match toleranceValue with
-            | VString _ | VBytes _ | VEncodedString _ ->
-                let text = toText toleranceValue |> Option.defaultValue ""
-                let number, truncated = Value.coerceLeadingDouble text
-                if truncated then Diagnostics.numericConversion "DOUBLE" text
-                number
-            | _ -> toDouble toleranceValue
+        let tolerance = geometryNumericArgument toleranceValue
 
         if value = VNull || toleranceValue = VNull then VNull
         else
@@ -7028,6 +7087,10 @@ let private registerSpatialBuiltins registry =
         { ColumnWire.parameterMetadataOfType(TDouble false) with CollationId = Some Collation.binaryId }
     let validityResult =
         { ColumnWire.parameterMetadataOfType(TBigInt false) with ColumnLength = 1u; CollationId = Some Collation.binaryId }
+    let registerPointCoordinates current =
+        (current, pointCoordinateFunctions)
+        ||> List.fold (fun registry (name, coordinate) ->
+            registerScalarWithSignature name [ geometry; spatialDouble ] spatialDouble (pointPropertyFn name coordinate) registry)
 
     registry
     |> registerGeometryConstructors geometryFromTextFn wktGeometryConstructors
@@ -7052,8 +7115,7 @@ let private registerSpatialBuiltins registry =
     |> registerScalarWithSignature "ST_VALIDATE" [ geometry ] geometryResult
         (geometryValidityFn "ST_Validate" (fun geometry valid -> if valid then VGeometry geometry else VNull))
     |> registerScalar "ISEMPTY" geometryIsEmptyFn
-    |> registerScalar "ST_X" (pointCoordinateFn "ST_X" (fun x _ -> x))
-    |> registerScalar "ST_Y" (pointCoordinateFn "ST_Y" (fun _ y -> y))
+    |> registerPointCoordinates
     |> registerScalar "X" (pointCoordinateFn "X" (fun x _ -> x))
     |> registerScalar "Y" (pointCoordinateFn "Y" (fun _ y -> y))
     |> registerScalar "ST_ISCLOSED" geometryIsClosedFn
