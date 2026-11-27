@@ -267,10 +267,14 @@ let rewrite (replace: Expr -> Expr option) (expression: Expr) : Expr =
 type private RewriteRules =
     { Replace: Expr -> Expr option
       Projection: Projection -> Projection
-      EnterSelect: SelectStmt -> RewriteRules option }
+      EnterSelect: SelectStmt -> RewriteRules option
+      EnterCtes: CommonTableExpr list -> (RewriteRules * RewriteRules list) option }
 
 let private plainRewriteRules replace projection =
-    { Replace = replace; Projection = projection; EnterSelect = fun _ -> None }
+    { Replace = replace
+      Projection = projection
+      EnterSelect = fun _ -> None
+      EnterCtes = fun _ -> None }
 
 /// Rewrites an expression and every expression inside its subqueries.
 let rec private rewriteTreeWith (rules: RewriteRules) (expression: Expr) : Expr =
@@ -320,8 +324,13 @@ and private rewriteJoin rules (join: Join) =
         On = rewriteTreeWith rules join.On }
 
 and private rewriteSelect rules (select: SelectStmt) =
+    rewriteSelectWithCtes rules (rules.EnterCtes select.Ctes) select
+
+and private rewriteSelectWithCtes rules cteScopes (select: SelectStmt) =
+    let rules = cteScopes |> Option.map fst |> Option.defaultValue rules
     let rules = rules.EnterSelect select |> Option.defaultValue rules
     let rewriteOrderKey (expression, direction) = rewriteTreeWith rules expression, direction
+    let cteRules = cteScopes |> Option.map snd |> Option.defaultWith (fun () -> List.replicate select.Ctes.Length rules)
 
     { select with
         Projections =
@@ -334,7 +343,7 @@ and private rewriteSelect rules (select: SelectStmt) =
         Where = Option.map (rewriteTreeWith rules) select.Where
         GroupBy = List.map (rewriteTreeWith rules) select.GroupBy
         Windows = select.Windows |> List.map (fun (name, spec) -> name, rewriteWindowSpec rules spec)
-        Ctes = select.Ctes |> List.map (fun cte -> { cte with Body = rewriteSelectOrUnion rules cte.Body })
+        Ctes = List.map2 (fun scope cte -> { cte with Body = rewriteSelectOrUnion scope cte.Body }) cteRules select.Ctes
         Having = Option.map (rewriteTreeWith rules) select.Having
         OrderBy = List.map rewriteOrderKey select.OrderBy
         Limit = Option.map (rewriteTreeWith rules) select.Limit
@@ -344,14 +353,16 @@ and private rewriteSelectOrUnion rules =
     function
     | PlainSelect select -> PlainSelect(rewriteSelect rules select)
     | UnionSelect(first, rest, orderBy, limit, offset) ->
-        let rewriteOrderKey (expression, direction) = rewriteTreeWith rules expression, direction
+        let cteScopes = rules.EnterCtes first.Ctes
+        let siblingRules = cteScopes |> Option.map fst |> Option.defaultValue rules
+        let rewriteOrderKey (expression, direction) = rewriteTreeWith siblingRules expression, direction
 
         UnionSelect(
-            rewriteSelect rules first,
-            rest |> List.map (fun (kind, select) -> kind, rewriteSelect rules select),
+            rewriteSelectWithCtes rules cteScopes first,
+            rest |> List.map (fun (kind, select) -> kind, rewriteSelect siblingRules select),
             List.map rewriteOrderKey orderBy,
-            Option.map (rewriteTreeWith rules) limit,
-            Option.map (rewriteTreeWith rules) offset
+            Option.map (rewriteTreeWith siblingRules) limit,
+            Option.map (rewriteTreeWith siblingRules) offset
         )
 
 /// Rewrites every executable expression position in a statement.
@@ -438,8 +449,17 @@ let private relationAliases (select: SelectStmt) =
     |> List.collect FromItem.leaves
     |> List.choose FromItem.tryQualifier
 
-let private outerReferenceRules localColumns replace =
-    let rec rulesFor shadowedAliases shadowedColumns =
+let internal bindCteColumnScopes outputColumns inherited (definitions: CommonTableExpr list) =
+    (inherited, definitions)
+    ||> List.mapFold (fun previous cte ->
+        let name = cte.CteName.ToLowerInvariant()
+        let declared = if cte.CteColumns.IsEmpty then None else Some cte.CteColumns
+        let scope = if cte.Recursive then Map.add name declared previous else previous
+        let columns = declared |> Option.orElseWith (fun () -> outputColumns scope cte.Body)
+        scope, Map.add name columns previous)
+
+let private outerReferenceRules columnBinding replace =
+    let rec rulesFor shadowedAliases shadowedColumns cteColumns =
         { Replace =
             (function
             | QualifiedCol(owner, _) as reference when not (Set.contains (owner.ToLowerInvariant()) shadowedAliases) ->
@@ -456,10 +476,20 @@ let private outerReferenceRules localColumns replace =
                     |> List.map _.ToLowerInvariant()
                     |> Set.ofList
                 let columns = shadowedColumns |> Option.bind (fun names ->
-                    localColumns |> Option.bind (fun getColumns ->
-                        getColumns nested |> Option.map (Set.union names)))
-                Some(rulesFor (Set.union shadowedAliases locals) columns) }
-    rulesFor Set.empty (localColumns |> Option.map (fun _ -> Set.empty))
+                    columnBinding |> Option.bind (fun (getColumns, _) ->
+                        getColumns cteColumns nested |> Option.map (Set.union names)))
+                Some(rulesFor (Set.union shadowedAliases locals) columns cteColumns)
+          EnterCtes =
+            fun definitions ->
+                match columnBinding, definitions with
+                | Some(_, outputColumns), _ :: _ ->
+                    // A declaration sees earlier CTEs and enclosing correlations.
+                    // The FROM aliases of the SELECT using it are not in scope yet.
+                    let declarations, visible =
+                        bindCteColumnScopes outputColumns cteColumns definitions
+                    Some(rulesFor shadowedAliases shadowedColumns visible, List.map (rulesFor shadowedAliases shadowedColumns) declarations)
+                | _ -> None }
+    rulesFor Set.empty (columnBinding |> Option.map (fun _ -> Set.empty)) Map.empty
 
 let private outerQualifiedRules replace = outerReferenceRules None replace
 
@@ -468,8 +498,8 @@ let rewriteSubqueryOuterReferences replace expression =
     rewriteTreeWith { rules with Replace = fun _ -> None } expression
 
 /// Bare correlated names can be rebound when every intervening scope has known columns.
-let internal rewriteSubqueryOuterReferencesWithColumns localColumns replace expression =
-    let rules = outerReferenceRules (Some localColumns) replace
+let internal rewriteSubqueryOuterReferencesWithColumns localColumns outputColumns replace expression =
+    let rules = outerReferenceRules (Some(localColumns, outputColumns)) replace
     rewriteTreeWith { rules with Replace = fun _ -> None } expression
 
 let subqueryRelationAliases statement =

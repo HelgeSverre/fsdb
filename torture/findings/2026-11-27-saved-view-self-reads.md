@@ -87,7 +87,9 @@ loading a checkpoint containing the view definitions.
 
 Joined DELETE still has differences for scalar subqueries and for
 predicates that MySQL keeps as subqueries during view resolution.
-The direct correlated EXISTS control remains allowed.
+The direct correlated EXISTS control remains allowed. In the audited
+saved EXISTS views, MySQL drops LIMIT and OFFSET from the stored
+definition, which changes the rows available to a later joined DELETE.
 
 ## Aliases in saved joined views
 
@@ -125,5 +127,35 @@ of correlation, a qualified CTE, generated-name collisions,
 probes confirmed that an inner column retains its owner and that a
 check option still rejects an update that would remove the row from
 the view. Binary prepared writes to the qualified and bare variants
-matched after checkpoint restart. Bare references through CTEs or
-other scopes with unknown columns still need broader name binding.
+matched after checkpoint restart.
+
+## Bare correlations through CTEs
+
+The view rewriter now carries the visible CTE output columns through
+each query block. A declaration sees earlier definitions, and a local
+CTE shadows an enclosing definition in the blocks where it is
+visible. A schema-qualified reference still resolves to its physical
+table. [MySQL CTE name resolution](https://dev.mysql.com/doc/refman/8.4/en/with.html)
+
+For example, in a filter over an outer labels table with a `tag`
+column, the `tag` in this predicate belongs to the outer row. Inlining
+the filter into a join with another `tag` column used to make the
+reference ambiguous.
+
+```sql
+EXISTS (
+  WITH ids AS (SELECT id FROM allowed), copied AS (SELECT * FROM ids)
+  SELECT 1 FROM copied WHERE id = tag - 99
+)
+```
+
+The 32 UPDATE probes for definitions accepted by both engines improved
+from 10 to 32 matches on affected rows and row contents. They include
+declared names, wildcard projections, inherited and shadowed CTEs,
+recursive CTEs, derived sources, UNION branches, and correlations in
+CTE definitions. Both Fsdb storage modes agreed. The earlier 46 alias
+probes still match. One nested shadowing definition returned 1064 at
+creation in MySQL and was accepted in Fsdb. Bare names whose local
+column sets cannot be inferred still need broader name binding.
+Binary prepared updates through a nested CTE matched after checkpoint
+restart.

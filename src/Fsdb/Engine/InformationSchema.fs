@@ -1574,7 +1574,7 @@ let internal tryLeadingReadOnlyWritableTarget (source: FromItem) (joins: Join li
         | _ -> None
     | _ -> None
 
-let private projectionName (projection: Projection) =
+let internal projectionName (projection: Projection) =
     projection.Alias
     |> Option.orElse projection.SourceName
     |> Option.orElseWith (fun () ->

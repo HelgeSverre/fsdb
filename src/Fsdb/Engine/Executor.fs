@@ -2447,18 +2447,53 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
                                             |> Option.defaultValue []
                                             |> List.map _.ToLowerInvariant()
                                             |> Set.ofList)
-                                    let localColumns (query: SelectStmt) =
-                                        if not query.Ctes.IsEmpty then None
-                                        else
-                                            Option.toList query.From @ (query.Joins |> List.map (fun join -> join.Table))
-                                            |> List.collect FromItem.leaves
-                                            |> List.map (function
-                                                | FromTable table -> physicalColumns table
-                                                | _ -> None)
-                                            |> tryAllSome
-                                            |> Option.map (fun sources ->
-                                                let aliases = query.Projections |> List.choose _.Alias
-                                                List.concat sources @ aliases |> List.map _.ToLowerInvariant() |> Set.ofList)
+                                    let rec outputColumns visible body =
+                                        let query =
+                                            match body with
+                                            | PlainSelect select | UnionSelect(select, _, _, _, _) -> select
+                                        let _, visible = Expression.bindCteColumnScopes outputColumns visible query.Ctes
+                                        let byQualifier = lazy (sourceColumns visible query |> Option.map Map.ofList)
+                                        let namesFor (qualifier: string) =
+                                            byQualifier.Value
+                                            |> Option.bind (Map.tryFind (qualifier.ToLowerInvariant()))
+                                        query.Projections
+                                        |> List.map (fun projection ->
+                                            match projection.Expression with
+                                            | Star None ->
+                                                byQualifier.Value
+                                                |> Option.bind (fun names ->
+                                                    FromItem.logicalSelectColumns
+                                                        (fun qualifier -> Map.tryFind (qualifier.ToLowerInvariant()) names |> Option.defaultValue [])
+                                                        query
+                                                    |> Result.toOption)
+                                                |> Option.map (List.map _.Name)
+                                            | Star(Some qualifier) -> namesFor qualifier
+                                            | _ -> InformationSchema.projectionName projection |> Option.map List.singleton)
+                                        |> tryAllSome
+                                        |> Option.map List.concat
+                                    and sourceColumns visible (query: SelectStmt) =
+                                        Option.toList query.From @ (query.Joins |> List.map (fun join -> join.Table))
+                                        |> List.collect FromItem.leaves
+                                        |> List.map (fun source ->
+                                            let columns =
+                                                match source with
+                                                | FromTable table ->
+                                                    let binding =
+                                                        if table.Database.IsNone then Map.tryFind (table.Table.ToLowerInvariant()) visible
+                                                        else None
+                                                    binding |> Option.defaultWith (fun () -> physicalColumns table)
+                                                | FromSubquery(body, _) | FromLateral(body, _) -> outputColumns visible body
+                                                | FromJsonTable(_, _, columns, _) -> Some(JsonTableColumn.names columns)
+                                                | _ -> None
+                                            columns
+                                            |> Option.bind (fun names ->
+                                                FromItem.tryQualifier source |> Option.map (fun alias -> alias.ToLowerInvariant(), names)))
+                                        |> tryAllSome
+                                    let localColumns visible (query: SelectStmt) =
+                                        sourceColumns visible query
+                                        |> Option.map (fun sources ->
+                                            let aliases = query.Projections |> List.choose _.Alias
+                                            (sources |> List.collect snd) @ aliases |> List.map _.ToLowerInvariant() |> Set.ofList)
                                     let rewriteCorrelated = function
                                         | Col column when Set.contains (column.ToLowerInvariant()) baseColumns.Value ->
                                             Some(QualifiedCol(physicalQualifier, column))
@@ -2466,7 +2501,7 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
                                         | reference -> rewriteInnerReference reference
                                     let rewriteSubqueries =
                                         if nested.UpdateJoins.IsEmpty then
-                                            Expression.rewriteSubqueryOuterReferencesWithColumns localColumns rewriteCorrelated
+                                            Expression.rewriteSubqueryOuterReferencesWithColumns localColumns outputColumns rewriteCorrelated
                                         else Expression.rewriteSubqueryOuterReferences rewriteInnerReference
                                     let qualify expression =
                                         expression

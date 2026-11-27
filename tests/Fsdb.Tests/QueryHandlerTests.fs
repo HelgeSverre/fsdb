@@ -5780,6 +5780,33 @@ let tests =
               Expect.equal (run "SELECT tag FROM alias_labels ORDER BY id")
                   (ResultSet([ "tag" ], [ [ Some "101" ]; [ Some "200" ] ])) "the renamed component remains writable"
 
+          testCase "saved joined views bind bare correlations across CTE scopes"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE cte_target(id INT PRIMARY KEY,n INT,tag INT)"
+                        "CREATE TABLE cte_labels(id INT PRIMARY KEY,tag INT)"
+                        "CREATE TABLE cte_allowed(id INT PRIMARY KEY,tag INT)"
+                        "INSERT INTO cte_target VALUES(1,10,999),(2,20,999)"
+                        "INSERT INTO cte_labels VALUES(1,100),(2,200)"
+                        "INSERT INTO cte_allowed VALUES(1,97),(2,98)"
+                        "CREATE VIEW cte_filter AS SELECT l.* FROM cte_labels l WHERE EXISTS (WITH ids AS (SELECT id FROM cte_allowed WHERE id=1), copy AS (SELECT * FROM ids) SELECT 1 FROM copy r WHERE r.id=tag-99)"
+                        "CREATE VIEW inherited_filter AS SELECT l.* FROM cte_labels l WHERE EXISTS (WITH ids AS (SELECT id FROM cte_allowed WHERE id=1) SELECT 1 WHERE EXISTS (SELECT 1 FROM ids WHERE id=tag-99))"
+                        "CREATE VIEW local_filter AS SELECT l.* FROM cte_labels l WHERE EXISTS (WITH ids(tag) AS (SELECT tag FROM cte_allowed) SELECT 1 FROM ids r WHERE tag=97 AND l.id=1)"
+                        "CREATE VIEW cte_joined AS SELECT t.id,t.n,r.tag FROM cte_target t JOIN cte_filter r USING(id)"
+                        "CREATE VIEW inherited_joined AS SELECT t.id,t.n,r.tag FROM cte_target t JOIN inherited_filter r USING(id)"
+                        "CREATE VIEW local_joined AS SELECT t.id,t.n,r.tag FROM cte_target t JOIN local_filter r USING(id)" ]
+
+              for sql in
+                  [ "UPDATE cte_joined SET n=n+1"
+                    "UPDATE inherited_joined SET n=n+1"
+                    "UPDATE local_joined SET tag=tag+1" ] do
+                  Expect.equal (run sql) (Affected 1UL) sql
+              Expect.equal (run "SELECT n FROM cte_target ORDER BY id")
+                  (ResultSet([ "n" ], [ [ Some "12" ]; [ Some "20" ] ])) "the earlier CTE projection does not hide the outer tag"
+              Expect.equal (run "SELECT tag FROM cte_labels ORDER BY id")
+                  (ResultSet([ "tag" ], [ [ Some "101" ]; [ Some "200" ] ])) "the declared CTE column keeps its local owner"
+
           testCase "geometry equality and binary casts use the SQL geometry bytes"
           <| fun _ ->
               let cartesian = "00000000010100000000000000000024400000000000004E40"
