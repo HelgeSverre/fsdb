@@ -1,0 +1,33 @@
+DROP DATABASE IF EXISTS fsdb_width_fixture;
+CREATE DATABASE fsdb_width_fixture;
+USE fsdb_width_fixture;
+CREATE TABLE u520(id INT PRIMARY KEY, body TEXT COLLATE utf8mb4_unicode_520_ci, title TEXT COLLATE utf8mb4_unicode_520_ci, FULLTEXT KEY ft(body,title) WITH PARSER ngram);
+CREATE TABLE u40(id INT PRIMARY KEY, body TEXT COLLATE utf8mb3_unicode_ci, title TEXT COLLATE utf8mb3_unicode_ci, FULLTEXT KEY ft(body,title) WITH PARSER ngram);
+CREATE TABLE control(id INT PRIMARY KEY, body TEXT COLLATE utf8mb4_general_ci, title TEXT COLLATE utf8mb4_general_ci, FULLTEXT KEY ft(body,title) WITH PARSER ngram);
+INSERT INTO u520 VALUES (1,'0中文',''),(2,'','０中文'),(3,'a中文',''),(4,'á中文',''),(5,'','Ａ中文'),(6,'別の文字',''),(7,'_中文',''),(8,'','＿中文');
+INSERT INTO u40 SELECT * FROM u520;
+INSERT INTO control SELECT * FROM u520;
+INSERT INTO u520 VALUES (9,'＠中',''),(10,'@中','');
+INSERT INTO u40 VALUES (9,'＠中',''),(10,'@中','');
+SELECT 'u520 punctuation wide',GROUP_CONCAT(id ORDER BY id) FROM u520 WHERE MATCH(body,title) AGAINST('＠中');
+SELECT 'u520 punctuation ascii',GROUP_CONCAT(id ORDER BY id) FROM u520 WHERE MATCH(body,title) AGAINST('@中');
+SELECT 'u40 punctuation wide',GROUP_CONCAT(id ORDER BY id) FROM u40 WHERE MATCH(body,title) AGAINST('＠中');
+SELECT 'u40 punctuation ascii',GROUP_CONCAT(id ORDER BY id) FROM u40 WHERE MATCH(body,title) AGAINST('@中');
+SELECT 'u520 digits',GROUP_CONCAT(id ORDER BY id) FROM u520 WHERE MATCH(body,title) AGAINST('0中');
+SELECT 'u520 width phrase',GROUP_CONCAT(id ORDER BY id) FROM u520 WHERE MATCH(body,title) AGAINST('"０中文"' IN BOOLEAN MODE);
+SELECT 'u520 ascii stopword natural',GROUP_CONCAT(id ORDER BY id) FROM u520 WHERE MATCH(body,title) AGAINST('a中');
+SELECT 'u520 ascii stopword boolean',GROUP_CONCAT(id ORDER BY id) FROM u520 WHERE MATCH(body,title) AGAINST('a中' IN BOOLEAN MODE);
+SELECT 'u520 width stopword boolean',GROUP_CONCAT(id ORDER BY id) FROM u520 WHERE MATCH(body,title) AGAINST('Ａ中' IN BOOLEAN MODE);
+SELECT 'u520 lowline',GROUP_CONCAT(id ORDER BY id) FROM u520 WHERE MATCH(body,title) AGAINST('＿中');
+SELECT 'u40 digits',GROUP_CONCAT(id ORDER BY id) FROM u40 WHERE MATCH(body,title) AGAINST('0中');
+SELECT 'u40 width phrase',GROUP_CONCAT(id ORDER BY id) FROM u40 WHERE MATCH(body,title) AGAINST('"０中文"' IN BOOLEAN MODE);
+SELECT 'u40 ascii stopword natural',GROUP_CONCAT(id ORDER BY id) FROM u40 WHERE MATCH(body,title) AGAINST('a中');
+SELECT 'u40 ascii stopword boolean',GROUP_CONCAT(id ORDER BY id) FROM u40 WHERE MATCH(body,title) AGAINST('a中' IN BOOLEAN MODE);
+SELECT 'u40 width stopword boolean',GROUP_CONCAT(id ORDER BY id) FROM u40 WHERE MATCH(body,title) AGAINST('Ａ中' IN BOOLEAN MODE);
+SELECT 'u40 lowline',GROUP_CONCAT(id ORDER BY id) FROM u40 WHERE MATCH(body,title) AGAINST('＿中');
+SELECT 'general control ascii',GROUP_CONCAT(id ORDER BY id) FROM control WHERE MATCH(body,title) AGAINST('0中');
+SELECT 'general control wider',GROUP_CONCAT(id ORDER BY id) FROM control WHERE MATCH(body,title) AGAINST('０中');
+SELECT (_utf8mb4 '０' COLLATE utf8mb4_unicode_520_ci)=_utf8mb4 '0',
+       (_utf8mb4 '＠' COLLATE utf8mb4_unicode_520_ci)=_utf8mb4 '@',
+       (_utf8mb4 '０' COLLATE utf8mb4_general_ci)=_utf8mb4 '0';
+DROP DATABASE fsdb_width_fixture;

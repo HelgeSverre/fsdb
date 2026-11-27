@@ -1597,8 +1597,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         | _ -> value.StartsWith(prefix, StringComparison.Ordinal)
 
     let foldUnicode520 includeEnclosed (value: string) =
-        let value = value |> foldLegacySpace |> foldCjkPunctuationForms true
-        let value = if includeEnclosed then foldFullwidthAscii value else value
+        let value = value |> foldLegacySpace |> foldCjkPunctuationForms true |> foldFullwidthAscii
         let value = if includeEnclosed then foldLegacyEnclosedCjk true value else value
         let value = if includeEnclosed then foldUnicode520EnclosedCjkEquality value else value
         let value = if includeEnclosed then foldUnicode520SupplementaryCompatibilityEquality value else value
@@ -1656,6 +1655,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         elif name = "utf8mb4_unicode_520_ci" then
             // MySQL's ngram index keeps the older token equivalence classes.
             foldUnicode520 false s |> trim
+        elif name = "utf8mb3_unicode_ci" then
+            foldFullwidthAscii s |> trim
         elif name = "utf8mb4_ja_0900_as_cs_ks" then
             s |> markJapaneseHiraganaForFullText |> foldJapaneseCompatibility |> trim
         else primaryText s

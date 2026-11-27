@@ -425,6 +425,27 @@ let tests =
               Expect.equal (search "中。") [ "4" ] "the ordinary period does not match its vertical form"
               Expect.equal (search "中︒") [ "5" ] "the vertical period keeps its implicit UCA 4.0 weight"
 
+          testCase "legacy Unicode ngrams share fullwidth ASCII posting keys"
+          <| fun _ ->
+              let store = create ()
+              for charset, collation in
+                  [ "utf8mb4", "utf8mb4_unicode_520_ci"; "utf8mb3", "utf8mb3_unicode_ci" ] do
+                  let table = charset + "_width_docs"
+                  run store ($"CREATE TABLE {table}(id INT PRIMARY KEY,body TEXT,title TEXT,FULLTEXT KEY ft(body,title) WITH PARSER ngram) COLLATE={collation}") |> ignore
+                  run store ($"INSERT INTO {table} VALUES (1,'0中文',''),(2,'','０中文'),(3,'a中文',''),(4,'á中文',''),(5,'','Ａ中文'),(6,'別の文字',''),(7,'_中文',''),(8,'','＿中文'),(9,'＠中',''),(10,'@中','')") |> ignore
+                  for term, mode, expected in
+                      [ "0中", "IN NATURAL LANGUAGE MODE", [ "1"; "2" ]
+                        "\"０中文\"", "IN BOOLEAN MODE", [ "1"; "2" ]
+                        "a中", "IN NATURAL LANGUAGE MODE", [ "4"; "5" ]
+                        "a中", "IN BOOLEAN MODE", []
+                        "Ａ中", "IN BOOLEAN MODE", [ "4"; "5" ]
+                        "＿中", "IN NATURAL LANGUAGE MODE", [ "7"; "8" ]
+                        "＠中", "IN NATURAL LANGUAGE MODE", [ "9" ]
+                        "@中", "IN NATURAL LANGUAGE MODE", []
+                        "＠中", "IN BOOLEAN MODE", [] ] do
+                      let sql = $"SELECT id FROM {table} WHERE MATCH(body,title) AGAINST('{term}' {mode}) ORDER BY id"
+                      Expect.equal (ids (run store sql)) expected sql
+
           testCase "Unicode 5.2 ngrams keep supplementary ideographic symbols distinct"
           <| fun _ ->
               let store = create ()
