@@ -28,12 +28,12 @@ MySQL, including after a fullwidth row was inserted and deleted before
 the upgrade. An existing `utf8mb3_unicode_ci` unique index containing both
 widths continued to find each row by its original key.
 
-Two other differences remain. Ordinary `utf8mb3_unicode_ci` equality
+Ordinary `utf8mb3_unicode_ci` equality
 still differs for 93 of the 94 pairs. Changing SQL keys can make existing
 unique indexes ambiguous when both widths were accepted as distinct.
-Short Boolean prefixes such as `a*` also miss `æ中` under
-`utf8mb4_unicode_520_ci` and `utf8mb4_0900_ai_ci`, both on fresh indexes
-and after full-text optimization.
+The [collation prefix follow-up](2026-11-27-ngram-collation-prefixes.md)
+covers searches such as `a*` against `æ中` under `utf8mb4_unicode_520_ci`
+and `utf8mb4_0900_ai_ci`.
 
 See the [MySQL ngram parser](https://dev.mysql.com/doc/refman/8.4/en/fulltext-search-ngram.html)
 and [InnoDB stopword handling](https://dev.mysql.com/doc/refman/8.4/en/fulltext-stopwords.html).

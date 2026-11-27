@@ -1562,6 +1562,32 @@ let internal lowercaseForFullText (name: string) (value: string) =
         | Some ranges -> lowercaseWith ranges value
         | None -> value.ToLowerInvariant()
 
+/// Spellings with the same primary weights in the audited InnoDB collations.
+/// A wildcard can stop between these weights, inside the original scalar.
+let internal fullTextPrefixExpansion name (rune: Rune) =
+    match name with
+    | "utf8mb4_0900_ai_ci"
+    | "utf8mb4_unicode_520_ci"
+    | "utf8mb4_unicode_ci"
+    | "utf8mb3_unicode_ci" ->
+        let uca400 = name = "utf8mb4_unicode_ci" || name = "utf8mb3_unicode_ci"
+        match rune.Value with
+        | 0x00C6 | 0x00E6 | 0x01E2 | 0x01E3 | 0x01FC | 0x01FD when not uca400 -> Some "ae"
+        | 0x00DF -> Some "ss"
+        | 0x1E9E when not uca400 -> Some "ss"
+        | 0x0152 | 0x0153 -> Some "oe"
+        | 0x2150 | 0x2151 | 0x2152 | 0x2189 | 0x327E when uca400 -> None
+        | 0x32FF -> None // UCA 9 predates this Japanese era symbol.
+        | value ->
+            let inRange first last = value >= first && value <= last
+            if value = 0x0149 || inRange 0x0132 0x0133 || inRange 0x01C4 0x01CC || inRange 0x01F1 0x01F3
+               || inRange 0x2150 0x218F || inRange 0x2460 0x24FF || inRange 0x3200 0x33FF
+               || inRange 0xFB00 0xFB06 || (name = "utf8mb4_0900_ai_ci" && inRange 0xAC00 0xD7A3) then
+                let expansion = rune.ToString().Normalize(NormalizationForm.FormKD)
+                if expansion.Length > rune.Utf16SequenceLength then Some expansion else None
+            else None
+    | _ -> None
+
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let chinese0900 = name = "utf8mb4_zh_0900_as_cs"
     let ci = compareInfoFor spec.Locale

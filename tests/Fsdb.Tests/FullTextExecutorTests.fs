@@ -446,6 +446,31 @@ let tests =
                       let sql = $"SELECT id FROM {table} WHERE MATCH(body,title) AGAINST('{term}' {mode}) ORDER BY id"
                       Expect.equal (ids (run store sql)) expected sql
 
+          testCase "short ngram wildcards can end inside a collation expansion"
+          <| fun _ ->
+              let store = create ()
+              let session = Fsdb.Session.create 1 store
+              for collation, latin, hangul in
+                  [ "utf8mb4_0900_ai_ci", [ "1"; "2"; "3"; "14" ], [ "10"; "11" ]
+                    "utf8mb4_unicode_520_ci", [ "1"; "2"; "3"; "14" ], []
+                    "utf8mb4_unicode_ci", [ "3" ], []
+                    "utf8mb4_bin", [], [] ] do
+                  run store ($"CREATE TABLE docs(id INT PRIMARY KEY, body TEXT, FULLTEXT KEY ft(body) WITH PARSER ngram) COLLATE={collation}") |> ignore
+                  run store "INSERT INTO docs VALUES (1,'æ中'),(2,'ǽ中'),(3,'Ａ中'),(4,'a中'),(5,'ß中'),(6,'ﬃ中'),(7,'㍿中'),(8,'㌔中'),(9,'⑩中'),(10,'한글'),(11,'하늘'),(12,'㈱中'),(13,'別の語'),(14,'æ日'),(15,'㋿中')" |> ignore
+                  let search term =
+                      run store ($"SELECT id FROM docs WHERE MATCH(body) AGAINST('{term}' IN BOOLEAN MODE) ORDER BY id") |> ids
+                  let expanded id = if collation = "utf8mb4_bin" then [] else [ id ]
+                  let verify state =
+                      for term, expected in
+                          [ "a*", latin; "ᄒ*", hangul; "株*", expanded "7"; "キ*", expanded "8"
+                            "f*", expanded "6"; "1*", expanded "9"; "令*", []; "a中", [] ] do
+                          Expect.equal (search term) expected $"{collation}, {state}, {term}"
+                  verify "cached"
+                  Fsdb.QueryHandler.handle session "SET GLOBAL innodb_optimize_fulltext_only=ON" |> ignore
+                  Fsdb.QueryHandler.handle session "OPTIMIZE TABLE docs" |> ignore
+                  verify "flushed"
+                  run store "DROP TABLE docs" |> ignore
+
           testCase "Unicode 5.2 ngrams keep supplementary ideographic symbols distinct"
           <| fun _ ->
               let store = create ()

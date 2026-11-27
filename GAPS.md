@@ -1822,8 +1822,12 @@ The case-insensitive UCA 9 collations share fullwidth ASCII equality and
 posting keys. [Legacy Unicode fullwidth ASCII](torture/findings/2026-11-27-legacy-fullwidth-ngram.md)
 now shares posting keys under `utf8mb4_unicode_520_ci` and `utf8mb3_unicode_ci`.
 Width folding follows tokenization and stopword filtering.
-Ordinary `utf8mb3_unicode_ci` width equality and some short Boolean
-prefixes involving collation expansions remain open.
+Ordinary `utf8mb3_unicode_ci` width equality remains open.
+[Short Boolean prefixes inside collation expansions](torture/findings/2026-11-27-ngram-collation-prefixes.md)
+now match the audited accent-insensitive UCA cases, including Latin
+ligatures, Japanese compatibility symbols, and UCA 9 Hangul syllables.
+Accent-sensitive prefix handling and broader flushed-posting ranking
+remain open.
 [Boolean ngram rank cancellation](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#boolean-rank-cancellation)
 now treats a final score of zero as a nonmatch in the audited weighted
 term, phrase, group, and prefix cases. [Single-precision rank accumulation](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#single-precision-rank-accumulation)

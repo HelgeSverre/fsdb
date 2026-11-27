@@ -401,8 +401,19 @@ let private chargeDocument tokenizer collation order (words: (string * Token[])[
 let private prefixKeys (collation: Collation) (token: Token) =
     let mutable length = 0
     [| for rune in token.Text.EnumerateRunes() do
+           let start = length
            length <- length + rune.Utf16SequenceLength
-           collation.FullTextKeyOf(token.Text.Substring(0, length)) |]
+           yield collation.FullTextKeyOf(token.Text.Substring(0, length))
+           if rune.Value > 0x7F then
+               match Collation.fullTextPrefixExpansion collation.Name rune with
+               | Some expansion ->
+                   let leading = token.Text.Substring(0, start)
+                   let mutable offset = 0
+                   for part in expansion.EnumerateRunes() do
+                       offset <- offset + part.Utf16SequenceLength
+                       if offset < expansion.Length then
+                           yield collation.FullTextKeyOf(leading + expansion.Substring(0, offset))
+               | None -> () |]
     |> Array.distinct
 
 let private ngramDocumentPrefixes collation (words: (string * Token[])[]) =
