@@ -20,7 +20,44 @@ let private setup () =
 let tests =
     testList
         "views"
-        [ testCase "variable writes disable heuristic view merging for one statement"
+        [ testCase "saved views stay writable when top-level CTEs are unused"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE base(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE allowed(id INT PRIMARY KEY)"
+                    "INSERT INTO base VALUES(1,10)"
+                    "INSERT INTO allowed VALUES(1),(2)" ] do
+                  expectOk (run store sql) sql
+
+              for name, definition in
+                  [ "dead_chain", "WITH c AS (SELECT * FROM base),d AS (SELECT * FROM c) SELECT id,n FROM base WHERE n>0"
+                    "dead_invalid", "WITH c AS (SELECT * FROM missing) SELECT id,n FROM base WHERE n>0"
+                    "dead_recursive", "WITH RECURSIVE c AS (SELECT 1 AS k UNION ALL SELECT k+1 FROM c WHERE k<3) SELECT id,n FROM base WHERE n>0"
+                    "dead_shadowed", "WITH c AS (SELECT id FROM base) SELECT id,n FROM base WHERE EXISTS (WITH c AS (SELECT id FROM allowed) SELECT 1 FROM c WHERE c.id=base.id)" ] do
+                  let create = $"CREATE VIEW {name} AS {definition} WITH CHECK OPTION"
+                  expectOk (run store create) create
+                  Expect.equal
+                      (rows store $"SELECT is_updatable FROM information_schema.views WHERE table_name='{name}'")
+                      [ [ Some "YES" ] ] "the view's writable source is physical"
+                  for sql in [ $"UPDATE {name} SET n=11 WHERE id=1"; $"INSERT INTO {name}(id,n) VALUES(2,20)"; $"DELETE FROM {name} WHERE id=2" ] do
+                      Expect.equal (run store sql) (Affected 1UL) sql
+                  Expect.equal (rows store "SELECT id,n FROM base") [ [ Some "1"; Some "11" ] ] "writes reach the base table"
+                  expectOk (run store "UPDATE base SET n=10 WHERE id=1") "reset the fixture"
+                  if name = "dead_chain" then
+                      TestSupport.Sql.expectError 1369 (run store $"UPDATE {name} SET n=-1 WHERE id=1") "the check option still rejects the update"
+                  match rows store $"SELECT view_definition FROM information_schema.views WHERE table_name='{name}'" with
+                  | [ [ Some definition ] ] ->
+                      Expect.isTrue (definition.StartsWith("select", System.StringComparison.OrdinalIgnoreCase)) "the canonical definition omits unused bindings"
+                  | other -> failtestf "expected a canonical view definition, got %A" other
+                  Expect.equal
+                      (rows store $"SELECT view_definition FROM mysql.views WHERE view_name='{name}'")
+                      [ [ Some definition ] ] "the catalog retains the saved SQL"
+
+              let live = "WITH c AS (SELECT id FROM base) SELECT id,n FROM base WHERE EXISTS (SELECT 1 FROM c WHERE c.id=base.id)"
+              TestSupport.Sql.expectError 1368 (run store $"CREATE VIEW live_check AS {live} WITH CHECK OPTION") "a live self-read still blocks CHECK OPTION"
+
+          testCase "variable writes disable heuristic view merging for one statement"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let mutable session = Fsdb.Session.create 1 store

@@ -91,11 +91,15 @@ let private canonicalViewDefinition catalog schema includeSchema definition =
     match Parser.parseSavedViewDefinition definition with
     | Error _ -> definition
     | Ok parsed ->
+        let statement =
+            match parsed.Statement with
+            | Select select -> Select(Expression.pruneUnusedTopLevelCtes select)
+            | statement -> statement
         SqlText.viewDefinition
             { DefaultSchema = schema
               IncludeSchema = includeSchema
               RelationColumns = relationColumns catalog }
-            parsed.Statement
+            statement
         |> Option.defaultValue definition
 
 /// MySQL's `information_schema.columns.data_type` — the bare type name,
@@ -1679,6 +1683,7 @@ let internal flattenInnerJoinedOperands (catalog: Catalog) schema (select: Selec
 /// view write. Recursive CTEs and their dependent read sources also become
 /// derived sources; each wrapper retains the full CTE binding scope.
 let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStmt) =
+    let select = Expression.pruneUnusedTopLevelCtes select
     let sources = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
     let cteNames = select.Ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant()) |> Set.ofList
 

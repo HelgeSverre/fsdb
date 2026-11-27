@@ -118,6 +118,65 @@ let collectSubqueries expression =
 
     loop expression
 
+/// Retain declarations reachable from the query under its lexical WITH scopes.
+/// A nested binding shadows an outer name without making the outer CTE live.
+let internal pruneUnusedTopLevelCtes (select: SelectStmt) =
+    let nameKey (name: string) = name.ToLowerInvariant()
+    let names = select.Ctes |> List.map (_.CteName >> nameKey) |> Set.ofList
+    if select.Ctes.IsEmpty || names.Count <> select.Ctes.Length then select
+    else
+        let rec extend markRoots scope (declarations: CommonTableExpr list) =
+            (scope, declarations)
+            ||> List.fold (fun previous declaration ->
+                let name = nameKey declaration.CteName
+                let visible = if declaration.Recursive then Map.remove name previous else previous
+                let dependencies =
+                    lazy
+                        (let uses = query visible declaration.Body
+                         if markRoots then Set.add name uses else uses)
+                Map.add name dependencies previous)
+
+        and query scope = function
+            | PlainSelect block -> selectUses (extend false scope block.Ctes) block
+            | UnionSelect(first, rest, orderBy, limit, offset) ->
+                let shared = extend false scope first.Ctes
+                Set.unionMany
+                    [ yield selectUses shared first
+                      for _, branch in rest do
+                          yield selectUses (extend false shared branch.Ctes) branch
+                      yield expressions shared (List.map fst orderBy @ Option.toList limit @ Option.toList offset) ]
+
+        and selectUses scope (block: SelectStmt) =
+            let values =
+                (block.Projections |> List.map _.Expression)
+                @ (block.Joins |> List.collect Join.conditions)
+                @ Option.toList block.Where @ block.GroupBy @ Option.toList block.Having
+                @ (block.OrderBy |> List.map fst) @ Option.toList block.Limit @ Option.toList block.Offset
+                @ (block.Windows |> List.collect (snd >> OverSpec >> overExpressions))
+            let sources = Option.toList block.From @ (block.Joins |> List.map _.Table)
+            Set.union (expressions scope values) (sources |> List.map (source scope) |> Set.unionMany)
+
+        and expressions scope values =
+            values
+            |> List.collect collectSubqueries
+            |> List.map (fun block -> query scope (PlainSelect block))
+            |> Set.unionMany
+
+        and source scope = function
+            | FromTable table when table.Database.IsNone ->
+                match Map.tryFind (nameKey table.Table) scope with
+                | Some dependencies -> dependencies.Value
+                | None -> Set.empty
+            | FromJoinGroup(first, joins) ->
+                let reads = source scope first :: (joins |> List.map (_.Table >> source scope))
+                Set.union (Set.unionMany reads) (joins |> List.collect Join.conditions |> expressions scope)
+            | FromSubquery(body, _) | FromLateral(body, _) -> query scope body
+            | FromJsonTable(value, _, _, _) -> expressions scope [ value ]
+            | _ -> Set.empty
+
+        let used = selectUses (extend true Map.empty select.Ctes) select
+        { select with Ctes = select.Ctes |> List.filter (fun declaration -> Set.contains (nameKey declaration.CteName) used) }
+
 let fold (visit: 'state -> Expr -> Traversal<'state>) (state: 'state) (expression: Expr) : 'state =
     let rec loop current node =
         match visit current node with

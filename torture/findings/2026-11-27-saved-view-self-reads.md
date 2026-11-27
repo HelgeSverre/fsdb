@@ -42,7 +42,25 @@ waiting while another session held the base row. Their binary PREPARE
 diagnostics also matched, including after a durable restart.
 
 Remaining differences include some INSERTs through views with indirect
-self-reads, unused top-level CTEs, and dependent outer predicates.
+self-reads and dependent outer predicates.
+
+## Unused top-level CTEs
+
+An unused WITH declaration leaves a saved view over a physical table writable.
+View write analysis now follows the CTEs reachable from the query. It keeps the
+dependencies of live declarations and respects nested shadowing and UNION
+scope. The catalog preserves the saved SQL. SHOW CREATE VIEW and the
+information schema omit unused top-level bindings in their canonical
+definitions, as MySQL does. Unused declarations can include recursive
+queries and references to missing tables or columns.
+
+The pinned MySQL 8.4.11 comparison matched 74 of 75 observations across
+15 definitions in memory, with WAL, and after a checkpoint restart. It
+checked IS_UPDATABLE, UPDATE, INSERT, DELETE, and WITH CHECK OPTION.
+The check option still rejected an update that would remove a row from the
+view. The remaining difference is WITH CHECK OPTION on a view that selects
+directly from a live CTE. MySQL accepts the declaration and refuses writes
+through that view. Fsdb rejects the declaration with 1368.
 
 ## Direct joined updates
 

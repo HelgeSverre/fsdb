@@ -1114,6 +1114,9 @@ outer `LIMIT` and `OFFSET`, preserving bounds on inner relations and set
 branches. Joined DELETE checks target reads that remain in a merged
 view's subqueries after semijoin resolution. Some nested view definition
 cases and optimizer controls still differ.
+[Unused top-level WITH declarations](torture/findings/2026-11-27-saved-view-self-reads.md#unused-top-level-ctes)
+now leave saved views writable. The stored definition remains intact and
+view analysis follows live dependencies through nested scopes.
 
 Uncorrelated scalar projection subqueries can leave direct columns writable
 while preventing insertion. Dependent projection subqueries refuse writes.
