@@ -6640,7 +6640,26 @@ let private orderedEqualityPrefixBounds (entries: ImmutableSortedSet<SecondaryOr
 
     seek 0 0 entries.Count prefix
 
-let private tryIntegerPrimaryLockValues width (key: string) =
+let private tryPrimaryGapLockValues width (key: string) =
+    let parse start length =
+        let payload = key.AsSpan(start + 1, length - 1)
+        match key.[start] with
+        | 'I' ->
+            match Int64.TryParse payload with
+            | true, value -> Some(VInt value)
+            | _ ->
+                match UInt64.TryParse payload with
+                | true, value -> Some(VUInt value)
+                | _ -> None
+        | 'M' ->
+            match Decimal.TryParse(payload, NumberStyles.Float, CultureInfo.InvariantCulture) with
+            | true, value -> Some(VDecimal value)
+            | _ -> None
+        | 'B' ->
+            try Some(VBytes(Convert.FromHexString(payload)))
+            with :? FormatException -> None
+        | _ -> None
+
     let rec read offset remaining reversed =
         if remaining = 0 then
             if offset = key.Length then Some(List.rev reversed) else None
@@ -6650,14 +6669,10 @@ let private tryIntegerPrimaryLockValues width (key: string) =
             else
                 let start = separator + 1
                 match Int32.TryParse(key.AsSpan(offset, separator - offset)) with
-                | true, length when length >= 2 && length <= key.Length - start && key.[start] = 'I' ->
-                    let digits = key.AsSpan(start + 1, length - 1)
-                    match Int64.TryParse digits with
-                    | true, value -> read (start + length) (remaining - 1) (VInt value :: reversed)
-                    | _ ->
-                        match UInt64.TryParse digits with
-                        | true, value -> read (start + length) (remaining - 1) (VUInt value :: reversed)
-                        | _ -> None
+                | true, length when length >= 1 && length <= key.Length - start ->
+                    match parse start length with
+                    | Some value -> read (start + length) (remaining - 1) (value :: reversed)
+                    | None -> None
                 | _ -> None
     if primaryLockKey key then read primaryLockKeyPrefix.Length width [] else None
 
@@ -6673,7 +6688,7 @@ type private PrimaryGapBoundary =
     { Values: Value list
       LockKey: string }
 
-type internal IntegerPrimaryRead =
+type internal PrimaryGapSearch =
     | PrimaryPoint of Value list
     /// Range edges in physical index order. A partial edge includes or excludes its whole prefix.
     | PrimaryRange of lower: (Value list * bool) option * upper: (Value list * bool) option
@@ -6684,7 +6699,7 @@ type internal IntegerPrimaryReadPlan =
     { ReadDatabase: string
       ReadTableName: string
       ReadSchemaRevision: int64
-      ReadAccess: IntegerPrimaryRead
+      ReadAccess: PrimaryGapSearch
       ReadRangeLimit: (PrimaryScanDirection * int) option }
 
 let internal compareIntegerPrimaryValues = compareIndexedValues None
@@ -6716,16 +6731,19 @@ let private isEqualityPrefix lower upper =
     | Some(first, true), Some(last, true) -> first = last
     | _ -> false
 
-let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (database: string) tableName scan deferPending read =
+let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database: string) tableName scan deferPending read =
     match snapshot.TransactionLocks, tableAt snapshot database tableName with
     | Some context, Some observed ->
         let tableKey = normalizeTableName tableName
         let database = database.ToLowerInvariant()
-        let integer column = isIntegerKeyType observed.Columns.[column].Type
+        let supportsKeyPart column =
+            match scan, observed.Columns.[column].Type with
+            | WritePointGap, (TDecimal _ | TBinary _ | TVarBinary _) -> true
+            | _, columnType -> isIntegerKeyType columnType
         uniqueKeyGroups observed
         |> List.tryFind (fun group ->
             group.Name = "PRIMARY" && indexesWholeColumns group
-            && List.forall integer group.Indices
+            && List.forall supportsKeyPart group.Indices
             && (match read with
                 | PrimaryPoint values -> values.Length = group.Indices.Length
                 | PrimaryRange _ -> true))
@@ -6797,7 +6815,7 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                             | true, stripe ->
                                 stripe.ExclusiveOwner
                                 |> Option.bind (fun owner ->
-                                    tryIntegerPrimaryLockValues width key |> Option.map (fun values -> owner, key, values))
+                                    tryPrimaryGapLockValues width key |> Option.map (fun values -> owner, key, values))
                             | _ -> None
                         else None)
 
@@ -6869,7 +6887,7 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
                             | _ -> current
 
                         let blocks key =
-                            match current (), tryIntegerPrimaryLockValues width key with
+                            match current (), tryPrimaryGapLockValues width key with
                             | Some table, Some candidate ->
                                 lower <- refreshBoundary true table lower
                                 upper <- refreshBoundary false table upper
@@ -6966,15 +6984,15 @@ let private acquirePrimaryReadGap timeout (live: Store) (snapshot: Store) (datab
     | _ -> GapProtected
 
 let internal acquireMissingPrimaryGap timeout live snapshot database tableName values =
-    acquirePrimaryReadGap timeout live snapshot database tableName OrdinaryGap false (PrimaryPoint values) |> ignore
+    acquirePrimaryGap timeout live snapshot database tableName OrdinaryGap false (PrimaryPoint values) |> ignore
 
 let internal protectMissingPrimaryWriteKey timeout live snapshot database tableName key =
     if primaryLockKey key then
         tableAt snapshot database tableName
         |> Option.iter (fun table ->
-            tryIntegerPrimaryLockValues (primaryKeyColumns table).Length key
+            tryPrimaryGapLockValues (primaryKeyColumns table).Length key
             |> Option.iter (fun values ->
-                acquirePrimaryReadGap timeout live snapshot database tableName WritePointGap false (PrimaryPoint values) |> ignore))
+                acquirePrimaryGap timeout live snapshot database tableName WritePointGap false (PrimaryPoint values) |> ignore))
 
 let private primaryRangeRows (table: Table) lower upper limit =
     match Map.tryFind "PRIMARY" table.SecondaryOrder with
@@ -7032,7 +7050,7 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
     let narrowScanGap snapshot savedGaps gap =
         let provisional = transactionGapLocks snapshot
         gap |> Option.iter (fun (scan, range) ->
-            acquirePrimaryReadGap TimeSpan.Zero live snapshot database tableName scan false range |> ignore)
+            acquirePrimaryGap TimeSpan.Zero live snapshot database tableName scan false range |> ignore)
         let visitedGaps =
             transactionGapLocks snapshot
             |> List.filter (fun gap -> not (provisional |> List.exists (fun saved -> obj.ReferenceEquals(saved, gap))))
@@ -7101,7 +7119,7 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
             match direction with
             | ForwardScan -> PrimaryRange(lower, edge)
             | ReverseScan -> PrimaryRange(edge, upper)
-        match acquirePrimaryReadGap (remaining ()) live snapshot database tableName (LimitedGap(direction, true)) true prefix with
+        match acquirePrimaryGap (remaining ()) live snapshot database tableName (LimitedGap(direction, true)) true prefix with
         | GapHasPendingKey earlier -> lockBeforePending snapshot savedGaps direction lower upper earlier
         | GapNeedsRefresh -> Ok ReopenRange
         | GapProtected ->
@@ -7144,12 +7162,12 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
             match plan.ReadAccess with
             | PrimaryPoint _ ->
                 if List.isEmpty selected then
-                    acquirePrimaryReadGap timeout live snapshot database tableName OrdinaryGap false plan.ReadAccess |> ignore
+                    acquirePrimaryGap timeout live snapshot database tableName OrdinaryGap false plan.ReadAccess |> ignore
                 lockRows WaitForLocks snapshot (List.map fst selected)
                 Ok RangeRowsLocked
             | PrimaryRange(lower, upper) ->
                 let savedGaps = transactionGapLocks snapshot
-                match acquirePrimaryReadGap timeout live snapshot database tableName OrdinaryGap canRetain plan.ReadAccess with
+                match acquirePrimaryGap timeout live snapshot database tableName OrdinaryGap canRetain plan.ReadAccess with
                 | GapHasPendingKey pending -> lockBeforePending snapshot savedGaps ForwardScan lower upper pending
                 | GapNeedsRefresh -> Ok ReopenRange
                 | GapProtected ->
@@ -7170,7 +7188,7 @@ let internal lockIntegerPrimaryRead timeout (live: Store) (refresh: unit -> Stor
             | ReverseScan when stop.IsNone && isEqualityPrefix lower upper -> EmptyReversePrefixGap, PrimaryRange(lower, upper)
             | ReverseScan -> LimitedGap(ReverseScan, stop.IsSome), PrimaryRange(stoppingEdge, upper)
             | ForwardScan -> LimitedGap(ForwardScan, stop.IsSome), PrimaryRange(lower, stoppingEdge |> Option.orElse upper)
-        let admission = acquirePrimaryReadGap (remaining ()) live snapshot database tableName scan canRetain read
+        let admission = acquirePrimaryGap (remaining ()) live snapshot database tableName scan canRetain read
         let finish outcome =
             let current = refresh ()
             match nextSelection outcome selection current with

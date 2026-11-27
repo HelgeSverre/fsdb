@@ -8333,4 +8333,38 @@ let tests =
               let released = handle insert "INSERT INTO t VALUES(7,7)" |> snd
               TestSupport.Sql.expectError 1205 blocked "the first neighboring insert waits"
               TestSupport.Sql.expectError 1205 stillBlocked "the second holder retains the gap"
-              Expect.equal released (Affected 1UL) "inserts resume when both holders finish" ]
+              Expect.equal released (Affected 1UL) "inserts resume when both holders finish"
+
+          testCase "missing decimal and binary primary writes protect their ordered gap"
+          <| fun _ ->
+              for definition, seed, missing, inside, outside in
+                  [ "lane INT,id DECIMAL(23,5),n INT,PRIMARY KEY(lane DESC,id ASC)",
+                    "(1,9007199254740993.00001,1),(1,9007199254740993.00009,9)",
+                    "lane=1 AND id=9007199254740993.00004",
+                    "(1,9007199254740993.00005,5)", "(2,9007199254740993.00005,10)"
+                    "id VARBINARY(4) PRIMARY KEY,n INT", "(X'10',1),(X'90',9)",
+                    "id=X'40'", "(X'50',5)", "(X'A0',10)" ] do
+                  let store = Fsdb.Storage.create ()
+                  let run id sql = handle (create id store) sql |> snd
+                  for sql in
+                      [ $"CREATE TABLE t({definition})"; $"INSERT INTO t VALUES {seed}"
+                        "CREATE VIEW v AS SELECT * FROM t WHERE n>0" ] do
+                      TestSupport.Sql.expectOk (run 3 sql) sql
+
+                  let first, _ = handle (create 1 store) "START TRANSACTION"
+                  let first, result = handle first $"UPDATE t SET n=n+1 WHERE {missing}"
+                  Expect.equal result (Affected 0UL) missing
+                  let second, _ = handle (create 2 store) "SET innodb_lock_wait_timeout=1"
+                  let second, _ = handle second "START TRANSACTION"
+                  let second, result = handle second $"DELETE FROM v WHERE {missing}"
+                  Expect.equal result (Affected 0UL) "a second writer shares the gap"
+                  let observer, _ = handle (create 3 store) "SET innodb_lock_wait_timeout=1"
+                  Expect.equal (handle observer $"INSERT INTO t VALUES {outside}" |> snd) (Affected 1UL) "the neighboring prefix does not wait"
+                  let insert = $"INSERT INTO t VALUES {inside}"
+                  let blocked = handle observer insert |> snd
+                  TestSupport.Sql.expectOk (handle first "ROLLBACK" |> snd) "release the first holder"
+                  let stillBlocked = handle observer insert |> snd
+                  TestSupport.Sql.expectOk (handle second "ROLLBACK" |> snd) "release the second holder"
+                  TestSupport.Sql.expectError 1205 blocked definition
+                  TestSupport.Sql.expectError 1205 stillBlocked definition
+                  Expect.equal (handle observer insert |> snd) (Affected 1UL) "both holders have released the gap" ]
