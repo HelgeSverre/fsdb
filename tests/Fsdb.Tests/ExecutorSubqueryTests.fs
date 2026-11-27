@@ -113,6 +113,44 @@ let tests =
               Expect.stringContains emptyPlan "rows=0 loops=1" "the root returns no rows"
               Expect.isFalse (emptyPlan.Contains "Ordered index lookup") "binding an empty lateral source does not record a lookup"
 
+          testCase "correlated top-N seeks nullable equality prefixes"
+          <| fun _ ->
+              let store = newStore ()
+              for sql in
+                  [ "CREATE TABLE outer_row(id INT PRIMARY KEY,tenant INT,tag VARCHAR(12) COLLATE utf8mb4_0900_ai_ci,cutoff INT)"
+                    "INSERT INTO outer_row VALUES (1,1,'café',98),(2,NULL,'CAFE',100),(3,1,NULL,100),(4,NULL,NULL,100),(5,9,'missing',100)"
+                    "CREATE TABLE evt(id INT PRIMARY KEY,tenant INT,tag VARCHAR(12) COLLATE utf8mb4_0900_ai_ci,state INT,stamp INT,visible INT,KEY recent(tenant,tag,state,stamp DESC,id))"
+                    "CREATE TABLE digit(d INT PRIMARY KEY)"
+                    "INSERT INTO digit VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)"
+                    "INSERT INTO evt SELECT t.d*100+n.d*10+x.d,IF(t.d<4,NULL,1),ELT(MOD(t.d,4)+1,'Cafe','CAFÉ','café',NULL),NULL,n.d*10+x.d,MOD(x.d,3) FROM digit t CROSS JOIN digit n CROSS JOIN digit x WHERE t.d<8"
+                    "INSERT INTO evt VALUES (1000,1,'Cafe',1,100,1),(1001,NULL,NULL,1,100,1),(1002,NULL,NULL,NULL,NULL,1)" ] do
+                  match runDefault store sql with
+                  | Affected _ -> ()
+                  | other -> failtestf "%s: %A" sql other
+
+              let query hint =
+                  "SELECT o.id,q.id,q.stamp FROM outer_row o LEFT JOIN LATERAL (SELECT e.id,e.stamp FROM evt e " + hint
+                  + " WHERE e.tenant <=> o.tenant AND e.tag <=> o.tag AND e.state IS NULL AND e.stamp<=o.cutoff AND e.visible=1 "
+                  + "ORDER BY e.stamp DESC,e.id LIMIT 2 OFFSET 1) q ON TRUE ORDER BY o.id,q.stamp DESC,q.id"
+              let expected =
+                  [ [ 1; 597; 97 ]; [ 1; 697; 97 ]; [ 2; 197; 97 ]; [ 2; 297; 97 ]
+                    [ 3; 794; 94 ]; [ 3; 791; 91 ]; [ 4; 394; 94 ]; [ 4; 391; 91 ] ]
+                  |> List.map (List.map (string >> Some))
+                  |> fun rows -> rows @ [ [ Some "5"; None; None ] ]
+              let indexed, examined = withExaminedRows (fun () -> runDefault store (query ""))
+              let scanned, scanExamined = withExaminedRows (fun () -> runDefault store (query "IGNORE INDEX (recent)"))
+              Expect.equal indexed (ResultSet([ "id"; "id"; "stamp" ], expected)) "MySQL chooses rows after filtering and offset"
+              Expect.equal scanned indexed "scan and ordered paths agree"
+              Expect.isLessThan examined 100L "the lookup stops after a few candidates per outer row"
+              Expect.isGreaterThan scanExamined (10L * examined) "ignoring the index reads the larger input"
+
+              match runDefault store ("EXPLAIN ANALYZE " + query "") with
+              | ResultSet(_, rows) ->
+                  let plan = rows |> List.choose (List.tryHead >> Option.flatten) |> String.concat "\n"
+                  Expect.stringContains plan "Ordered index lookup on e using recent" "the nullable key prefix is used"
+                  Expect.stringContains plan "loops=5" "all outer keys open the ordered lookup"
+              | other -> failtestf "expected an analyzed plan, got %A" other
+
           testList
               "joined correlated COUNT and EXISTS"
               [ let joinedStore () =

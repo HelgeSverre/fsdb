@@ -21032,41 +21032,47 @@ and private tryCorrelatedTopOrder store registry dbName (tref: TableRef) (select
                 | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _ -> true
                 | _ -> false
 
-            let tryTextPin = function
-                | BinOp(Eq, left, right) ->
-                    let bind indexed = function
-                        | (Col _ | QualifiedCol _) as bound ->
-                            tryCorrelatedInnerColumn source indexed
-                            |> Option.bind innerColumn
-                            |> Option.filter (fun column -> isTextColumn (Some column))
-                            |> Option.bind (fun column ->
-                                let boundColumn = tryColumnDefForExpr context bound
-                                let storedCollation = Collation.findOrDefault column.Collation
-                                match tryCorrelatedOuterValue source context bound with
-                                | Some(VString _ as value) when isTextColumn boundColumn ->
-                                    comparisonCollation context "=" indexed (Some column) bound boundColumn
-                                    |> Result.toOption
-                                    |> Option.filter (fun effective -> equalsIgnoreCase effective.Name storedCollation.Name)
-                                    |> Option.map (fun _ -> { Column = column.Name; Transform = None; Value = value })
-                                | _ -> None)
+            let key (column: ColumnDef) value = { Column = column.Name; Transform = None; Value = value }
+            let indexedColumn expression = tryCorrelatedInnerColumn source expression |> Option.bind innerColumn
+            let tryBoundPin comparison indexed bound =
+                indexedColumn indexed
+                |> Option.bind (fun column ->
+                    match bound with
+                    | LiteralValue VNull when comparison = NullSafeEq -> Some(key column VNull, false)
+                    | Col _ | QualifiedCol _ ->
+                        let boundColumn = tryColumnDefForExpr context bound
+                        let integerKey =
+                            isExactIntegerIndexType column.Type
+                            && (boundColumn |> Option.exists (_.Type >> isExactIntegerIndexType))
+                        let textKey () =
+                            isTextColumn (Some column) && isTextColumn boundColumn
+                            && (comparisonCollation context (comparisonName comparison) indexed (Some column) bound boundColumn
+                                |> Result.toOption
+                                |> Option.exists (fun effective ->
+                                    equalsIgnoreCase effective.Name (Collation.findOrDefault column.Collation).Name))
+
+                        match tryCorrelatedOuterValue source context bound with
+                        | Some(VInt _ | VUInt _ as value) when integerKey -> Some(key column value, true)
+                        | Some(VString _ as value) when textKey () -> Some(key column value, true)
+                        | Some VNull when comparison = NullSafeEq && (integerKey || textKey ()) ->
+                            Some(key column VNull, true)
                         | _ -> None
-                    bind left right |> Option.orElseWith (fun () -> bind right left)
+                    | _ -> None)
+
+            let tryPrefixPin = function
+                | IsNull indexed -> indexedColumn indexed |> Option.map (fun column -> key column VNull, false)
+                | BinOp((Eq | NullSafeEq as comparison), left, right) ->
+                    tryBoundPin comparison left right |> Option.orElseWith (fun () -> tryBoundPin comparison right left)
                 | _ -> None
 
-            let clauses = predicate |> conjuncts |> List.map (fun expression -> expression, tryTextPin expression)
+            let clauses = predicate |> conjuncts |> List.map (fun expression -> expression, tryPrefixPin expression)
             if not (isPlainRowPredicate predicate)
-               || (clauses |> List.exists (fun (expression, textPin) -> textPin.IsNone && Expression.exists unsupported expression)) then None
+               || (clauses |> List.exists (fun (expression, pin) -> pin.IsNone && Expression.exists unsupported expression)) then None
             else
-                let textPins = clauses |> List.choose snd
+                let pins = clauses |> List.choose snd
                 let correlatedPins =
-                    clauses |> List.map fst |> List.choose (function
-                        | BinOp(Eq, _, _) as expression ->
-                            tryCorrelatedEqualityPredicate source context expression
-                            |> Option.bind (function
-                                | name, (VInt _ | VUInt _) -> Some(name.ToLowerInvariant())
-                                | _ -> None)
-                        | _ -> None)
-                    |> List.append (textPins |> List.map (fun pin -> pin.Column.ToLowerInvariant()))
+                    pins |> List.choose (fun (pin, bindsOuterRow) ->
+                        if bindsOuterRow then Some(pin.Column.ToLowerInvariant()) else None)
                     |> Set.ofList
 
                 let safeOrder (term: IndexOrderTerm) =
@@ -21088,7 +21094,7 @@ and private tryCorrelatedTopOrder store registry dbName (tref: TableRef) (select
                             Expression.rewrite (function
                                 | (Col _ | QualifiedCol _) as expression -> tryCorrelatedOuterValue source context expression |> Option.map Lit
                                 | _ -> None) predicate
-                        tryFixedPrefixIndexOrder store registry dbName tref (Some bound) terms correlatedPins textPins))
+                        tryFixedPrefixIndexOrder store registry dbName tref (Some bound) terms correlatedPins (List.map fst pins)))
 
 and private tryEqualityPrefixOrder
     (store: Store)
@@ -22407,13 +22413,13 @@ and private orderedIndexPrefixMatches
     (tref: TableRef)
     (whereExpr: Expr option)
     (requestedTerms: IndexOrderTerm list)
-    (textPins: PointEquality list)
+    (prefixPins: PointEquality list)
     : ResolvedIndexPrefix list =
     let tableDb = tref.Database |> Option.defaultValue dbName
 
     physicalFastPathTable store dbName tref
     |> Option.map (fun table ->
-        let pins = textPins @ exactStoredKeyPins store registry table tref whereExpr
+        let pins = prefixPins @ exactStoredKeyPins store registry table tref whereExpr |> List.distinct
         let pinnedColumns = pins |> List.map (_.Column >> _.ToLowerInvariant()) |> Set.ofList
         let conjunctCount = whereExpr |> optionalConjuncts |> List.length
 
@@ -22452,7 +22458,7 @@ and private tryFixedPrefixIndexOrder
     (whereExpr: Expr option)
     (orderedTerms: IndexOrderTerm list)
     (correlatedPins: Set<string>)
-    (textPins: PointEquality list)
+    (prefixPins: PointEquality list)
     : Storage.OrderedLookup option =
     let invert = function Asc -> Desc | Desc -> Asc
     let requestedDirections = orderedTerms |> List.map _.Direction
@@ -22460,7 +22466,7 @@ and private tryFixedPrefixIndexOrder
     let joinAllowed = indexHintsFor IndexJoin tref |> indexAllowedBy
     let allowed name = orderAllowed name && (correlatedPins.IsEmpty || joinAllowed name)
 
-    orderedIndexPrefixMatches IndexOrderBy store registry dbName tref whereExpr orderedTerms textPins
+    orderedIndexPrefixMatches IndexOrderBy store registry dbName tref whereExpr orderedTerms prefixPins
     |> List.tryPick (fun resolved ->
         let matched = resolved.Match
 
@@ -22488,7 +22494,7 @@ and private tryFixedPrefixIndexOrder
 
                 let lower, upper = fixedPrefixSuffixBounds store registry resolved.Table tref whereExpr matched
 
-                if not textPins.IsEmpty && (resolved.PinnedValues |> List.exists (function VString _ -> true | _ -> false)) then
+                if not prefixPins.IsEmpty && (resolved.PinnedValues |> List.exists (function VString _ -> true | _ -> false)) then
                     Storage.tryMergedEqualityPrefixOrderWith allowed store resolved.Table terms resolved.PinnedValues lower upper
                 else
                     Storage.tryOrderedIndexPrefixRangeLookupWith allowed store resolved.Database tref.Table terms resolved.PinnedValues lower upper
