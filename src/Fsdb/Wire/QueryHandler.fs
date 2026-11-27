@@ -3492,7 +3492,7 @@ let private retainsTransactionMetadata session =
 let private primaryLockingSelect isolation (select: SelectStmt) =
     match isolation, select.Locking, select.From with
     | Serializable, [], _ -> Some(ShareLock, select)
-    | (RepeatableRead | Serializable), [ { Wait = WaitForLocks } as locking ], Some(FromTable source) ->
+    | _, [ { Wait = WaitForLocks } as locking ], Some(FromTable source) ->
         let qualifier = source.Alias |> Option.defaultValue source.Table
         let targetsSource =
             match locking.Tables with
@@ -3722,6 +3722,7 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
                             let readStore, readSelect =
                                 match session.Tx with
                                 | Some transaction when retainsTransactionAfterStatement session ->
+                                    let protectGaps = transaction.Isolation = RepeatableRead || transaction.Isolation = Serializable
                                     primaryLockingSelect transaction.Isolation select
                                     |> Option.map (fun (strength, readSelect) ->
                                         match readSelect.From with
@@ -3740,9 +3741,9 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
                                                         // A locking read can open a replacement table first accessed after the snapshot.
                                                         if revision store <> revision session.Store then refresh () else store
                                                     else store
-                                                Executor.tryIntegerPrimaryRead planningStore dbName readSelect
+                                                Executor.tryPrimaryRead protectGaps planningStore dbName readSelect
                                                 |> Option.map (fun (plan, orderedSelect) ->
-                                                    let readStore = Storage.lockIntegerPrimaryRead (lockWaitTimeout session) session.Store refresh strength plan
+                                                    let readStore = Storage.lockPrimaryRead (lockWaitTimeout session) session.Store refresh strength plan
                                                     readStore, orderedSelect)
                                                 |> Option.defaultValue (planningStore, select)
                                         | _ -> store, select)

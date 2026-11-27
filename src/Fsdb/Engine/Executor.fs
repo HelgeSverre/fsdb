@@ -36047,7 +36047,7 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
         check delete.From delete.Joins delete.Where delete.Limit singleTarget
     | _ -> Ok()
 
-let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
+let internal tryPrimaryRead protectGaps (store: Store) dbName (select: SelectStmt) =
     let primaryHint = function
         | [] -> true
         | [ { Kind = ForceIndex; Scope = (None | Some IndexJoin); Indexes = [ index ] } ] ->
@@ -36159,22 +36159,40 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                     |> Option.map (Option.map (scanThroughLimit limit))
                 | _ -> None
 
-            let isIntegerColumn column =
+            let columnType column =
                 resolveColumn table.Columns column
                 |> Result.toOption
-                |> Option.exists (fun index -> Storage.isIntegerKeyType table.Columns.[index].Type)
-            let point values =
-                Storage.tryPrimaryWriteLockTargets store table values
-                |> Option.map (fun _ -> Storage.PrimaryPoint values)
+                |> Option.map (fun index -> table.Columns.[index].Type)
+            let integerKeys = keys |> List.forall (columnType >> Option.exists Storage.isIntegerKeyType)
+            let point = Storage.tryLockingPrimaryPoint store table
 
             let integer = function
                 | LiteralValue((VInt _ | VUInt _) as value) -> Some value
                 | _ -> None
 
-            let equality = function
+            let bindEquality valueFor left right =
+                let bind column literal =
+                    predicateColumn column |> Option.bind (fun name ->
+                        valueFor name literal |> Option.map (fun value -> name, value))
+                bind left right |> Option.orElseWith (fun () -> bind right left)
+
+            let literalPointEquality = function
                 | BinOp(Eq, left, right) ->
-                    let bound column literal = Option.map2 (fun name value -> name, value) (predicateColumn column) (integer literal)
-                    bound left right |> Option.orElseWith (fun () -> bound right left)
+                    let valueFor name literal =
+                        match columnType name, literal with
+                        | Some(TDecimal _), LiteralValue(VInt value) -> Some(VDecimal(decimal value))
+                        | Some(TDecimal _), LiteralValue(VUInt value) -> Some(VDecimal(decimal value))
+                        | Some(TDecimal _), LiteralValue(VDecimal _ as value)
+                        | Some(TBinary _ | TVarBinary _), LiteralValue((VBytes _ | VBinaryLiteral _) as value)
+                        | Some(TChar _ | TVarchar _), (Lit(VString _ as value) | ConnectionLiteral((VString _ as value), _)) ->
+                            Some value
+                        | Some kind, expression when Storage.isIntegerKeyType kind -> integer expression
+                        | _ -> None
+                    bindEquality valueFor left right
+                | _ -> None
+
+            let equality = function
+                | BinOp(Eq, left, right) -> bindEquality (fun _ -> integer) left right
                 | Between(column, low, high) ->
                     match integer low, integer high with
                     | Some lower, Some upper when Storage.compareIntegerPrimaryValues lower upper = 0 ->
@@ -36183,18 +36201,19 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                 | _ -> None
 
             let equalities = List.choose equality conditions
-            let boundFor key =
-                equalities
+            let boundFor bounds key =
+                bounds
                 |> List.tryPick (fun (column, value) -> if equalsIgnoreCase key column then Some value else None)
 
             let exact () =
                 if not seeksPoint || keys.Length <> conditions.Length then None
                 else
-                    keys |> List.map boundFor |> tryAllSome |> Option.bind point
+                    let bounds = if integerKeys then equalities else List.choose literalPointEquality conditions
+                    keys |> List.map (boundFor bounds) |> tryAllSome |> Option.bind point
 
             let range () =
                 let prefix =
-                    keys |> Seq.map boundFor |> Seq.takeWhile Option.isSome |> Seq.choose id |> List.ofSeq
+                    keys |> Seq.map (boundFor equalities) |> Seq.takeWhile Option.isSome |> Seq.choose id |> List.ofSeq
                 match List.skip prefix.Length keys with
                 | key :: remaining when prefix.Length = equalities.Length ->
                     let keyColumn = predicateColumn >> Option.filter (equalsIgnoreCase key)
@@ -36245,18 +36264,19 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                 | _ -> None
 
             let boundedClusteredScan = select.OrderBy.IsEmpty && select.Limit.IsSome
-            if keys.IsEmpty || (conditions.IsEmpty && not boundedClusteredScan) || not (List.forall isIntegerColumn keys)
+            if keys.IsEmpty || (conditions.IsEmpty && not boundedClusteredScan)
                || not (List.forall simpleProjection select.Projections) then None
             else
                 exact ()
                 |> Option.map (fun access -> access, None)
-                |> Option.orElseWith range
+                |> Option.orElseWith (fun () -> if protectGaps && integerKeys then range () else None)
                 |> Option.map (fun (access, limit) ->
-                    let plan: Storage.IntegerPrimaryReadPlan =
+                    let plan: Storage.PrimaryReadPlan =
                         { ReadDatabase = database
                           ReadTableName = source.Table
                           ReadSchemaRevision = table.SchemaRevision
                           ReadAccess = access
+                          ReadPointGaps = protectGaps
                           ReadRangeLimit = limit }
                     let readSelect =
                         if select.OrderBy.IsEmpty && limit.IsSome then

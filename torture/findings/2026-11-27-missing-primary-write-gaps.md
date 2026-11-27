@@ -77,5 +77,36 @@ after-access savepoint controls also agreed.
 
 The fixtures reset the index to isolate the boundary records.
 Other primary-key types, secondary-key gaps, broader write ranges,
-locking reads on these text keys, and boundaries influenced by
-delete-marked records remain open.
+and boundaries influenced by delete-marked records remain open.
+
+## Exact primary-key locking reads
+
+An exact `SELECT ... FOR UPDATE` or `FOR SHARE` on a complete collated
+text, decimal, or binary primary key now uses the same key identity as
+writes. In a REPEATABLE READ transaction, a missing seek protects the
+gap while a plain SELECT leaves it open. In SERIALIZABLE, all three
+forms protect the gap. In READ COMMITTED and READ UNCOMMITTED,
+neighboring inserts can proceed and two readers can miss the same key
+without locking unrelated records.
+
+To reproduce, reuse the descending text fixture above and start two
+REPEATABLE READ transactions. Run `SELECT n FROM t WHERE k='E' AND
+seq=30 FOR SHARE` in both. From a third session, an insert at `('ê',60)`
+can proceed. An insert at `('É',20)` times out until both readers end
+their transactions. The same schedules cover PAD SPACE collation and
+decimal keys with distinct fractional digits above `2^53`.
+
+When the exact key has a pending insert, `FOR UPDATE` waits for the
+writer. If the writer commits, the reader locks the new row and leaves
+the neighboring gap open. If the writer rolls back, the reader returns
+no rows and protects the gap at REPEATABLE READ. At READ COMMITTED and
+READ UNCOMMITTED, the reader also waits for the exact key, and the
+neighboring gap remains open whichever way the writer finishes.
+Secondary-key reads, noninteger primary ranges, and nondefault wait
+modes remain outside this coverage.
+
+All 108 schedules matched MySQL 8.4.11 in memory and with WAL enabled.
+The matrix covered seven key fixtures at four isolation levels, with
+`FOR UPDATE`, `FOR SHARE`, and plain SELECT. Another 24 schedules
+covered pending inserts that committed or rolled back, including a
+shared lock on the row published after the wait.

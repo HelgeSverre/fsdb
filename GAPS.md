@@ -939,8 +939,9 @@ tables with durable row changes.
 
 [Explicit primary-key locking reads](torture/findings/2026-11-26-explicit-primary-locking-reads.md)
 now protect missing keys and the visited range under REPEATABLE READ
-and SERIALIZABLE. READ COMMITTED retains row-only locking for the
-audited reads.
+and SERIALIZABLE. [Exact primary-key locking reads](torture/findings/2026-11-27-missing-primary-write-gaps.md#exact-primary-key-locking-reads)
+also protect gaps for audited collated text, decimal, and binary keys.
+READ COMMITTED retains row-only locking for the audited reads.
 
 [Unique secondary-key moves](torture/findings/2026-11-27-unique-secondary-key-moves.md)
 now hold the destination key through commit or rollback, including in a

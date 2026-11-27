@@ -8396,4 +8396,49 @@ let tests =
               TestSupport.Sql.expectOk (handle second "ROLLBACK" |> snd) "release the second holder"
               TestSupport.Sql.expectError 1205 blocked "the equivalent prefix follows the descending suffix"
               TestSupport.Sql.expectError 1205 stillBlocked "the second writer retains the gap"
-              Expect.equal (handle observer insert |> snd) (Affected 1UL) "inserts resume after both holders finish" ]
+              Expect.equal (handle observer insert |> snd) (Affected 1UL) "inserts resume after both holders finish"
+
+          testCase "exact locking reads protect missing text decimal and binary primary keys"
+          <| fun _ ->
+              for definition, seed, missing, inside, suffix, isolation in
+                  [ "k VARCHAR(20) COLLATE utf8mb4_0900_ai_ci,seq INT,n INT,PRIMARY KEY(k,seq DESC)",
+                    "('é',50,1),('e',10,9),('g',0,0)", "k='E' AND seq=30", "('É',20,2)", "FOR SHARE", "REPEATABLE READ"
+                    "id DECIMAL(23,5) PRIMARY KEY,n INT", "(9007199254740993.00001,1),(9007199254740993.00009,9)",
+                    "id=9007199254740993.00004", "(9007199254740993.00005,5)", "FOR UPDATE", "REPEATABLE READ"
+                    "id VARBINARY(4) PRIMARY KEY,n INT", "(X'10',1),(X'90',9)", "id=X'40'", "(X'50',5)", "", "SERIALIZABLE" ] do
+                  let store = Fsdb.Storage.create ()
+                  let writer = create 1 store
+                  for sql in [ $"CREATE TABLE t({definition})"; $"INSERT INTO t VALUES {seed}" ] do
+                      TestSupport.Sql.expectOk (handle writer sql |> snd) sql
+                  let writer, _ = handle writer "SET innodb_lock_wait_timeout=1"
+                  let reader, _ = handle (create 2 store) $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}"
+                  let reader, _ = handle reader "START TRANSACTION"
+                  let reader, result = handle reader $"SELECT n FROM t WHERE {missing} {suffix}"
+                  Expect.equal result (ResultSet([ "n" ], [])) missing
+                  let insert = $"INSERT INTO t VALUES {inside}"
+                  let blocked = handle writer insert |> snd
+                  TestSupport.Sql.expectOk (handle reader "ROLLBACK" |> snd) "release the read gap"
+                  TestSupport.Sql.expectError 1205 blocked definition
+                  Expect.equal (handle writer insert |> snd) (Affected 1UL) "insert proceeds after the reader finishes"
+
+          testCase "exact decimal locking reads at lower isolation leave unrelated rows unlocked"
+          <| fun _ ->
+              for isolation in [ "READ COMMITTED"; "READ UNCOMMITTED" ] do
+                  let store = Fsdb.Storage.create ()
+                  let writer = create 1 store
+                  for sql in [ "CREATE TABLE t(id DECIMAL(18,3) PRIMARY KEY,n INT)"; "INSERT INTO t VALUES (1.250,1),(9.750,9)" ] do
+                      TestSupport.Sql.expectOk (handle writer sql |> snd) sql
+                  let writer, _ = handle writer "SET innodb_lock_wait_timeout=1"
+                  let openReader id =
+                      let reader, _ = handle (create id store) $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}"
+                      let reader, _ = handle reader "SET innodb_lock_wait_timeout=1"
+                      handle reader "START TRANSACTION" |> fst
+                  let sql = "SELECT n FROM t WHERE id=4 FOR UPDATE"
+                  let first, result = handle (openReader 2) sql
+                  Expect.equal result (ResultSet([ "n" ], [])) isolation
+                  let second, result = handle (openReader 3) sql
+                  let updated = handle writer "UPDATE t SET n=2 WHERE id=1.250" |> snd
+                  TestSupport.Sql.expectOk (handle second "ROLLBACK" |> snd) "end the second reader"
+                  TestSupport.Sql.expectOk (handle first "ROLLBACK" |> snd) "end the first reader"
+                  Expect.equal result (ResultSet([ "n" ], [])) "two exact misses can coexist"
+                  Expect.equal updated (Affected 1UL) "the missing seek does not lock an unrelated row" ]
