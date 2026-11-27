@@ -949,6 +949,9 @@ module Join =
 
 [<RequireQualifiedAccess>]
 module SelectStmt =
+    // Expression subqueries use a SELECT wrapper to carry a set-operation body.
+    let internal setExpressionAlias = "__fsdb_set_expression"
+
     let hasDestination select =
         not select.IntoVariables.IsEmpty || select.IntoFile.IsSome
 

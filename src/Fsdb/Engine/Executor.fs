@@ -27032,6 +27032,18 @@ let private withInsertSelectSources
 let private disableHeuristicViewMerge = System.Threading.AsyncLocal<bool>()
 let private forcedViewMerges = System.Threading.AsyncLocal<Set<string * string> option>()
 
+let private mutationAssignsUserVariables statement =
+    let rec reachableCtes = function
+        | Update update when not update.Ctes.IsEmpty ->
+            let expressions = (update.Assignments |> List.map _.Value) @ Option.toList update.Where
+                              @ List.map fst update.OrderBy @ Option.toList update.Limit
+            Update { update with Ctes = referencedMutationCtes update.Ctes (Some(FromTable update.From)) update.Joins expressions }
+        | Delete delete when not delete.Ctes.IsEmpty -> Delete { delete with Ctes = referencedDeleteCtes delete }
+        | Explain(format, statement) -> Explain(format, reachableCtes statement)
+        | statement -> statement
+    // Unreferenced CTEs never enter the mutation's resolved query.
+    reachableCtes statement |> Expression.statementExists (function AssignUserVariable _ -> true | _ -> false)
+
 let private withStatementViewMerge store dbName statement run =
     let sourceNames items =
         items |> List.collect FromItem.leaves |> List.choose (function
@@ -27046,27 +27058,12 @@ let private withStatementViewMerge store dbName statement run =
             [ schema, name, name ]
         | Explain(_, statement) -> writeSources statement
         | _ -> []
-    let rec reachableCtes = function
-        | Update update when not update.Ctes.IsEmpty ->
-            let expressions = (update.Assignments |> List.map _.Value) @ Option.toList update.Where
-                              @ List.map fst update.OrderBy @ Option.toList update.Limit
-            Update { update with Ctes = referencedMutationCtes update.Ctes (Some(FromTable update.From)) update.Joins expressions }
-        | Delete delete when not delete.Ctes.IsEmpty -> Delete { delete with Ctes = referencedDeleteCtes delete }
-        | Explain(format, statement) -> Explain(format, reachableCtes statement)
-        | statement -> statement
     let sources = writeSources statement
     let isView (schema, name, _) =
         match Storage.tableSnapshot store schema name with
         | Ok _ -> false
         | Error _ -> (tryStoredView store schema name).IsSome
-    // The merge heuristic consults assignments in the enclosing statement.
-    // Unreferenced mutation CTEs never enter that statement's resolved query.
-    let assignsVariable =
-        if not (List.exists isView sources) then false
-        else
-            let mutable assigns = false
-            Expression.iterStatement (function AssignUserVariable _ -> assigns <- true | _ -> ()) (reachableCtes statement)
-            assigns
+    let assignsVariable = List.exists isView sources && mutationAssignsUserVariables statement
     let hints = DynamicScope.valueOrDefault OptimizerHintResolution.emptyExecution joinHintDiagnostics
     let forced =
         if not assignsVariable || hints.SourceStrategies.IsEmpty then None
@@ -27245,13 +27242,6 @@ let private rejectedViewWrite store registry dbName statement =
         match probe statement with
         | Ok() -> Err error
         | Error sourceError -> sourceError)
-
-let internal skipsViewWriteLocks store registry dbName statement =
-    withStatementViewMerge store dbName statement (fun () ->
-        disableHeuristicViewMerge.Value
-        && (match statement with
-            | Delete delete -> validateJoinedDeleteTargets store registry dbName delete |> Result.isError
-            | _ -> (viewWriteMergeError store dbName statement).IsSome))
 
 /// Carry a statement-local row ordinal through each view projection so equal
 /// projected values still identify different rows in a keyless base table.
@@ -29918,8 +29908,192 @@ let private validateBindings store registry schema functionDatabase statement =
     let validateFunction = validateFunctionName registry functionDatabase
     validateBindingsWith (describeQueryColumnsCheckingFunctions functionDatabase) validateFunction store registry schema statement
 
+let private mutationSubqueryTargetError store registry schema statement =
+    let rec mutation = function
+        | Explain(_, inner) -> mutation inner
+        | Update update ->
+            let expressions = (update.Assignments |> List.map _.Value) @ Option.toList update.Where
+                              @ List.map fst update.OrderBy @ Option.toList update.Limit
+            Some("UPDATE", FromTable update.From, update.Joins, update.Ctes, expressions, Choice1Of2 update.Assignments)
+        | Delete delete ->
+            let expressions = Option.toList delete.Where @ List.map fst delete.OrderBy @ Option.toList delete.Limit
+            Some("DELETE", delete.From, delete.Joins, delete.Ctes, expressions, Choice2Of2 delete.Targets)
+        | _ -> None
+
+    let qualifier (table: TableRef) = table.Alias |> Option.defaultValue table.Table
+    let sourceTables source (joins: Join list) = source @ (joins |> List.map _.Table) |> List.collect FromItem.leaves
+    let tableFunctionInputs = List.choose (function FromJsonTable(input, _, _, _) -> Some input | _ -> None)
+    let cteNames (ctes: CommonTableExpr list) = List.map (fun cte -> cte.CteName.ToLowerInvariant()) ctes |> Set.ofList
+    let isCte names (table: TableRef) = table.Database.IsNone && Set.contains (table.Table.ToLowerInvariant()) names
+    let tableKey currentSchema table =
+        let database, name = MutationTargets.physicalTableKey currentSchema table
+        database.ToLowerInvariant(), name
+
+    mutation statement
+    |> Option.bind (fun (operation, source, joins, ctes, expressions, writes) ->
+        let rootSources = sourceTables [ source ] joins
+        let queries =
+            expressions @ List.collect Join.conditions joins @ tableFunctionInputs rootSources
+            |> List.collect Expression.collectSubqueries
+        if queries.IsEmpty then None
+        else
+            let rootCtes = Set.union (cteNames ctes) (currentCteScope () |> Map.keys |> Set.ofSeq)
+            let pending = DynamicScope.valueOrDefault OptimizerHintResolution.emptyExecution joinHintDiagnostics
+            let blocks =
+                if pending.SourceStrategies.IsEmpty then []
+                else (OptimizerHintScopes.collect OptimizerHintScopes.BoundStatement statement).Numbered
+            let strategy (select: SelectStmt) (alias: string) =
+                blocks
+                |> List.tryFind (fun block -> block.Query |> Option.exists (fun query -> obj.ReferenceEquals(query, select)))
+                |> Option.bind (fun block ->
+                    Map.tryFind (block.Number, Some(alias.ToLowerInvariant())) pending.SourceStrategies
+                    |> Option.orElseWith (fun () -> Map.tryFind (block.Number, None) pending.SourceStrategies))
+
+            let viewStore = lazy (storeForStoredView store)
+            let assignsVariable = lazy (disableHeuristicViewMerge.Value || mutationAssignsUserVariables statement)
+            let rec mergedTables readStore seen currentSchema names (select: SelectStmt) =
+                let names = Set.union names (cteNames select.Ctes)
+                sourceTables (Option.toList select.From) select.Joins
+                |> List.collect (function
+                    | FromTable table when not (isCte names table) -> resolveRead readStore seen currentSchema None table |> snd
+                    | FromSubquery(PlainSelect derived as body, _) when queryBodyCanMerge registry body ->
+                        mergedTables readStore seen currentSchema names derived
+                    | _ -> [])
+
+            and resolveRead readStore seen currentSchema hint table =
+                let database, name = tableKey currentSchema table
+                if isTemporaryTable readStore database name then None, []
+                else
+                    match tryStoredView readStore database name with
+                    | Some view ->
+                        let key = database, name
+                        let materialized =
+                            view.Algorithm = "TEMPTABLE"
+                            || (view.Algorithm <> "MERGE"
+                                && (match hint with
+                                    | Some OptimizerHintResolution.MaterializeSource -> true
+                                    | Some OptimizerHintResolution.MergeSource -> false
+                                    | None -> assignsVariable.Value))
+                        let tables =
+                            if materialized || Set.contains key seen then []
+                            else
+                                match parseStoredViewStatement view with
+                                | Ok(Select select) when queryBodyCanMerge registry (PlainSelect select) ->
+                                    mergedTables viewStore.Value (Set.add key seen) view.Schema Set.empty select
+                                | _ -> []
+                        Some key, tables
+                    | None -> None, [ database, name ]
+
+            let rec subqueryReads names (select: SelectStmt) =
+                let names = Set.union names (cteNames select.Ctes)
+                let sources = sourceTables (Option.toList select.From) select.Joins
+                let inputs =
+                    sources |> List.collect (function
+                        | FromTable table when not (isCte names table) ->
+                            let alias = qualifier table
+                            let view, tables = resolveRead store Set.empty schema (strategy select alias) table
+                            tables |> List.map (fun key -> key, view, alias)
+                        | FromLateral(UnionSelect(first, rest, orderBy, limit, offset), alias)
+                            when alias = SelectStmt.setExpressionAlias ->
+                            // This lateral wrapper represents a set expression, not a SQL FROM item.
+                            let branchNames = Set.union names (cteNames first.Ctes)
+                            let branches = first :: List.map snd rest
+                            let orderQueries =
+                                List.map fst orderBy @ Option.toList limit @ Option.toList offset
+                                |> List.collect Expression.collectSubqueries
+                            List.collect (subqueryReads branchNames) (branches @ orderQueries)
+                        // Under a mutation expression, an ordinary derived table is a materialization boundary.
+                        | FromSubquery(PlainSelect derived as body, alias)
+                            when strategy select alias = Some OptimizerHintResolution.MergeSource && queryBodyCanMerge registry body ->
+                            mergedTables store Set.empty schema names derived |> List.map (fun key -> key, None, alias)
+                        | _ -> [])
+                let expressions =
+                    (select.Projections |> List.map _.Expression) @ List.collect Join.conditions select.Joins
+                    @ Option.toList select.Where @ select.GroupBy @ Option.toList select.Having
+                    @ (select.Windows |> List.collect (snd >> OverSpec >> Expression.overExpressions))
+                    @ List.map fst select.OrderBy @ Option.toList select.Limit @ Option.toList select.Offset
+                    @ tableFunctionInputs sources
+                inputs @ (expressions |> List.collect Expression.collectSubqueries |> List.collect (subqueryReads names))
+
+            let reads = List.collect (subqueryReads rootCtes) queries
+            if reads.IsEmpty then None
+            else
+                let inputs =
+                    rootSources |> List.choose (function FromTable table when not (isCte rootCtes table) -> Some table | _ -> None)
+                let writable table =
+                    let database, name = tableKey schema table
+                    if isTemporaryTable store database name then [], None
+                    else
+                        match tryUpdatableView store database name with
+                        | Some view when operation <> "DELETE" || view.UpdateJoins.IsEmpty ->
+                            let columns =
+                                view.Targets |> Map.toList
+                                |> List.map (fun (column, target) -> column, (target.Database.ToLowerInvariant(), normalizeTableName target.Table))
+                            columns, Some(database, name)
+                        | _ ->
+                            let columns =
+                                tableSnapshot store database name |> Result.toOption |> Option.toList
+                                |> List.collect (fun snapshot -> snapshot.Columns |> List.map (fun column -> column.Name.ToLowerInvariant(), (database, name)))
+                            columns, None
+                let bound =
+                    inputs |> List.map (fun table ->
+                        let columns, view = writable table
+                        table, columns, view)
+                let assigned =
+                    match writes with
+                    | Choice1Of2 assignments ->
+                        assignments
+                        |> List.map (fun assignment ->
+                            bound
+                            |> List.choose (fun (table, columns, _) ->
+                                if assignment.Table |> Option.forall (equalsIgnoreCase (qualifier table)) then
+                                    List.tryFind (fst >> equalsIgnoreCase assignment.Column) columns
+                                    |> Option.map (fun (_, key) -> table, key)
+                                else None)
+                            |> List.tryExactlyOne)
+                        |> tryAllSome
+                        |> Option.defaultValue []
+                    | Choice2Of2 targets ->
+                        bound
+                        |> List.filter (fun (table, _, _) -> targets |> List.exists (equalsIgnoreCase (qualifier table)))
+                        |> List.collect (fun (table, columns, _) -> columns |> List.map (fun (_, key) -> table, key))
+                bound
+                |> List.tryPick (fun (table, columns, view) ->
+                    columns
+                    |> List.tryPick (fun (_, key) ->
+                        if List.contains (table, key) assigned then
+                            reads |> List.tryFind (fun (read, _, _) -> read = key)
+                        else None)
+                    |> Option.map (fun duplicate -> table, view, duplicate))
+                |> Option.map (fun (target, targetView, (_, readView, readAlias)) ->
+                    // UPDATE reports the leading leaf's exposed name, even if it writes a later source.
+                    let target, targetView =
+                        match operation, bound with
+                        | "UPDATE", (first, _, firstView) :: _ -> first, firstView
+                        | _ -> target, targetView
+                    let name = qualifier target
+                    match targetView, readView with
+                    | left, right when left = right ->
+                        1093, sprintf "You can't specify target table '%s' for update in FROM clause" name
+                    | _ ->
+                        let definition = if readView.IsSome then readAlias else name
+                        1443, sprintf "The definition of table '%s' prevents operation %s on table '%s'." definition operation name))
+
+let internal skipsViewWriteLocks store registry dbName statement =
+    withStatementViewMerge store dbName statement (fun () ->
+        (mutationSubqueryTargetError store registry dbName statement).IsSome
+        || (disableHeuristicViewMerge.Value
+            && (match statement with
+                | Delete delete -> validateJoinedDeleteTargets store registry dbName delete |> Result.isError
+                | _ -> (viewWriteMergeError store dbName statement).IsSome)))
+
 let validatePreparedBindings store registry schema statement =
     validateBindings store registry schema schema statement
+    |> Result.bind (fun () ->
+        withStatementViewMerge store schema statement (fun () ->
+            match mutationSubqueryTargetError store registry schema statement with
+            | Some error -> Error error
+            | None -> Ok()))
 
 let private validateViewBindings store registry schema functionDatabase statement =
     validateBindings store registry schema functionDatabase statement
@@ -31402,7 +31576,17 @@ let rec private executeAsWithViewSources
             (currentStatementMemo ()).SharedDerivedGroups.[alias] <- groupAndBody
     | _ -> ()
     Deprecation.reportStatement stmt
+    let subqueryTargetError =
+        if viewSources.Aliases.IsEmpty then mutationSubqueryTargetError store registry dbName stmt
+        else None
     emitJoinHintDiagnostics store registry dbName stmt
+
+    let mutationTargetReadError conflict =
+        let error =
+            match validateBindings store registry dbName dbName stmt with
+            | Error error -> error
+            | Ok() -> conflict
+        ids, Err error
 
     /// Bodies execute with the trigger's schema `db` as the default
     /// database — MySQL resolves a body's unqualified table names against
@@ -33118,6 +33302,7 @@ let rec private executeAsWithViewSources
 
         match authorizedRegistry with
         | Error(code, message) -> ids, Err(code, message)
+        | Ok _ when subqueryTargetError.IsSome -> mutationTargetReadError subqueryTargetError.Value
         | Ok authorized ->
             let callerSubqueries =
                 match originalUpdate with
@@ -33202,9 +33387,17 @@ let rec private executeAsWithViewSources
         resultIds, result
 
     let (|UnmergedViewWrite|_|) = rejectedViewWrite store registry dbName
+    let (|MutationTargetRead|_|) = function
+        | _ when subqueryTargetError.IsNone -> None
+        // View writes report any definer grant denial before checking for conflicting reads.
+        | Update update when targetsFirstJoinedView store dbName update -> None
+        | Delete { Source = SingleDeleteTable source }
+            when (tryStoredView store (source.Database |> Option.defaultValue dbName) source.Table).IsSome -> None
+        | _ -> subqueryTargetError
 
     match stmt with
     | UnmergedViewWrite error -> ids, error
+    | MutationTargetRead conflict -> mutationTargetReadError conflict
     | Update update when not update.Ctes.IsEmpty ->
         let update = writableViewFirst store dbName update
         let expressions =

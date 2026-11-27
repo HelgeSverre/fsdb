@@ -5628,6 +5628,43 @@ let tests =
                       [ TypeGeometry, BinaryFlag ] "prepared GEOMETRY result"
               | Error error -> failtestf "expected ST_Validate to prepare, got %A" error
 
+          testCase "view mutations reject subqueries that read the written base table"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE mutation_target(id INT PRIMARY KEY,n INT)"
+                        "CREATE TABLE mutation_partner(id INT PRIMARY KEY,m INT)"
+                        "INSERT INTO mutation_target VALUES(1,10),(2,20)"
+                        "INSERT INTO mutation_partner VALUES(1,11),(2,21)"
+                        "CREATE VIEW mutation_view AS SELECT id,n FROM mutation_target"
+                        "CREATE VIEW mutation_layer AS SELECT id AS k,n AS val FROM mutation_view WITH CHECK OPTION"
+                        "CREATE VIEW mutation_join AS SELECT a.id,a.n,b.m FROM mutation_target a JOIN mutation_partner b USING(id)"
+                        "CREATE ALGORITHM=TEMPTABLE VIEW mutation_copy AS SELECT id FROM mutation_target" ]
+
+              for sql, code, message in
+                  [ "UPDATE mutation_layer v SET val=99 WHERE k IN (SELECT id FROM mutation_target) AND 0",
+                    1443, "The definition of table 'v' prevents operation UPDATE on table 'v'."
+                    "UPDATE mutation_view v SET n=99 WHERE EXISTS (SELECT 1 FROM mutation_view r WHERE r.id=v.id)",
+                    1093, "You can't specify target table 'v' for update in FROM clause"
+                    "UPDATE mutation_join j SET m=(SELECT MAX(m) FROM mutation_partner)",
+                    1443, "The definition of table 'j' prevents operation UPDATE on table 'j'."
+                    "UPDATE mutation_layer v SET val=99 WHERE EXISTS (SELECT id FROM mutation_partner UNION ALL SELECT id FROM mutation_target)",
+                    1443, "The definition of table 'v' prevents operation UPDATE on table 'v'."
+                    "DELETE FROM mutation_layer v WHERE EXISTS (SELECT id FROM mutation_view r)",
+                    1443, "The definition of table 'r' prevents operation DELETE on table 'v'."
+                    "UPDATE mutation_view SET n=99 WHERE id IN (SELECT missing FROM mutation_target)",
+                    1054, "Unknown column 'missing' in 'field list'" ] do
+                  Expect.equal (run sql) (Err(code, message)) sql
+
+              let original = ResultSet([ "n" ], [ [ Some "10" ]; [ Some "20" ] ])
+              Expect.equal (run "SELECT n FROM mutation_target ORDER BY id") original "rejected mutations leave the base rows intact"
+              for sql in
+                  [ "UPDATE mutation_layer SET val=val+1 WHERE k IN (SELECT id FROM (SELECT id FROM mutation_target) d WHERE id=1)"
+                    "UPDATE mutation_join SET n=n+1 WHERE id IN (SELECT id FROM mutation_partner WHERE id=1)"
+                    "UPDATE mutation_target SET n=(@written:=n+1) WHERE id IN (SELECT id FROM mutation_view WHERE id=2)"
+                    "DELETE FROM mutation_layer WHERE k IN (SELECT id FROM mutation_copy WHERE id=1)" ] do
+                  Expect.equal (run sql) (Affected 1UL) sql
+
           testCase "geometry equality and binary casts use the SQL geometry bytes"
           <| fun _ ->
               let cartesian = "00000000010100000000000000000024400000000000004E40"

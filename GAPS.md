@@ -1082,6 +1082,12 @@ direct nesting, and supplies the order for limited updates and deletes unless
 the outer statement overrides it. `LOCAL` and `CASCADED CHECK OPTION` predicates
 persist and compose through nested views.
 
+[Subqueries in UPDATE and DELETE](torture/findings/2026-11-27-mutation-subquery-target.md)
+now reject references that read the same physical table being written,
+including through a nested or joined view. Ordinary derived and materialized
+view reads remain available, as do reads of unwritten join components.
+Subqueries embedded in saved view definitions still have separate gaps.
+
 Uncorrelated scalar projection subqueries preserve updateability but not
 insertability, dependent projection subqueries refuse writes, and subqueries
 inside view predicates lower with the base-table write.
