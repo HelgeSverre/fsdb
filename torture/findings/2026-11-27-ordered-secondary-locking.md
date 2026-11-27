@@ -84,3 +84,44 @@ image when it resumes and reopens the seek after dropping its new claim
 on a rewritten OFFSET record. Reopening preserves locks the cursor
 already held. Additional MySQL comparisons covered reversals in the same
 transaction, updates to a different index, and rollback to a savepoint.
+
+## Next-key locks
+
+At REPEATABLE READ and SERIALIZABLE, an ordered exact-numeric secondary
+cursor protects the physical gap before each visited record. A reverse
+cursor also protects the gap above its starting record. When the cursor
+exhausts its bounded slice before the limit, it visits the stopping gap
+and can claim the neighboring record without returning it. For example,
+the pinned MySQL 8.4.11 image reports `X` on a rejected numeric
+range successor within the equality prefix, and `X,GAP` on the next
+prefix after an exhausted forward equality seek.
+
+Fsdb admits destination index keys and secondary gaps under the same
+lock monitor. Both inserts and staged UPDATE key moves wait on gaps
+held by another transaction. READ COMMITTED retains its row-only path.
+Reversing a pending move back to the stored key keeps the original
+clustered-record wait behavior.
+
+An INSERT with a known duplicate still claims the matching record.
+Its proposed secondary key does not enter the index and does not wait
+on a gap. REPLACE still checks the replacement key because it can enter
+the gap. Destination claims for the update branch of a duplicate-key
+upsert remain open.
+
+A pending uncommitted key can bound the gap after `SKIP LOCKED`.
+In the audited case, the cursor returns score 10 while a pending score
+5 bounds the preceding gap. A writer can insert score 2 and must wait
+for score 7. Rolling back the pending insertion widens the protected
+gap to include score 2. Committing it keeps score 5 as the boundary.
+
+The MySQL 8.4.11 replay matched all 183 writer probes in memory and WAL
+mode, including inserts, key moves, empty and exhausted ranges, a
+descending DECIMAL index, shared reads, and the READ COMMITTED controls.
+Separate waits resumed after the reader committed or rolled back.
+Rolling the reader back to a preceding savepoint also released its gap
+in the audited case.
+
+The audited path requires whole exact-numeric key parts and explicit
+primary-key columns in the secondary index. Implicit suffixes, mixed
+residual predicates, purge of ordinary secondary boundary records, and
+covering shared-record ownership remain open.

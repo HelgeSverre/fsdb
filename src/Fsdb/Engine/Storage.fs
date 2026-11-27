@@ -3378,11 +3378,17 @@ let private encodeUniqueKey (columns: ColumnDef list) (group: IndexKeyGroup) (ro
 
 let private uniqueKeyLockName (group: IndexKeyGroup) key = group.Name + "\u0000" + key
 
+let private secondaryOrderLockName (group: IndexKeyGroup) key primaryKey =
+    // Identical nonunique index values still represent independent writer claims.
+    let primarySuffix = primaryKey |> Option.map (fun key -> "\u0000" + key) |> Option.defaultValue ""
+    "ORDERED\u0000" + group.Name + "\u0000" + key + primarySuffix + "\u0000" + Guid.NewGuid().ToString("N")
+
 type WriteLockTargets =
     { RowIds: RowId list
       Keys: string list }
 
-let tryInsertLockTargets
+let private insertionLockTargets
+    replacesDuplicates
     (store: Store)
     (dbName: string)
     (tableName: string)
@@ -3475,24 +3481,26 @@ let tryInsertLockTargets
                                         if group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase) then
                                             Some("ORDERED\u0000PRIMARY\u0000" + encoded)
                                         else
-                                            // Each pending insertion needs its own observation claim.
-                                            // Equal non-unique index values must not serialize writers.
-                                            let primarySuffix =
-                                                primaryKey |> Option.map (fun key -> "\u0000" + key) |> Option.defaultValue ""
-                                            Some("ORDERED\u0000" + group.Name + "\u0000" + encoded
-                                                 + primarySuffix + "\u0000" + Guid.NewGuid().ToString("N"))))
+                                            Some(secondaryOrderLockName group encoded primaryKey)))
                         List.choose id uniqueKeys, orderedKeys))
                 |> Result.toOption
                 |> Option.map (fun encodedRows ->
                     let encodedKeys = encodedRows |> List.collect fst |> List.distinct
-                    let orderedKeys = encodedRows |> List.collect snd
+                    let existing (groupName, key, _) =
+                        table.UniqueIndex
+                        |> Map.tryFind groupName
+                        |> Option.bind (Map.tryFind key)
+
+                    let orderedKeys =
+                        encodedRows |> List.collect (fun (uniqueKeys, orderKeys) ->
+                            // A duplicate INSERT reaches the existing record
+                            // before it can insert a secondary index entry.
+                            if replacesDuplicates || not (List.exists (existing >> Option.isSome) uniqueKeys) then orderKeys
+                            else [])
 
                     let rowIds =
                         encodedKeys
-                        |> List.choose (fun (groupName, key, _) ->
-                            table.UniqueIndex
-                            |> Map.tryFind groupName
-                            |> Option.bind (Map.tryFind key))
+                        |> List.choose existing
                         |> List.distinct
 
                     { RowIds = rowIds
@@ -3501,6 +3509,12 @@ let tryInsertLockTargets
     match store.Databases.TryGetValue dbName with
     | true, slot -> tryGetTable dbName slot.Value tableName |> Result.toOption |> Option.bind findInTable
     | false, _ -> None
+
+let tryInsertLockTargets store dbName tableName columns rows =
+    insertionLockTargets false store dbName tableName columns rows
+
+let internal tryReplaceLockTargets store dbName tableName columns rows =
+    insertionLockTargets true store dbName tableName columns rows
 
 let private constraintLookup columns indices rows =
     let lookup = HashSet<string>(StringComparer.Ordinal)
@@ -4577,7 +4591,13 @@ let private primaryLockKeyPrefix = "PRIMARY\u0000"
 let private primaryLockKey (key: string) =
     key.StartsWith(primaryLockKeyPrefix, StringComparison.Ordinal)
 
-let private visitLivePrimaryGaps (cache: KeyLockCache) visit =
+let private orderedLockKeyPrefix = "ORDERED\u0000"
+
+let private secondaryOrderedLockKey (key: string) =
+    key.StartsWith(orderedLockKeyPrefix, StringComparison.Ordinal)
+    && not (key.StartsWith(orderedLockKeyPrefix + primaryLockKeyPrefix, StringComparison.Ordinal))
+
+let private visitLiveIndexGaps (cache: KeyLockCache) visit =
     cache.Gaps.RemoveAll(fun weak ->
         match weak.TryGetTarget() with
         | true, stripe when stripe.SharedOwners.Count > 0 ->
@@ -4586,11 +4606,11 @@ let private visitLivePrimaryGaps (cache: KeyLockCache) visit =
         | _ -> true)
     |> ignore
 
-let private primaryGapBlockers (cache: KeyLockCache) owner key =
+let private indexGapBlockers (cache: KeyLockCache) owner key =
     if cache.Gaps.Count = 0 then []
     else
         let mutable blockers = []
-        visitLivePrimaryGaps cache (fun stripe ->
+        visitLiveIndexGaps cache (fun stripe ->
             match stripe.Gap with
             | Some(_, contains) when not (stripe.SharedOwners.Contains owner) && contains key ->
                 for owner in stripe.SharedOwners do
@@ -4598,10 +4618,21 @@ let private primaryGapBlockers (cache: KeyLockCache) owner key =
             | _ -> ())
         blockers
 
+let private registerIndexGap (cache: KeyLockCache) (context: TransactionLockContext) identity contains =
+    let stripe =
+        { SyncRoot = cache.SyncRoot
+          ExclusiveOwner = None
+          ExclusiveRowWrites = None
+          SharedOwners = HashSet([ context.Owner ])
+          KeyActivity = None
+          Gap = Some(identity, contains) }
+    cache.Gaps.Add(WeakReference<RowLockStripe>(stripe))
+    lock context.HeldStripes (fun () -> context.HeldStripes.Add stripe |> ignore)
+
 let private withWriteLocksForContext
     (transactionLocks: TransactionLockContext option)
     (timeout: TimeSpan)
-    checkPrimaryGaps
+    checkGaps
     (store: Store)
     (dbName: string)
     (tableName: string)
@@ -4638,9 +4669,10 @@ let private withWriteLocksForContext
             let locks = cache.Entries
             let mutable sweep = false
 
+            let checksIntervals key = primaryLockKey key || secondaryOrderedLockKey key
             let newStripe key =
-                // Primary key ownership and interval claims must be admitted atomically.
-                let monitor = if primaryLockKey key then cache.SyncRoot else obj ()
+                // Key ownership and interval claims must be admitted atomically.
+                let monitor = if checksIntervals key then cache.SyncRoot else obj ()
                 createKeyLockStripe monitor cache.Activity
 
             let rec stripe key =
@@ -4671,7 +4703,7 @@ let private withWriteLocksForContext
 
             // Claim multiple keys in one stable order, as the old sorted stripe
             // set did, so opposite input orders cannot create an avoidable cycle.
-            let build key = stripe key, if primaryLockKey key then Some(cache, key) else None
+            let build key = stripe key, if checksIntervals key then Some(cache, key) else None
             let result =
                 match keys with
                 | [ key ] -> [ build key ]
@@ -4723,9 +4755,9 @@ let private withWriteLocksForContext
         try
             for stripe in rowStripes do
                 acquire stripe (fun () -> [])
-            for stripe, primary in keyStripes do
-                match primary with
-                | Some(cache, key) when checkPrimaryGaps -> acquire stripe (fun () -> primaryGapBlockers cache context.Owner key)
+            for stripe, gapProbe in keyStripes do
+                match gapProbe with
+                | Some(cache, key) when checkGaps -> acquire stripe (fun () -> indexGapBlockers cache context.Owner key)
                 | _ -> acquire stripe (fun () -> [])
 
             if store.TransactionLocks.IsSome then
@@ -4836,16 +4868,11 @@ type OrderedIndexKeyPart =
     | OrderedFloat of float
     | OrderedText of string
 
-/// Active numeric, temporal, or text ordered index claims that another transaction holds.
-/// Ordered limited writes use these pending keys before their snapshot can see
-/// the inserted row; idle weak-cache entries never become candidate claims.
-let activeOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (indexName: string) (keyTypes: ColumnType list) (primaryKeyTypes: ColumnType list) : (OrderedIndexKeyPart list * OrderedIndexKeyPart list option * string) list =
-    let tableKey = lockNamespaceKey dbName tableName
+let private orderedClaimDecoder (indexName: string) keyTypes primaryKeyTypes =
     let primary = indexName.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)
     let prefixes =
         if primary then [ "PRIMARY\u0000"; "ORDERED\u0000PRIMARY\u0000" ]
         else [ "ORDERED\u0000" + indexName + "\u0000" ]
-    let ownOwner = store.TransactionLocks |> Option.map _.Owner
 
     let orderedValue keyType (value: string) =
         let expectedTag =
@@ -4876,7 +4903,7 @@ let activeOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (
             | _ -> None
         | _ -> None
 
-    let tryOrderedKey (key: string) =
+    fun (key: string) ->
         prefixes
         |> List.tryPick (fun prefix ->
             if not (key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) then None
@@ -4908,6 +4935,11 @@ let activeOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (
                         Some(ordered, primaryKey)
                     else None))
 
+/// Pending ordered keys held by another writer ahead of a snapshot.
+let activeOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (indexName: string) (keyTypes: ColumnType list) (primaryKeyTypes: ColumnType list) : (OrderedIndexKeyPart list * OrderedIndexKeyPart list option * string) list =
+    let tableKey = lockNamespaceKey dbName tableName
+    let ownOwner = store.TransactionLocks |> Option.map _.Owner
+    let tryOrderedKey = orderedClaimDecoder indexName keyTypes primaryKeyTypes
     match store.KeyLocks.TryGetValue tableKey with
     | false, _ -> []
     | true, cache when Threading.Interlocked.Read(&cache.Activity.Owners) = 0L -> []
@@ -7171,7 +7203,7 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
                         elif scan = WritePointGap || scan = WriteRangeGap then writeGapPrefix + probe
                         else probe
                     let mutable alreadyHeld = false
-                    visitLivePrimaryGaps cache (fun stripe ->
+                    visitLiveIndexGaps cache (fun stripe ->
                         if stripe.SharedOwners.Contains context.Owner
                            && (stripe.Gap |> Option.exists (fun (key, _) -> key = gapIdentity)) then
                             alreadyHeld <- true)
@@ -7221,15 +7253,7 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
                                 && (upper |> Option.forall (fun bound -> compare candidate bound.Values < 0))
                             | _ -> false
 
-                        let stripe =
-                            { SyncRoot = cache.SyncRoot
-                              ExclusiveOwner = None
-                              ExclusiveRowWrites = None
-                              SharedOwners = HashSet([ context.Owner ])
-                              KeyActivity = None
-                              Gap = Some(gapIdentity, blocks) }
-                        cache.Gaps.Add(WeakReference<RowLockStripe>(stripe))
-                        lock context.HeldStripes (fun () -> context.HeldStripes.Add stripe |> ignore)
+                        registerIndexGap cache context gapIdentity blocks
                 | _ -> ()
 
             let rangeBlockers lower upper =
@@ -8643,9 +8667,15 @@ type private OrderedSecondaryReadConflict =
 exception private OrderedSecondaryPending of string
 exception private OrderedSecondaryRowLocked of RowId * Value list * TransactionRowWrites option
 
-let internal tryLockOrderedSecondaryRead
-    timeout (store: Store) refresh database tableName indexName terms prefixValues strength wait releaseOffset offset limit =
+let private exactOrderedSecondaryKey (table: Table) primary (group: IndexKeyGroup) =
     let exactNumeric = function TDecimal _ -> true | kind -> isIntegerKeyType kind
+    not (group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase))
+    && not (List.isEmpty primary)
+    && List.forall (fun index -> List.contains index group.Indices) primary
+    && List.forall (fun index -> exactNumeric table.Columns.[index].Type) group.Indices
+
+let internal tryLockOrderedSecondaryRead
+    timeout (store: Store) (live: Store) refresh database tableName indexName terms prefixValues lower upper strength wait releaseOffset offset limit =
     let keyPart = function
         | VNull -> Some OrderedNull
         | VInt value -> Some(OrderedNumber(decimal value))
@@ -8666,34 +8696,119 @@ let internal tryLockOrderedSecondaryRead
             |> List.tryFind (fun group ->
                 group.Name.Equals(indexName, StringComparison.OrdinalIgnoreCase)
                 && group.Indices.Length = List.length terms
-                && not (List.isEmpty primary)
-                && List.forall (fun index -> List.contains index group.Indices) primary
-                && List.forall (fun index -> exactNumeric table.Columns.[index].Type) group.Indices)
+                && exactOrderedSecondaryKey table primary group)
             |> Option.bind (fun group ->
                 let allowed (name: string) = name.Equals(group.Name, StringComparison.OrdinalIgnoreCase)
-                tryOrderedIndexWithPrefix allowed snapshot (Some table) terms prefixValues None None
+                tryOrderedIndexWithPrefix allowed snapshot (Some table) terms prefixValues lower upper
                 |> Option.bind (fun (_, entries, prefix, slice, traversal) ->
-                    prefix |> List.map keyPart |> tryAllSome
-                    |> Option.bind (fun claimPrefix ->
-                        let compareKeys left right =
+                    let convert = function
+                        | None -> Some None
+                        | Some(value, inclusive) ->
+                            keyPart value |> Option.filter ((<>) OrderedNull) |> Option.map (fun key -> Some(key, inclusive))
+                    Option.map3 (fun prefix lower upper -> prefix, lower, upper)
+                        (prefix |> List.map keyPart |> tryAllSome) (convert lower) (convert upper)
+                    |> Option.bind (fun (claimPrefix, lower, upper) ->
+                        let comparePhysical left right =
                             List.zip3 group.Directions left right
                             |> List.tryPick (fun (direction, left, right) ->
                                 let order = Operators.compare left right
                                 if order = 0 then None
-                                elif (direction = Desc) <> (traversal = Backward) then Some(-order)
+                                elif direction = Desc then Some(-order)
                                 else Some order)
                             |> Option.defaultValue 0
+                        let compareKeys left right =
+                            let order = comparePhysical left right
+                            if traversal = Forward then order else -order
 
-                        let nextPending =
+                        let isStored (ordered: ImmutableSortedSet<SecondaryOrderEntry>) key =
+                            let keyAt index = ordered.[index].Values |> List.map keyPart |> tryAllSome |> Option.get
+                            let index = sortedInsertionPoint FirstEqual ordered.Count (fun index -> comparePhysical (keyAt index) key)
+                            index < ordered.Count && comparePhysical (keyAt index) key = 0
+
+                        let types = group.Indices |> List.map (fun index -> table.Columns.[index].Type)
+                        let primaryTypes = primary |> List.map (fun index -> table.Columns.[index].Type)
+                        let cache = lazy (keyLockCache snapshot (lockNamespaceKey database tableName))
+                        let decode = lazy (orderedClaimDecoder group.Name types primaryTypes)
+                        let active = lazy (activeOrderedKeyClaims snapshot database tableName group.Name types primaryTypes)
+                        let selected = slice (orderedPrefixBounds entries prefix)
+                        let inRange (key: OrderedIndexKeyPart list) =
+                            let prefixLength = claimPrefix.Length
+                            if List.take prefixLength key <> claimPrefix then false
+                            elif lower.IsNone && upper.IsNone then true
+                            else
+                                let value = key.[prefixLength]
+                                let within direction =
+                                    Option.forall (fun (bound, inclusive) ->
+                                        let order = Operators.compare value bound * direction
+                                        order > 0 || (inclusive && order = 0))
+                                value <> OrderedNull && within 1 lower && within -1 upper
+
+                        let nextPending () =
                             if wait = SkipLocked then None
                             else
-                                let types = group.Indices |> List.map (fun index -> table.Columns.[index].Type)
-                                let primaryTypes = primary |> List.map (fun index -> table.Columns.[index].Type)
-                                activeOrderedKeyClaims snapshot database tableName group.Name types primaryTypes
+                                active.Value
                                 |> List.fold (fun first (key, _, claim) ->
-                                    if List.take claimPrefix.Length key = claimPrefix
+                                    // A write that returns to the stored key still
+                                    // takes the usual clustered-record wait path.
+                                    if inRange key && not (isStored entries key)
                                        && (first |> Option.forall (fun (current, _) -> compareKeys key current < 0)) then Some(key, claim)
                                     else first) None
+
+                        let heldGaps = lazy (
+                            let identities = HashSet<string>(StringComparer.Ordinal)
+                            let owner = snapshot.TransactionLocks.Value.Owner
+                            visitLiveIndexGaps cache.Value (fun stripe ->
+                                if stripe.SharedOwners.Contains owner then
+                                    stripe.Gap |> Option.iter (fun (name, _) -> identities.Add name |> ignore))
+                            identities)
+
+                        let registerGap besideUpper upperIndex =
+                            if not releaseOffset then
+                                let boundary index =
+                                    if index < 0 || index >= entries.Count then None
+                                    else
+                                        let values = entries.[index].Values
+                                        values |> List.map keyPart |> tryAllSome
+                                        |> Option.map (fun key -> key, encodeEqualityValues table.Columns group.Indices values)
+                                let lower = boundary (upperIndex - 1)
+                                let upper = boundary upperIndex
+                                let identity =
+                                    let label value = value |> Option.map snd |> Option.defaultValue ""
+                                    String.concat "\u0000" [ "secondary"; string table.SchemaRevision; group.Name; label lower; label upper ]
+                                let context = snapshot.TransactionLocks.Value
+                                if heldGaps.Value.Add identity then
+                                    let between point =
+                                        (lower |> Option.forall (fun (key, _) -> comparePhysical key point < 0))
+                                        && (upper |> Option.forall (fun (key, _) -> comparePhysical point key < 0))
+                                    // A skipped uncommitted record can bound a
+                                    // gap even though it is absent from this snapshot.
+                                    let mutable pendingBoundaries =
+                                        active.Value
+                                        |> List.choose (fun (point, _, claim) -> if between point then Some(point, claim) else None)
+                                        |> List.sortWith (fun (left, _) (right, _) ->
+                                            if besideUpper then comparePhysical right left else comparePhysical left right)
+                                    let remains (point, claim) =
+                                        let hasPoint =
+                                            Option.filter (fun latest -> latest.SchemaRevision = table.SchemaRevision)
+                                            >> Option.bind (fun latest -> Map.tryFind group.Name latest.SecondaryOrder)
+                                            >> Option.exists (fun ordered -> isStored ordered point)
+                                        (exactKeyOwner cache.Value claim).IsSome
+                                        || hasPoint (tableAt live database tableName)
+                                        || (live.ConsistentReadViews.Values
+                                            |> Seq.exists (fun catalog ->
+                                                Map.tryFind (database.ToLowerInvariant()) catalog
+                                                |> Option.bind (Map.tryFind (normalizeTableName tableName))
+                                                |> hasPoint))
+                                    let contains key =
+                                        decode.Value key
+                                        |> Option.exists (fun (point, _) ->
+                                            if not (between point) then false
+                                            else
+                                                pendingBoundaries <- pendingBoundaries |> List.skipWhile (remains >> not)
+                                                pendingBoundaries |> List.tryHead |> Option.forall (fun (bound, _) ->
+                                                    let order = comparePhysical point bound
+                                                    if besideUpper then order > 0 else order < 0))
+                                    registerIndexGap cache.Value context identity contains
 
                         let unchanged current =
                             tableAt current database tableName
@@ -8707,36 +8822,58 @@ let internal tryLockOrderedSecondaryRead
                                 if wait = NoWait then raise (LockNowait database)
                                 else raise (OrderedSecondaryPending claim)
 
+                            let pending = nextPending ()
                             let ids = ResizeArray<RowId>()
-                            use rows = (orderedEntries traversal (slice (orderedPrefixBounds entries prefix))).GetEnumerator()
-                            while ids.Count < limit && rows.MoveNext() do
+                            let lockRecord (entry: SecondaryOrderEntry) =
+                                let admission = if wait = WaitForLocks then NoWait else wait
+                                try
+                                    acquireTransactionReadTargets TimeSpan.Zero current database tableName strength admission [ entry.RowId ]
+                                    |> List.isEmpty |> not
+                                with LockNowait _ when wait = WaitForLocks ->
+                                    raise (OrderedSecondaryRowLocked(entry.RowId, entry.Values, None))
+
+                            let mutable index = if traversal = Forward then selected.First else selected.AfterLast - 1
+                            let mutable starting = true
+                            while ids.Count < limit && index >= selected.First && index < selected.AfterLast do
                                 Limits.checkQueryInterruption queryCancellation.Value
-                                let entry = rows.Current
-                                match nextPending with
+                                let entry = entries.[index]
+                                match pending with
                                 | Some(pending, claim) when
                                     (entry.Values |> List.map keyPart |> tryAllSome
                                      |> Option.exists (fun key -> compareKeys pending key <= 0)) ->
                                     stopAtPending claim
                                 | _ -> ()
-                                try
-                                    // Lower-isolation OFFSET records only retain
-                                    // a row lock if the cursor had to wait.
-                                    if releaseOffset && ids.Count < offset then
-                                        match conflictingTransactionReadTarget current database tableName strength entry.RowId with
-                                        | None -> ids.Add entry.RowId
-                                        | Some _ when wait = SkipLocked -> ()
-                                        | Some _ when wait = NoWait -> raise (LockNowait database)
-                                        | Some writes -> raise (OrderedSecondaryRowLocked(entry.RowId, entry.Values, writes))
+                                if starting && traversal = Backward then registerGap false (index + 1)
+                                starting <- false
+                                // Lower-isolation OFFSET records only retain
+                                // a row lock if the cursor had to wait.
+                                if releaseOffset && ids.Count < offset then
+                                    match conflictingTransactionReadTarget current database tableName strength entry.RowId with
+                                    | None -> ids.Add entry.RowId
+                                    | Some _ when wait = SkipLocked -> ()
+                                    | Some _ when wait = NoWait -> raise (LockNowait database)
+                                    | Some writes -> raise (OrderedSecondaryRowLocked(entry.RowId, entry.Values, writes))
+                                else
+                                    // The secondary next-key lock precedes the
+                                    // attempt to acquire the clustered record.
+                                    registerGap true index
+                                    if lockRecord entry then ids.Add entry.RowId
+                                index <- if traversal = Forward then index + 1 else index - 1
+                            if ids.Count < limit then
+                                pending |> Option.iter (snd >> stopAtPending)
+                                if not releaseOffset then
+                                    if traversal = Backward then
+                                        if starting then registerGap false selected.AfterLast
+                                        if index >= 0 then
+                                            registerGap true index
+                                            lockRecord entries.[index] |> ignore
                                     else
-                                        let admission = if wait = WaitForLocks then NoWait else wait
-                                        let locked =
-                                            acquireTransactionReadTargets TimeSpan.Zero current database tableName strength admission [ entry.RowId ]
-                                        ids.AddRange locked
-                                with
-                                | LockNowait _ when wait = SkipLocked -> ()
-                                | LockNowait _ when wait = WaitForLocks ->
-                                    raise (OrderedSecondaryRowLocked(entry.RowId, entry.Values, None))
-                            if ids.Count < limit then nextPending |> Option.iter (snd >> stopAtPending)
+                                        registerGap true selected.AfterLast
+                                        // An explicit upper bound can leave a rejected
+                                        // successor within the equality prefix.
+                                        if upper.IsSome && index < entries.Count
+                                           && List.take prefix.Length entries.[index].Values = prefix then
+                                            lockRecord entries.[index] |> ignore
                             let consumedOffset = min offset ids.Count
                             ids |> Seq.skip consumedOffset |> Set.ofSeq, consumedOffset
 
@@ -8749,7 +8886,11 @@ let internal tryLockOrderedSecondaryRead
                                     // delete or key move. A conflict retains
                                     // the earlier row locks across the wait.
                                     let scanned =
-                                        try Ok(scan current)
+                                        try
+                                            // Observe pending keys and protect the visited gaps
+                                            // before a new ordered-key claim can enter them.
+                                            let rows = if releaseOffset then scan current else lock cache.Value.SyncRoot (fun () -> scan current)
+                                            Ok rows
                                         with
                                         | LockNowait _ -> Error SecondaryNowait
                                         | OrderedSecondaryPending claim -> Error(SecondaryPendingKey claim)
@@ -13480,7 +13621,7 @@ let private replaceRowsCore
         match rowsIn with
         | [] -> publish ()
         | _ ->
-            match tryInsertLockTargets store dbName tableName columns (rowsIn |> List.map (List.map Some)) with
+            match tryReplaceLockTargets store dbName tableName columns (rowsIn |> List.map (List.map Some)) with
             | Some targets -> withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
             | None -> publish ()
 
@@ -14248,12 +14389,13 @@ type private UniqueKeyMove =
       Group: IndexKeyGroup
       Key: string }
 
-type private UniqueKeyMoves =
+type private UpdateKeyClaims =
     { Address: TableAddress
       Target: string * string
       Original: Table
       Changes: RowUpdate list
-      Moves: UniqueKeyMove list }
+      Moves: UniqueKeyMove list
+      OrderedKeys: string list }
 
 type private StagedUpdate =
     { Changes: RowUpdate list
@@ -14261,7 +14403,7 @@ type private StagedUpdate =
       OriginalCatalog: Catalog
       WarningPositions: Dictionary<RowId, int> option }
 
-let private movedUniqueKeys dbName tableName (batch: StagedUpdate) =
+let private updateKeyClaims dbName tableName (batch: StagedUpdate) =
     let catalog = batch.OriginalCatalog
     Map.change (tableAddress dbName tableName) (fun affected -> Some(batch.Changes @ Option.defaultValue [] affected)) batch.Cascaded
     |> Map.toList
@@ -14278,14 +14420,26 @@ let private movedUniqueKeys dbName tableName (batch: StagedUpdate) =
                                   | Some key when encodeUniqueKey table.Columns group change.Before <> Some key ->
                                       yield { Change = change; Group = group; Key = key }
                                   | _ -> () ])
-            if moves.IsEmpty then None
+            let primary =
+                primaryKeyColumns table
+                |> List.choose (resolveColumn table.Columns >> Result.toOption)
+            let ordered = insertOrderKeyGroups table |> List.filter (exactOrderedSecondaryKey table primary)
+            let orderedKeys =
+                [ for change in rows do
+                      for group in ordered do
+                          if group.Indices |> List.exists (fun index -> change.Before.[index] <> change.After.[index]) then
+                              let encode indices =
+                                  indices |> List.map (fun index -> change.After.[index]) |> encodeEqualityValues table.Columns indices
+                              yield secondaryOrderLockName group (encode group.Indices) (Some(encode primary)) ]
+            if moves.IsEmpty && orderedKeys.IsEmpty then None
             else
                 Some
                     { Address = address
                       Target = catalogTableIdentity catalog address
                       Original = table
                       Changes = rows
-                      Moves = moves }))
+                      Moves = moves
+                      OrderedKeys = orderedKeys }))
 
 let private currentUpdateCatalog (store: Store) =
     match prepareDynamicWriteRebase store with
@@ -14334,12 +14488,13 @@ let private withUpdateLocks owner store database table rowIds keys body =
     withWriteLocksForContext (Some owner) (Fsdb.Limits.statementLockWaitTimeout ()) true
         store database table rowIds keys body
 
-let private withMovedUniqueKeys owner (store: Store) groups publish =
+let private withUpdateKeyClaims owner (store: Store) groups publish =
     let rec claim = function
         | [] -> publish ()
         | group :: remaining ->
             let database, table = group.Target
-            let keys = group.Moves |> List.map (fun move -> uniqueKeyLockName move.Group move.Key)
+            let uniqueKeys = group.Moves |> List.map (fun move -> uniqueKeyLockName move.Group move.Key)
+            let keys = uniqueKeys @ group.OrderedKeys
             withUpdateLocks owner store database table [] keys (fun () -> claim remaining)
     claim groups
 
@@ -14403,13 +14558,13 @@ let private rebuildAcceptedUpdates (original: Table) changes =
             SecondaryOrder = order }
 
 let private withCheckedUpdateDestinations owner store policy groups replaceTable (batch, result: StagedUpdate) publish =
-    withMovedUniqueKeys owner store groups (fun () ->
+    withUpdateKeyClaims owner store groups (fun () ->
         match policy, groups with
         | _, [] -> publish (batch, result)
         | RejectConstraintViolation, _ ->
             validateMovedUniqueKeys (currentUpdateCatalog store) groups
             |> Result.bind (fun () -> publish (batch, result))
-        | SkipConstraintViolation, [group] when Map.isEmpty result.Cascaded ->
+        | SkipConstraintViolation, [group] when not group.Moves.IsEmpty && Map.isEmpty result.Cascaded ->
             match tryCatalogTable group.Address (currentUpdateCatalog store) with
             | Some current when not (obj.ReferenceEquals(current, group.Original)) && sameTableSchema current group.Original ->
                 let kept, rejected = recheckIgnoredKeyMoves group.Address.Database group.Original current result.Changes
@@ -14483,7 +14638,7 @@ let private withQualifiedUpdatePublishing
                 | Some database ->
                     operation baseCatalog database
                     |> Result.map (fun (batchCatalog, result) ->
-                        match movedUniqueKeys dbName tableName result with
+                        match updateKeyClaims dbName tableName result with
                         | [] ->
                             publishExistingCatalog store slots batchCatalog
                             let acknowledge = prepareResultEvents store eventsOf result
@@ -14636,7 +14791,7 @@ let private updateRowsCore
             catalogHasQualifiedForeignKeysAffecting store.Catalog (Set.singleton (dbName.ToLowerInvariant()))
         let claimMovedKeys ((_, result) as prepared) publish =
             let replaceTable address table db = Map.add address.Table table db
-            withCheckedUpdateDestinations owner store constraintPolicy (movedUniqueKeys dbName tableName result)
+            withCheckedUpdateDestinations owner store constraintPolicy (updateKeyClaims dbName tableName result)
                 replaceTable prepared publish
         let publishPrepared rowIds applyRows =
             let operation db =

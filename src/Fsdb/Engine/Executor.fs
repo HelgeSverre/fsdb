@@ -1140,7 +1140,7 @@ let private viewCheckScope = System.Threading.AsyncLocal<ViewCheckScope option>(
 let private lockingReadRows = System.Threading.AsyncLocal<Map<string, Set<RowId>>>()
 let private suppressReadRowLocks = new System.Threading.ThreadLocal<bool>()
 let private committedFullTextStore = System.Threading.AsyncLocal<Store option>()
-let private lockingReadStore = System.Threading.AsyncLocal<(unit -> Store) option>()
+let private lockingReadStore = System.Threading.AsyncLocal<(Store option * (unit -> Store)) option>()
 let private lockingReadTimeout = System.Threading.AsyncLocal<System.TimeSpan option>()
 let private releaseLockingReadOffsetRows = System.Threading.AsyncLocal<bool>()
 let private examinedRows = System.Threading.AsyncLocal<int64 ref option>()
@@ -1306,9 +1306,15 @@ let internal currentDirectOnlyRestriction () = directOnlyRestriction.Value
 let private withTriggerRowScope (scope: TriggerRowScope) (body: unit -> 'a) : 'a =
     DynamicScope.withValue triggerRowScope (Some scope) body
 
-let withLockingReadStore (store: unit -> Store) (timeout: System.TimeSpan) (body: unit -> 'a) : 'a =
-    DynamicScope.withValue lockingReadStore (Some store) (fun () ->
+let private withLockingReadView live refresh (timeout: System.TimeSpan) body =
+    DynamicScope.withValue lockingReadStore (Some(live, refresh)) (fun () ->
         DynamicScope.withValue lockingReadTimeout (Some timeout) body)
+
+let withLockingReadStore (store: unit -> Store) (timeout: System.TimeSpan) (body: unit -> 'a) : 'a =
+    withLockingReadView None store timeout body
+
+let internal withLiveLockingReadStore live refresh timeout body =
+    withLockingReadView (Some live) refresh timeout body
 
 let internal withLockingReadOffsetRelease release body =
     DynamicScope.withValue releaseLockingReadOffsetRows release body
@@ -15845,7 +15851,7 @@ and private tryOrderedSecondaryLockingRead store registry dbName (select: Select
         let projections = expandOrderProjections source.Table.Columns qualifiers select.Projections
         let columns = columnIndexOf source.Table.Columns
         let offset = select.Offset |> Option.map literalCount |> Option.defaultValue (Some 0)
-        let refresh = lockingReadStore.Value |> Option.defaultValue (fun () -> store)
+        let live, refresh = lockingReadStore.Value |> Option.defaultValue (None, fun () -> store)
 
         let selectedIndex () =
             match tref.IndexHints with
@@ -15864,7 +15870,7 @@ and private tryOrderedSecondaryLockingRead store registry dbName (select: Select
                 orderedIndexPrefixMatches IndexJoin store registry dbName tref select.Where terms []
                 |> List.tryPick (fun resolved ->
                     let matched = resolved.Match
-                    if not resolved.PredicateCovered || matched.PinnedCount <> (optionalConjuncts select.Where).Length then None
+                    if not resolved.PredicateCovered then None
                     else
                         fixedPrefixOrderDirections terms Set.empty matched
                         |> Option.bind (fun directions ->
@@ -15873,8 +15879,9 @@ and private tryOrderedSecondaryLockingRead store registry dbName (select: Select
                                 |> storageOrderTerms
                             let count = min (int64 System.Int32.MaxValue) (int64 offset + int64 limit) |> int
                             let timeout = lockingReadTimeout.Value |> Option.defaultValue (Limits.lockWaitTimeout ())
-                            Storage.tryLockOrderedSecondaryRead timeout store refresh database tref.Table name keyTerms resolved.PinnedValues
-                                locking.Strength locking.Wait releaseLockingReadOffsetRows.Value offset count)))
+                            let lower, upper = fixedPrefixSuffixBounds store registry resolved.Table tref select.Where matched
+                            Storage.tryLockOrderedSecondaryRead timeout store (Option.defaultValue store live) refresh database tref.Table name keyTerms resolved.PinnedValues
+                                lower upper locking.Strength locking.Wait releaseLockingReadOffsetRows.Value offset count)))
     | _ -> None
 
 and private prepareLockingRead
@@ -16054,7 +16061,7 @@ and private runUnmergedSelectStmt
         if select.Locking.IsEmpty then
             runUnlockedSelectStmt store registry dbName select outer
         else
-            let initial = lockingReadStore.Value |> Option.map (fun current -> current ()) |> Option.defaultValue store
+            let initial = lockingReadStore.Value |> Option.map (fun (_, refresh) -> refresh ()) |> Option.defaultValue store
 
             match prepareLockingRead initial registry dbName select with
             | Error error -> error, [], []
@@ -16065,7 +16072,7 @@ and private runUnmergedSelectStmt
                         recordConsumedOffset select.Offset offset
                         current, { select with Offset = None }
                     | None ->
-                        let current = lockingReadStore.Value |> Option.map (fun refresh -> refresh ()) |> Option.defaultValue initial
+                        let current = lockingReadStore.Value |> Option.map (fun (_, refresh) -> refresh ()) |> Option.defaultValue initial
                         current, select
 
                 DynamicScope.withValue lockingReadRows rows (fun () ->
@@ -38076,11 +38083,11 @@ let private transactionWriteTargetsIn
                 { RowIds = rows |> List.map fst
                   Keys = [] })
 
-    let insertTargets tableName (columns: string list) rows =
+    let insertTargets lockTargets tableName (columns: string list) rows =
         let database, table = splitQualified dbName tableName
         let columns = if columns.IsEmpty then None else Some columns
 
-        tryInsertLockTargets store database table columns rows
+        lockTargets store database table columns rows
         |> Option.map (fun targets -> database, table, targets)
 
     let singleTableTargets (source: TableRef) predicate limit =
@@ -38116,14 +38123,14 @@ let private transactionWriteTargetsIn
         // A bound key can become visible after a concurrent insert or key move.
         point |> Option.orElseWith (fun () -> targets source predicate)
 
-    let literalInsertTargets tableName columns rows =
+    let literalInsertTargets lockTargets tableName columns rows =
         rows
         |> traverse (traverse (function
             | LiteralValue value -> Ok(Some value)
             | FuncCall(name, []) when name.Equals("DEFAULT", System.StringComparison.OrdinalIgnoreCase) -> Ok None
             | _ -> Error()))
         |> Result.toOption
-        |> Option.bind (insertTargets tableName columns)
+        |> Option.bind (insertTargets lockTargets tableName columns)
 
     let combineTargets (targets: (string * string * WriteLockTargets) list) : (string * string * WriteLockTargets) list =
         targets
@@ -39001,8 +39008,10 @@ let private transactionWriteTargetsIn
                 | _ -> targets source predicate
 
         joinedTargets resolveDeleteTarget delete.From delete.Joins delete.Targets delete.Where
-    | Insert(tableName, columns, rows, _, _)
-    | Replace(tableName, columns, rows) -> literalInsertTargets tableName columns rows |> Option.toList
+    | Insert(tableName, columns, rows, _, _) ->
+        literalInsertTargets Storage.tryInsertLockTargets tableName columns rows |> Option.toList
+    | Replace(tableName, columns, rows) ->
+        literalInsertTargets Storage.tryReplaceLockTargets tableName columns rows |> Option.toList
     | ReplaceSet(tableName, assignments) ->
         assignments
         |> traverse (fun (column, expression) ->
@@ -39012,7 +39021,7 @@ let private transactionWriteTargetsIn
         |> Result.toOption
         |> Option.bind (fun values ->
             let columns, row = List.unzip values
-            insertTargets tableName columns [ row ])
+            insertTargets Storage.tryReplaceLockTargets tableName columns [ row ])
         |> Option.toList
     | _ -> []
 

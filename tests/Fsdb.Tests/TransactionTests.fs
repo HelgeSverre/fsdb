@@ -8634,6 +8634,96 @@ let tests =
                       run writer insert (Affected 1UL) |> ignore
                   else Expect.equal gap (Affected 1UL) "the neighboring insert can proceed"
 
+          testCase "ordered secondary locking reads protect the gaps visited before LIMIT"
+          <| fun _ ->
+              for isolation, where, order, limit, offset, selected, blocked in
+                  [ "REPEATABLE READ", "", "ASC", 1, 0, [ "10" ], [ 5 ]
+                    "REPEATABLE READ", " AND stamp>10", "ASC", 1, 0, [ "20" ], [ 15 ]
+                    "REPEATABLE READ", " AND stamp<=30", "DESC", 1, 0, [ "30" ], [ 25; 35 ]
+                    "REPEATABLE READ", "", "ASC", 1, 1, [ "20" ], [ 5; 15 ]
+                    "READ COMMITTED", "", "ASC", 1, 0, [ "10" ], []
+                    "REPEATABLE READ", " AND stamp>10 AND stamp<20", "ASC", 8, 0, [], [ 15 ]
+                    "REPEATABLE READ", " AND stamp>10 AND stamp<20", "DESC", 8, 0, [], [ 5; 15 ]
+                    "REPEATABLE READ", " AND stamp<=20", "ASC", 8, 0, [ "10"; "20" ], [ 5; 15; 25 ]
+                    "REPEATABLE READ", " AND stamp>=20", "DESC", 8, 0, [ "30"; "20" ], [ 5; 15; 25; 35 ] ] do
+                  let store = Fsdb.Storage.create ()
+                  let run session sql expected =
+                      let next, result = handle session sql
+                      Expect.equal result expected sql
+                      next
+                  let owner = create 1 store
+                  run owner "CREATE TABLE jobs(id INT PRIMARY KEY,k INT,stamp INT,KEY ix(k,stamp,id))" (Affected 0UL) |> ignore
+                  run owner "INSERT INTO jobs VALUES(1,0,0),(10,7,10),(20,7,20),(30,7,30),(40,8,0)" (Affected 5UL) |> ignore
+                  let reader = run owner $"SET TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  let query = $"SELECT id FROM jobs FORCE INDEX(ix) WHERE k=7{where} ORDER BY stamp {order},id {order} LIMIT {limit} OFFSET {offset} FOR UPDATE"
+                  let reader = run reader query (ResultSet([ "id" ], selected |> List.map (fun id -> [ Some id ])))
+                  let writer = run (create 2 store) "SET innodb_lock_wait_timeout=1" (Affected 0UL)
+                  for stamp in [ 5; 15; 25; 35 ] do
+                      for sql in [ $"INSERT INTO jobs VALUES(100,7,{stamp})"; $"UPDATE jobs SET k=7,stamp={stamp} WHERE id=40" ] do
+                          let writer = run writer "BEGIN" (Affected 0UL)
+                          let writer, result = handle writer sql
+                          if List.contains stamp blocked then TestSupport.Sql.expectError 1205 result sql
+                          else Expect.equal result (Affected 1UL) sql
+                          run writer "ROLLBACK" (Affected 0UL) |> ignore
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+                  run writer "INSERT INTO jobs VALUES(100,7,5)" (Affected 1UL) |> ignore
+
+          testCase "duplicate inserts reach the existing record before checking a secondary gap"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let owner = create 1 store
+              run owner "CREATE TABLE jobs(id INT PRIMARY KEY,k INT,stamp INT,KEY ix(k,stamp,id))" (Affected 0UL) |> ignore
+              run owner "INSERT INTO jobs VALUES(1,0,0),(10,7,10),(40,8,0)" (Affected 3UL) |> ignore
+              let reader = run owner "BEGIN" (Affected 0UL)
+              let reader =
+                  run reader "SELECT id FROM jobs FORCE INDEX(ix) WHERE k=7 ORDER BY stamp,id LIMIT 1 FOR UPDATE"
+                      (ResultSet([ "id" ], [ [ Some "10" ] ]))
+              let writer = run (create 2 store) "SET innodb_lock_wait_timeout=1" (Affected 0UL)
+              let writer, duplicate = handle writer "INSERT INTO jobs VALUES(40,7,5)"
+              TestSupport.Sql.expectError 1062 duplicate "the secondary value is never inserted"
+              let writer = run writer "INSERT IGNORE INTO jobs VALUES(40,7,5)" (Affected 0UL)
+              let writer = run writer "INSERT INTO jobs VALUES(40,7,5) ON DUPLICATE KEY UPDATE stamp=1" (Affected 2UL)
+              let _, replace = handle writer "REPLACE INTO jobs VALUES(40,7,5)"
+              TestSupport.Sql.expectError 1205 replace "REPLACE really moves into the secondary gap"
+              run reader "ROLLBACK" (Affected 0UL) |> ignore
+
+          testCase "ordered secondary SKIP LOCKED retains the gap after the pending record"
+          <| fun _ ->
+              for ending in [ "COMMIT"; "ROLLBACK" ] do
+                  let store = Fsdb.Storage.create ()
+                  let run session sql expected =
+                      let next, result = handle session sql
+                      Expect.equal result expected sql
+                      next
+                  let writer = create 1 store
+                  run writer "CREATE TABLE jobs(id INT PRIMARY KEY,k INT,stamp INT,KEY ix(k,stamp,id))" (Affected 0UL) |> ignore
+                  run writer "INSERT INTO jobs VALUES(1,0,0),(10,7,10)" (Affected 2UL) |> ignore
+                  let writer = run writer "BEGIN" (Affected 0UL)
+                  let writer = run writer "INSERT INTO jobs VALUES(99,7,5)" (Affected 1UL)
+                  let reader = run (create 2 store) "BEGIN" (Affected 0UL)
+                  let reader =
+                      run reader "SELECT id FROM jobs FORCE INDEX(ix) WHERE k=7 ORDER BY stamp,id LIMIT 1 FOR UPDATE SKIP LOCKED"
+                          (ResultSet([ "id" ], [ [ Some "10" ] ]))
+                  let witness = run (create 3 store) "SET innodb_lock_wait_timeout=1" (Affected 0UL)
+                  let probe stamp blocked =
+                      let witness = run witness "BEGIN" (Affected 0UL)
+                      let sql = $"INSERT INTO jobs VALUES(100,7,{stamp})"
+                      let witness, result = handle witness sql
+                      if blocked then TestSupport.Sql.expectError 1205 result sql
+                      else Expect.equal result (Affected 1UL) sql
+                      run witness "ROLLBACK" (Affected 0UL) |> ignore
+                  probe 2 false
+                  probe 7 true
+                  run writer ending (Affected 0UL) |> ignore
+                  probe 2 (ending = "ROLLBACK")
+                  probe 7 true
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "ordered secondary blocking read reopens after a pending insert"
           <| fun _ ->
               for isolation, ending, expected in
@@ -8812,8 +8902,8 @@ let tests =
               let db = Fsdb.Storage.defaultDatabase
               try
                   let selection =
-                      Fsdb.Storage.tryLockOrderedSecondaryRead TimeSpan.Zero initial refresh db "jobs" "ix" terms [ VInt 7L ]
-                          UpdateLock NoWait true 0 1
+                      Fsdb.Storage.tryLockOrderedSecondaryRead TimeSpan.Zero initial latest refresh db "jobs" "ix" terms [ VInt 7L ]
+                          None None UpdateLock NoWait true 0 1
                   let table = Fsdb.Storage.tableSnapshot latest db "jobs" |> Result.defaultWith (fun error -> failtestf "%A" error)
                   let remainingId, _ = table.RowsArray.Indexed |> Seq.exactlyOne
                   match selection with

@@ -3852,7 +3852,7 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
                 withSelectDeadline (fun () ->
                     match lockingReadView () with
                     | Some(current, releaseOffset) ->
-                        Executor.withLockingReadStore current (lockWaitTimeout session) (fun () ->
+                        Executor.withLiveLockingReadStore session.Store current (lockWaitTimeout session) (fun () ->
                             Executor.withLockingReadOffsetRelease releaseOffset evaluate)
                     | None -> evaluate ())
             with
