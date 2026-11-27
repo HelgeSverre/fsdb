@@ -23,5 +23,6 @@ DATETIME keys, unequal fractional scales, negative TIME values, strict
 and inclusive range bounds, BETWEEN, offset, and index hints.
 Another 128 variants matched with DATE and DATETIME sort keys, including
 mixed-type range cuts and residual OR and NOT BETWEEN predicates.
-Ordered seeks for session-converted TIMESTAMP columns and coercive
+[Correlated TIMESTAMP equality](2026-11-27-correlated-timestamp-top-n.md)
+now has a UTC prefix probe. Broader TIMESTAMP ranges and coercive
 predicates remain open.

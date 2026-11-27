@@ -8326,6 +8326,7 @@ let private tryOrderedKeyTraversal allowed table (terms: OrderedKeyTerm list) in
 let internal isExactTemporalIndexBound columnType value =
     match columnType, value with
     | (TDate | TDateTime _), (VDate _ | VDateTime _)
+    | TTimestamp _, VTimestamp _
     | TTime _, VTime _ -> true
     | _ -> false
 

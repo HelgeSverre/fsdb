@@ -506,7 +506,7 @@ type private PhysicalProjection =
 type private CorrelatedTopOrderPlan =
     { TableRef: TableRef
       Predicate: Expr option
-      Terms: IndexOrderTerm list
+      Terms: IndexOrderTerm list option
       Pins: PointEquality list
       References: (string * Expr) list
       Projection: (PhysicalProjection * (Value[] -> bool) list) option }
@@ -4335,6 +4335,11 @@ let private storedRowsMatchReadRows (store: Store) (columns: ColumnDef seq) =
         | true, TChar _
         | _, TTimestamp _ -> false
         | _ -> true)
+
+let private storedRowsMatchReadRowsExceptTimestamps store columns =
+    columns
+    |> Seq.filter (fun column -> match column.Type with TTimestamp _ -> false | _ -> true)
+    |> storedRowsMatchReadRows store
 
 /// Index lookups and hash buckets compare stored key values, so only the
 /// equality keys need stored and read forms to agree. Every other column is
@@ -16559,14 +16564,17 @@ and private runUnlockedSelectStmt
 
                         let orderedPrefix =
                             tryCorrelatedTopOrder store registry dbName fromItem select outer
-                            |> Option.map (fun (columns, rows) -> columns, rows, select)
+                            |> Option.map (fun (columns, rows, ordered) ->
+                                columns, rows, (if ordered then { select with OrderBy = [] } else select))
                             |> Option.orElseWith (fun () ->
                                 tryEqualityPrefixOrder store registry dbName tref select equalityAccess
-                                |> Option.map (fun plan -> plan.Columns, plan.Rows, coveredSelect (equalityAccess |> Option.map EqualityAccess)))
+                                |> Option.map (fun plan ->
+                                    let covered = coveredSelect (equalityAccess |> Option.map EqualityAccess)
+                                    plan.Columns, plan.Rows, { covered with OrderBy = [] }))
 
                         match orderedPrefix with
-                        | Some(columns, rows, orderedSelect) ->
-                            runArbitrary columns rows None { orderedSelect with OrderBy = [] }
+                        | Some(columns, rows, planned) ->
+                            runArbitrary columns rows None planned
                         | None ->
                             let indexOrder = tryIndexOrder store registry dbName tref select
                             let earlyPhysicalAccess = choosePhysicalAccessBeforeIndexOrder indexOrder physicalCandidates
@@ -16617,7 +16625,8 @@ and private runUnlockedSelectStmt
             | Ok(columns, rows) -> runArbitrary columns rows None select
         | _ ->
             match tryCorrelatedTopOrder store registry dbName fromItem select outer with
-            | Some(columns, rows) -> runArbitrary columns rows None { select with OrderBy = [] }
+            | Some(columns, rows, ordered) ->
+                runArbitrary columns rows None (if ordered then { select with OrderBy = [] } else select)
             | None ->
                 let projectedLookup =
                     tryCorrelatedSourceLookup store registry dbName fromItem select outer
@@ -16729,7 +16738,7 @@ and private isExactNumericIndexType = function
 
 and private temporalOrderProbeValue = function
     | TDate -> Some(VDate(System.DateOnly(2000, 1, 1)))
-    | TDateTime _ -> Some(VDateTime(System.DateTime(2000, 1, 1)))
+    | TDateTime _ | TTimestamp _ -> Some(VDateTime(System.DateTime(2000, 1, 1)))
     | TTime _ -> Some(VTime(timeValueOrClamp 0L))
     | _ -> None
 
@@ -18257,7 +18266,7 @@ and private tryPhysicalProjectionUncached
         match select.From with
         | Some(FromItem.Qualified sourceQualifier as innerSource) ->
             resolveInput innerSource
-            |> Option.filter (fun input -> storedRowsMatchReadRows store input.PhysicalTable.Columns)
+            |> Option.filter (fun input -> storedRowsMatchReadRowsExceptTimestamps store input.PhysicalTable.Columns)
             |> Option.bind (fun input ->
                 let predicateScope = subqueryScopeFromColumns input.OutputColumns [ sourceQualifier, input.OutputColumns ]
 
@@ -18378,7 +18387,7 @@ and private tryPhysicalProjectionUncached
                 if not predicateIsStable then
                     None
                 else
-                    select.Projections
+                    expandOrderProjections input.OutputColumns (singleQualifier sourceQualifier input.OutputColumns) select.Projections
                     |> List.map project
                     |> tryAllSome
                     |> Option.bind (fun projected ->
@@ -21422,7 +21431,7 @@ and private tryIndexOrder
 
             direct
             |> Option.orElseWith (fun () ->
-                tryFixedPrefixIndexOrder store registry dbName tref select.Where orderedColumns Set.empty []
+                tryFixedPrefixIndexOrder IndexOrderBy store registry dbName tref select.Where orderedColumns Set.empty []
                 |> Option.bind planLookup))
 
 and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull (select: SelectStmt) (outer: EvalContext option) readOuter =
@@ -21487,6 +21496,19 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
 
             let key (column: ColumnDef) value = { Column = column.Name; Transform = None; Value = value }
             let indexedColumn expression = tryCorrelatedInnerColumn source expression |> Option.bind innerColumn
+            let temporalKeyValue columnType value =
+                let timestamp wall =
+                    // A ref lookup maps the wall time back to one UTC key,
+                    // even if a scan would match both sides of a DST fold.
+                    let zone = context.Store.ExecutionSettings.TimeZone
+                    try Some(VTimestamp(sqlTimeZoneToUtc zone wall))
+                    with :? System.ArgumentException -> None
+                match columnType, value with
+                | TTimestamp _, VDateTime wall -> timestamp wall
+                | TTimestamp _, VDate day -> timestamp (day.ToDateTime(System.TimeOnly.MinValue))
+                | _ when Storage.isExactTemporalIndexBound columnType value -> Some value
+                | _ -> None
+
             let tryBoundPin comparison indexed bound =
                 indexedColumn indexed
                 |> Option.bind (fun column ->
@@ -21501,7 +21523,8 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
                     | LiteralValue VNull when comparison = NullSafeEq -> Some(key column VNull, None)
                     | LiteralValue(VString _ as value) when usesStoredTextCollation None -> Some(key column value, None)
                     | LiteralValue(VDecimal _ as value) when isExactNumericIndexType column.Type -> Some(key column value, None)
-                    | LiteralValue value when Storage.isExactTemporalIndexBound column.Type value -> Some(key column value, None)
+                    | LiteralValue value ->
+                        temporalKeyValue column.Type value |> Option.map (fun value -> key column value, None)
                     | Col _ | QualifiedCol _ ->
                         let boundColumn = tryColumnDefForExpr context bound
                         let numericKey =
@@ -21511,14 +21534,15 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
                             isTextColumn boundColumn && usesStoredTextCollation boundColumn
                         let temporalKey =
                             boundColumn |> Option.bind (_.Type >> temporalOrderProbeValue)
-                            |> Option.exists (Storage.isExactTemporalIndexBound column.Type)
+                            |> Option.exists (temporalKeyValue column.Type >> Option.isSome)
 
                         match readOuter source context bound boundColumn with
                         | Some(VInt _ | VUInt _ | VDecimal _ as value) when numericKey -> Some(key column value, Some bound)
                         | Some(VString _ as value) when textKey () -> Some(key column value, Some bound)
-                        | Some value when temporalKey && Storage.isExactTemporalIndexBound column.Type value -> Some(key column value, Some bound)
                         | Some VNull when temporalKey || ((comparison = NullSafeEq || canSeekNull) && (numericKey || textKey ())) ->
                             Some(key column VNull, Some bound)
+                        | Some value when temporalKey ->
+                            temporalKeyValue column.Type value |> Option.map (fun value -> key column value, Some bound)
                         | _ -> None
                     | _ -> None)
 
@@ -21540,25 +21564,29 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
                 let safeOrder (term: IndexOrderTerm) =
                     term.Transform.IsNone
                     && (innerColumn term.Column |> Option.exists (fun column ->
-                        isTextColumn (Some column)
-                        || isExactNumericIndexType column.Type
-                        || (temporalOrderProbeValue column.Type).IsSome))
+                        match column.Type with
+                        // A UTC index can run backward in wall time at a fold.
+                        | TTimestamp _ -> false
+                        | ty -> isTextColumn (Some column) || isExactNumericIndexType ty || (temporalOrderProbeValue ty).IsSome))
 
                 if correlatedPins.IsEmpty then None
                 else
                     let qualifiers = singleQualifier qualifier columns
                     let orderProjections = expandOrderProjections columns qualifiers select.Projections
                     let orderIsValid = validateOrderAliases (columnIndexOf columns) qualifiers orderProjections select.OrderBy |> Result.isOk
-                    indexOrderTerms registry tref select
-                    |> Option.filter (fun terms -> orderIsValid && List.forall safeOrder terms)
-                    |> Option.map (fun terms -> source, context, predicate, terms, List.map fst pins, correlatedPins))
+                    if not orderIsValid then None
+                    else
+                        let terms =
+                            indexOrderTerms registry tref select
+                            |> Option.filter (fun terms -> not terms.IsEmpty && List.forall safeOrder terms)
+                        Some(source, context, predicate, terms, List.map fst pins, correlatedPins))
 
 and private planCorrelatedTopOrder store registry dbName fromItem (select: SelectStmt) outer readOuter bindPredicate =
     let scopedSource =
         match fromItem with
         | FromTable tref ->
             physicalFastPathTable store dbName tref
-            |> Option.filter (fun table -> storedRowsMatchReadRows store table.Columns)
+            |> Option.filter (fun table -> storedRowsMatchReadRowsExceptTimestamps store table.Columns)
             |> Option.map (fun table -> tref, table.Columns, None)
         | FromSubquery(PlainSelect _, qualifier) ->
             tryPhysicalProjection store registry dbName fromItem
@@ -21607,12 +21635,34 @@ and private planCorrelatedTopOrder store registry dbName fromItem (select: Selec
                     let physicalReferences =
                         references |> List.choose (fun (name, expr) -> column name |> Option.map (fun physical -> physical.ToLowerInvariant(), expr))
                     let physicalTerms =
-                        terms |> List.map (fun term -> column term.Column |> Option.map (fun name -> { term with Column = name }))
-                        |> tryAllSome
+                        terms
+                        |> Option.bind (List.map (fun term -> column term.Column |> Option.map (fun name -> { term with Column = name })) >> tryAllSome)
 
-                    physicalTerms
-                    |> Option.filter (fun _ -> not physicalReferences.IsEmpty)
-                    |> Option.map (fun order -> plan physicalRef (combineConjuncts physicalConjuncts) order physicalPins physicalReferences)))
+                    if physicalReferences.IsEmpty then None
+                    else Some(plan physicalRef (combineConjuncts physicalConjuncts) physicalTerms physicalPins physicalReferences)))
+
+and private correlatedOrderAccesses store dbName (plan: CorrelatedTopOrderPlan) =
+    seq {
+        let outerKeys = plan.References |> List.map fst |> Set.ofList
+        match plan.Terms with
+        | Some terms -> yield IndexOrderBy, terms, outerKeys
+        | None -> ()
+
+        // MySQL still uses ref access when the index cannot serve ORDER BY.
+        match physicalFastPathTable store dbName plan.TableRef with
+        | Some table ->
+            let timestampKeys =
+                table.Columns
+                |> List.choose (fun column ->
+                    match column.Type with
+                    | TTimestamp _ ->
+                        let key = column.Name.ToLowerInvariant()
+                        if Set.contains key outerKeys then Some key else None
+                    | _ -> None)
+                |> Set.ofList
+            if not timestampKeys.IsEmpty then yield IndexJoin, [], timestampKeys
+        | None -> ()
+    }
 
 /// The original source and predicates still decide which rows reach LIMIT and OFFSET.
 and private tryCorrelatedTopOrder store registry dbName fromItem select outer =
@@ -21631,22 +21681,25 @@ and private tryCorrelatedTopOrder store registry dbName fromItem select outer =
         | _ -> false
     let lookup =
         plan |> Option.bind (fun plan ->
-            let correlatedPins = plan.References |> List.map fst |> Set.ofList
-            tryFixedPrefixIndexOrder store registry dbName plan.TableRef plan.Predicate plan.Terms correlatedPins plan.Pins
-            |> Option.map (fun lookup ->
+            correlatedOrderAccesses store dbName plan
+            |> Seq.tryPick (fun (scope, terms, correlatedPins) ->
+                tryFixedPrefixIndexOrder scope store registry dbName plan.TableRef plan.Predicate terms correlatedPins plan.Pins
+                |> Option.map (fun lookup -> lookup, not terms.IsEmpty))
+            |> Option.map (fun (lookup, ordered) ->
                 // A NULL comparison cannot pass a top-level AND. Keep the
                 // ordered plan but skip the rejected slice, even in metadata probes.
                 if plan.Predicate |> Option.exists (conjuncts >> List.exists rejectsNull) then
-                    { lookup with OrderedRows = Seq.empty }
-                else lookup))
+                    { lookup with OrderedRows = Seq.empty }, ordered
+                else lookup, ordered))
 
     let projectedTable =
         plan |> Option.bind (fun plan -> plan.Projection |> Option.map (fun _ -> plan.TableRef))
 
-    observeCorrelatedOrder select outer.IsSome projectedTable lookup
+    let ordered = lookup |> Option.exists snd
+    observeCorrelatedOrder select outer.IsSome projectedTable (lookup |> Option.map fst)
     |> Option.map (fun lookup ->
         match plan |> Option.bind _.Projection with
-        | None -> lookup.OrderedColumns, lookup.OrderedRows
+        | None -> lookup.OrderedColumns, lookup.OrderedRows, ordered
         | Some(projection, filters) ->
             let rows =
                 lookup.OrderedRows
@@ -21655,7 +21708,7 @@ and private tryCorrelatedTopOrder store registry dbName fromItem select outer =
                     if not keep then countExaminedRow ()
                     keep)
                 |> Seq.map (fun row -> projection.PhysicalOutputs |> Array.map (readProjectionColumn row))
-            projection.OutputColumns, rows)
+            projection.OutputColumns, rows, ordered)
 
 and private tryEqualityPrefixOrder
     (store: Store)
@@ -23046,6 +23099,7 @@ and private fixedPrefixOrderDirections (orderedTerms: IndexOrderTerm list) corre
         else None
 
 and private tryFixedPrefixIndexOrder
+    (scope: TableIndexHintScope)
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -23055,9 +23109,9 @@ and private tryFixedPrefixIndexOrder
     (correlatedPins: Set<string>)
     (prefixPins: PointEquality list)
     : Storage.OrderedLookup option =
-    let allowed = indexAllowedForOrderedAccess IndexOrderBy tref
+    let allowed = indexAllowedForOrderedAccess scope tref
 
-    orderedIndexPrefixMatches IndexOrderBy store registry dbName tref whereExpr orderedTerms prefixPins
+    orderedIndexPrefixMatches scope store registry dbName tref whereExpr orderedTerms prefixPins
     |> List.tryPick (fun resolved ->
         let matched = resolved.Match
         fixedPrefixOrderDirections orderedTerms correlatedPins matched
@@ -29561,34 +29615,34 @@ let private explainCorrelatedOrder store registry dbName outer fromItem select =
     planCorrelatedTopOrder store registry dbName fromItem select (outer |> Option.map _.Context) readOuter (fun _ _ predicate -> predicate)
     |> Option.bind (fun plan ->
         let tref = plan.TableRef
-        let terms = plan.Terms
-        let allowed = indexAllowedForOrderedAccess IndexOrderBy tref
-        let correlatedPins = plan.References |> List.map fst |> Set.ofList
         let labels = plan.References |> Map.ofList
-        orderedIndexPrefixMatches IndexOrderBy store registry dbName tref plan.Predicate terms plan.Pins
-        |> List.tryPick (fun resolved ->
-            fixedPrefixOrderDirections terms correlatedPins resolved.Match
-            |> Option.bind (fun directions ->
-                let indexTerms =
-                    List.map2 (fun (term: IndexOrderTerm) direction -> { term with Direction = direction }) resolved.Match.Terms directions
-                    |> storageOrderTerms
+        let describeAccess (scope, terms, correlatedPins) =
+            let allowed = indexAllowedForOrderedAccess scope tref
+            orderedIndexPrefixMatches scope store registry dbName tref plan.Predicate terms plan.Pins
+            |> List.tryPick (fun resolved ->
+                fixedPrefixOrderDirections terms correlatedPins resolved.Match
+                |> Option.bind (fun directions ->
+                    let indexTerms =
+                        List.map2 (fun (term: IndexOrderTerm) direction -> { term with Direction = direction }) resolved.Match.Terms directions
+                        |> storageOrderTerms
 
-                Storage.tryOrderedIndexNameWith allowed resolved.Table indexTerms
-                |> Option.bind (fun name ->
-                    let prefix = List.take resolved.Match.PinnedCount resolved.Match.Terms
-                    let columns = resolved.Table.Columns
-                    prefix
-                    |> traverse (fun term -> resolveColumn columns term.Column)
-                    |> Result.toOption
-                    |> Option.map (fun indices ->
-                        let references =
-                            prefix
-                            |> List.map (fun term ->
-                                Map.tryFind (term.Column.ToLowerInvariant()) labels
-                                |> Option.bind (explainOuterReference outer)
-                                |> Option.defaultValue "const")
-                        let length = explainIndexKeyLen (Some resolved.Table) name columns indices (List.replicate indices.Length None)
-                        tref, (explainKey name length, references))))))
+                    Storage.tryOrderedIndexNameWith allowed resolved.Table indexTerms
+                    |> Option.bind (fun name ->
+                        let prefix = List.take resolved.Match.PinnedCount resolved.Match.Terms
+                        let columns = resolved.Table.Columns
+                        prefix
+                        |> traverse (fun term -> resolveColumn columns term.Column)
+                        |> Result.toOption
+                        |> Option.map (fun indices ->
+                            let references =
+                                prefix
+                                |> List.map (fun term ->
+                                    Map.tryFind (term.Column.ToLowerInvariant()) labels
+                                    |> Option.bind (explainOuterReference outer)
+                                    |> Option.defaultValue "const")
+                            let length = explainIndexKeyLen (Some resolved.Table) name columns indices (List.replicate indices.Length None)
+                            tref, ((explainKey name length, references), not terms.IsEmpty)))))
+        correlatedOrderAccesses store dbName plan |> Seq.tryPick describeAccess)
 
 let rec private explainJoinBlock
     (store: Store)
@@ -30009,9 +30063,10 @@ and private explainSelectBlock
                 Some plan
         | _ -> indexOrderPlan
 
+    let readsInCorrelatedOrder = correlatedOrder |> Option.exists (snd >> snd)
     let extra =
         [ if select.Where.IsSome then "Using where"
-          if not select.OrderBy.IsEmpty && selectedIndexOrderPlan.IsNone && correlatedOrder.IsNone then "Using filesort"
+          if not select.OrderBy.IsEmpty && selectedIndexOrderPlan.IsNone && not readsInCorrelatedOrder then "Using filesort"
           if (not select.GroupBy.IsEmpty && selectedIndexOrderPlan.IsNone) || select.Distinct then "Using temporary" ]
 
     let consumption = joinConsumptionFor select.Limit
@@ -30035,7 +30090,7 @@ and private explainSelectBlock
             selectedIndexOrderPlan
             consumption
             outer
-            (correlatedOrder |> Option.map snd
+            (correlatedOrder |> Option.map (snd >> fst)
              |> Option.orElseWith (fun () -> observedProjection |> Option.map (fun _ -> None, []))))
 
 and private explainUnionBlocks store registry dbName nextId acc analysis firstId firstType (first: SelectStmt) rest outer =

@@ -1,0 +1,53 @@
+-- Use a disposable server. This fixture adds a named time zone.
+CREATE DATABASE timestamp_topn;
+USE timestamp_topn;
+INSERT INTO mysql.time_zone (Time_zone_id,Use_leap_seconds) VALUES (900001,'N');
+INSERT INTO mysql.time_zone_name VALUES ('Fsdb/Test_Eastern',900001);
+INSERT INTO mysql.time_zone_transition_type
+    (Time_zone_id,Transition_type_id,Offset,Is_DST,Abbreviation)
+VALUES (900001,0,-18000,0,'EST'),(900001,1,-14400,1,'EDT');
+INSERT INTO mysql.time_zone_transition VALUES (900001,1710054000,1),(900001,1730613600,0);
+
+SET time_zone='+00:00';
+CREATE TABLE picks (id INT PRIMARY KEY, instant TIMESTAMP(6) NULL, wall DATETIME(6) NULL);
+CREATE TABLE events (
+    id INT PRIMARY KEY, instant TIMESTAMP(2) NULL, ordinal INT, enabled INT,
+    KEY by_slot(instant,ordinal DESC,id)
+);
+INSERT INTO picks VALUES
+    (1,'2024-11-03 05:30:00.20','2024-11-03 01:30:00.20'),
+    (2,'2024-11-03 06:30:00.20','2024-11-03 01:30:00.20'),
+    (3,'2024-11-03 06:30:00.21','2024-11-03 01:30:00.210001'),
+    (4,NULL,NULL);
+INSERT INTO events VALUES
+    (11,'2024-11-03 05:30:00.20',3,0),(12,'2024-11-03 05:30:00.20',2,1),(13,'2024-11-03 05:30:00.20',1,1),
+    (21,'2024-11-03 06:30:00.20',3,0),(22,'2024-11-03 06:30:00.20',4,1),(23,'2024-11-03 06:30:00.20',1,1),
+    (31,'2024-11-03 06:30:00.21',3,0),(32,'2024-11-03 06:30:00.21',2,1),(33,'2024-11-03 06:30:00.21',1,1),
+    (41,NULL,3,0),(42,NULL,2,1),(43,NULL,1,1);
+
+SET time_zone='Fsdb/Test_Eastern';
+SELECT p.id,
+    (SELECT e.id FROM events e FORCE INDEX(by_slot)
+     WHERE e.instant<=>p.instant AND e.enabled>0 ORDER BY e.ordinal DESC,e.id LIMIT 1 OFFSET 1) AS indexed,
+    (SELECT e.id FROM events e IGNORE INDEX(by_slot)
+     WHERE e.instant<=>p.instant AND e.enabled>0 ORDER BY e.ordinal DESC,e.id LIMIT 1 OFFSET 1) AS scanned
+FROM picks p ORDER BY p.id;
+SELECT p.id,
+    (SELECT e.id FROM (SELECT id,instant,ordinal,enabled FROM events FORCE INDEX(by_slot)) e
+     WHERE e.instant<=>p.wall AND e.enabled>0 ORDER BY e.ordinal ASC,e.id ASC LIMIT 1 OFFSET 1) AS chosen
+FROM picks p ORDER BY p.id;
+
+SELECT p.id,q.chosen
+FROM picks p LEFT JOIN LATERAL (
+    SELECT e.id AS chosen FROM events e FORCE INDEX(by_slot)
+    WHERE e.instant=p.instant AND e.enabled>0 ORDER BY e.ordinal DESC,e.id LIMIT 2
+) q ON TRUE ORDER BY p.id,q.chosen;
+
+PREPARE timezone_lookup FROM '
+    SELECT p.id,(SELECT e.id FROM events e FORCE INDEX(by_slot)
+        WHERE e.instant<=>p.instant AND e.enabled>0 ORDER BY e.ordinal DESC,e.id LIMIT 1 OFFSET 1) AS chosen
+    FROM picks p ORDER BY p.id';
+EXECUTE timezone_lookup;
+SET time_zone='-04:00';
+EXECUTE timezone_lookup;
+DEALLOCATE PREPARE timezone_lookup;

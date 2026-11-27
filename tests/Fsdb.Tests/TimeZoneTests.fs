@@ -42,6 +42,54 @@ let tests =
               expectRow session "SELECT id FROM stamped_key WHERE at IN ('2026-01-01 14:00:00')" [ "2" ]
               expectRow session "SELECT id FROM stamped_key WHERE id = 2 AND at = '2026-01-01 14:00:00'" [ "2" ]
 
+          testCase "correlated ordered TIMESTAMP equality uses the indexed UTC occurrence"
+          <| fun _ ->
+              let session =
+                  [ "SET time_zone = '+00:00'"
+                    "CREATE TABLE picks (id INT PRIMARY KEY, instant TIMESTAMP(6) NULL, wall DATETIME(6) NULL)"
+                    "CREATE TABLE events (id INT PRIMARY KEY, instant TIMESTAMP(2) NULL, ordinal INT, enabled INT, KEY by_slot(instant,ordinal DESC,id))"
+                    "INSERT INTO picks VALUES (1,'2024-11-03 05:30:00.20','2024-11-03 01:30:00.20'),(2,'2024-11-03 06:30:00.20','2024-11-03 01:30:00.20'),(3,'2024-11-03 06:30:00.21','2024-11-03 01:30:00.210001'),(4,NULL,NULL)"
+                    "INSERT INTO events VALUES (11,'2024-11-03 05:30:00.20',3,0),(12,'2024-11-03 05:30:00.20',2,1),(13,'2024-11-03 05:30:00.20',1,1),(21,'2024-11-03 06:30:00.20',3,0),(22,'2024-11-03 06:30:00.20',4,1),(23,'2024-11-03 06:30:00.20',1,1),(31,'2024-11-03 06:30:00.21',3,0),(32,'2024-11-03 06:30:00.21',2,1),(33,'2024-11-03 06:30:00.21',1,1),(41,NULL,3,0),(42,NULL,2,1),(43,NULL,1,1)"
+                    "SET time_zone = 'Fsdb/Test_Eastern'" ]
+                  |> List.fold execute (populatedSession ())
+
+              let scalar hint column =
+                  $"(SELECT e.id FROM events e {hint} INDEX(by_slot) WHERE e.instant<=>p.{column} AND e.enabled>0 ORDER BY e.ordinal DESC,e.id LIMIT 1 OFFSET 1)"
+
+              let checkRows session sql expected =
+                  match handle session sql |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows expected sql
+                  | other -> failtestf "Expected rows for %s, got %A" sql other
+
+              let check session column expected =
+                  let forced, ignored = scalar "FORCE" column, scalar "IGNORE" column
+                  checkRows session $"SELECT {forced}, {ignored} FROM picks p ORDER BY p.id" expected
+
+              let both first second = [ Some first; Some second ]
+              check session "instant" [ both "13" "12"; both "13" "12"; [ None; Some "33" ]; both "43" "43" ]
+              check session "wall" [ both "13" "12"; both "13" "12"; [ None; None ]; both "43" "43" ]
+
+              let ordered = scalar "FORCE" "instant"
+              let derived =
+                  ordered.Replace("events e FORCE INDEX(by_slot)", "(SELECT id,instant,ordinal,enabled FROM events FORCE INDEX(by_slot)) e")
+              let expectedDerived = [ [ Some "13" ]; [ Some "13" ]; [ None ]; [ Some "43" ] ]
+              checkRows session $"SELECT {derived} FROM picks p ORDER BY p.id" expectedDerived
+              let wildcard = derived.Replace("SELECT id,instant,ordinal,enabled", "SELECT *")
+              checkRows session $"SELECT {wildcard} FROM picks p ORDER BY p.id" expectedDerived
+
+              let sorted = ordered.Replace("e.ordinal DESC,e.id", "e.ordinal ASC,e.id ASC")
+              let sortedQuery = $"SELECT {sorted} FROM picks p ORDER BY p.id"
+              checkRows session sortedQuery [ [ Some "12" ]; [ Some "12" ]; [ None ]; [ Some "42" ] ]
+              match handle session ("EXPLAIN " + sortedQuery) |> snd with
+              | ResultSet(_, [ _; dependent ]) ->
+                  Expect.equal dependent.[4] (Some "ref") "the filesort still reads an indexed UTC slice"
+                  Expect.equal dependent.[6] (Some "by_slot") "the UTC prefix uses the stored composite index"
+                  Expect.stringContains (dependent.[11] |> Option.defaultValue "") "Using filesort" "the suffix changes index direction"
+              | other -> failtestf "Expected the dependent ref and filesort, got %A" other
+
+              let fixedOffset = execute session "SET time_zone = '-04:00'"
+              check fixedOffset "instant" [ both "13" "13"; both "23" "23"; both "33" "33"; both "43" "43" ]
+
           testCase "named zones use catalog transitions including daylight saving gaps and folds" <| fun _ ->
               let session = populatedSession ()
               expectRow session

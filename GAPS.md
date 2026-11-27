@@ -3169,6 +3169,11 @@ implementation effort:
    [Temporal prefixes and suffixes](torture/findings/2026-11-27-correlated-temporal-top-n.md)
    stream DATE, DATETIME, and TIME keys while preserving fractional outer
    bounds. The date-key fixture examines 15 rows, down from 4,105.
+   [Correlated TIMESTAMP equality](torture/findings/2026-11-27-correlated-timestamp-top-n.md)
+   uses session-local bounds to seek a UTC key, including the audited
+   daylight-saving fold, derived sources, and filesort. The fixture
+   examines 16 rows, down from 5,064. Ordering a scan by the stored
+   TIMESTAMP through a fold and broader TIMESTAMP range seeks remain open.
    [Derived projections with renamed columns](torture/findings/2026-11-27-correlated-derived-top-n.md)
    can retain the physical index order through audited filters and aliases.
    The scalar fixture examines 40 rows, down from 1,610.
