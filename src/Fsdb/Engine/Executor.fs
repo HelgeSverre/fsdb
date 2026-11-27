@@ -36995,41 +36995,37 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
                 resolveColumn table.Columns column
                 |> Result.toOption
                 |> Option.map (fun index -> table.Columns.[index].Type)
-            let integerKeys = keys |> List.forall (columnType >> Option.exists Storage.isIntegerKeyType)
+            let orderedRangeKeys = keys |> List.forall (columnType >> Option.exists Storage.supportsPrimaryRangeKeyType)
             let point = Storage.tryLockingPrimaryPoint store table
 
             let integer = function
                 | LiteralValue((VInt _ | VUInt _) as value) -> Some value
                 | _ -> None
 
-            let bindEquality valueFor left right =
-                let bind column literal =
-                    predicateColumn column |> Option.bind (fun name ->
-                        valueFor name literal |> Option.map (fun value -> name, value))
-                bind left right |> Option.orElseWith (fun () -> bind right left)
-
-            let literalPointEquality = function
-                | BinOp(Eq, left, right) ->
-                    let valueFor name literal =
-                        match columnType name, literal with
-                        | Some(TDecimal _), LiteralValue(VInt value) -> Some(VDecimal(decimal value))
-                        | Some(TDecimal _), LiteralValue(VUInt value) -> Some(VDecimal(decimal value))
-                        | Some(TDecimal _), LiteralValue(VDecimal _ as value)
-                        | Some(TBinary _ | TVarBinary _), LiteralValue((VBytes _ | VBinaryLiteral _) as value)
-                        | Some(TChar _ | TVarchar _), (Lit(VString _ as value) | ConnectionLiteral((VString _ as value), _)) ->
-                            Some value
-                        | Some kind, expression when Storage.isIntegerKeyType kind -> integer expression
-                        | _ -> None
-                    bindEquality valueFor left right
+            let keyLiteral name literal =
+                match columnType name, literal with
+                | Some(TDecimal _), LiteralValue(VInt value) -> Some(VDecimal(decimal value))
+                | Some(TDecimal _), LiteralValue(VUInt value) -> Some(VDecimal(decimal value))
+                | Some(TDecimal _), LiteralValue(VDecimal _ as value)
+                | Some(TBinary _ | TVarBinary _), LiteralValue((VBytes _ | VBinaryLiteral _) as value)
+                | Some(TChar _ | TVarchar _), (Lit(VString _ as value) | ConnectionLiteral((VString _ as value), _)) ->
+                    Some value
+                | Some kind, expression when Storage.isIntegerKeyType kind -> integer expression
                 | _ -> None
 
+            let bindEquality left right =
+                let bind column literal =
+                    predicateColumn column |> Option.bind (fun name ->
+                        keyLiteral name literal |> Option.map (fun value -> name, value))
+                bind left right |> Option.orElseWith (fun () -> bind right left)
+
             let equality = function
-                | BinOp(Eq, left, right) -> bindEquality (fun _ -> integer) left right
-                | Between(column, low, high) ->
-                    match integer low, integer high with
-                    | Some lower, Some upper when Storage.compareIntegerPrimaryValues lower upper = 0 ->
-                        predicateColumn column |> Option.map (fun name -> name, lower)
-                    | _ -> None
+                | BinOp(Eq, left, right) -> bindEquality left right
+                | Between(column, low, high) when orderedRangeKeys ->
+                    predicateColumn column |> Option.bind (fun name ->
+                        match keyLiteral name low, keyLiteral name high with
+                        | Some lower, Some upper when Storage.comparePrimaryRangeValues lower upper = 0 -> Some(name, lower)
+                        | _ -> None)
                 | _ -> None
 
             let equalities = List.choose equality conditions
@@ -37039,9 +37035,7 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
 
             let exact () =
                 if not seeksPoint || keys.Length <> conditions.Length then None
-                else
-                    let bounds = if integerKeys then equalities else List.choose literalPointEquality conditions
-                    keys |> List.map (boundFor bounds) |> tryAllSome |> Option.bind point
+                else keys |> List.map (boundFor equalities) |> tryAllSome |> Option.bind point
 
             let range () =
                 let prefix =
@@ -37051,11 +37045,11 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
                     let keyColumn = predicateColumn >> Option.filter (equalsIgnoreCase key)
                     let predicates =
                         conditions |> List.filter (equality >> Option.isNone)
-                        |> List.map (rangePredicatesFor keyColumn integer)
+                        |> List.map (rangePredicatesFor keyColumn (keyLiteral key))
                     if List.exists List.isEmpty predicates then None
                     else
                         let bounds = List.concat predicates
-                        let compare = Storage.compareIntegerPrimaryValues
+                        let compare = Storage.comparePrimaryRangeValues
                         let strongest direction =
                             List.fold (fun current ((value, inclusive) as candidate) ->
                                 match current with
@@ -37070,14 +37064,19 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
                             | Some(value, inclusive) -> Some(prefix @ [ value ], inclusive)
                             | None when not prefix.IsEmpty -> Some(prefix, true)
                             | None -> None
-                        let exactBound = Option.forall (fun (values, _) -> Storage.isExactPrimaryKeyPrefix store table values)
+                        let exactBound bound =
+                            match bound with
+                            | None -> Some None
+                            | Some(values, inclusive) ->
+                                Storage.tryExactPrimaryKeyPrefix store table values
+                                |> Option.map (fun exact -> Some(exact, inclusive))
                         let physicalLower, physicalUpper =
                             if keyDirection key = Desc then edge upper, edge lower else edge lower, edge upper
-                        let access = Storage.PrimaryRange(physicalLower, physicalUpper)
                         let limit = rangeLimit prefix.Length
-                        let rangeRead = limit |> Option.map (fun scan -> access, scan)
-                        if not (exactBound physicalLower && exactBound physicalUpper) then None
-                        else
+                        match exactBound physicalLower, exactBound physicalUpper with
+                        | Some lowerEdge, Some upperEdge ->
+                            let access = Storage.PrimaryRange(lowerEdge, upperEdge)
+                            let rangeRead = limit |> Option.map (fun scan -> access, scan)
                             match lower, upper with
                             | Some(low, includeLow), Some(high, includeHigh) when compare low high = 0 ->
                                 if not (includeLow && includeHigh) then None
@@ -37093,6 +37092,7 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
                                     | _ -> None
                             | Some(low, _), Some(high, _) when compare low high > 0 -> None
                             | _ -> rangeRead
+                        | _ -> None
                 | _ -> None
 
             let boundedClusteredScan =
@@ -37104,8 +37104,8 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
                 |> Option.map (fun access -> access, None)
                 |> Option.orElseWith (fun () ->
                     match wait with
-                    | WaitForLocks when protectGaps && integerKeys -> range ()
-                    | (NoWait | SkipLocked) when integerKeys && primaryIsOnlyChoice -> range () |> Option.filter (snd >> Option.isSome)
+                    | WaitForLocks when protectGaps && orderedRangeKeys -> range ()
+                    | _ when orderedRangeKeys && primaryIsOnlyChoice -> range ()
                     | _ -> None)
                 |> Option.map (fun (access, limit) ->
                     let plan: Storage.PrimaryReadPlan =
@@ -37115,7 +37115,7 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
                           ReadAccess = access
                           ReadGaps = protectGaps
                           ReadWait = wait
-                          ReadOffset = select.Offset |> Option.map rowCount |> Option.defaultValue 0
+                          ReadOffset = if limit.IsSome then select.Offset |> Option.map rowCount |> Option.defaultValue 0 else 0
                           ReadRangeLimit = limit }
                     let readSelect =
                         if select.OrderBy.IsEmpty && limit.IsSome then
@@ -37126,7 +37126,7 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
                     plan, readSelect, keys))
     | _ -> None
 
-let internal selectLockedPrimaryKeys qualifier keys values (select: SelectStmt) =
+let internal selectLockedPrimaryKeys consumedInIndexOrder qualifier keys values (select: SelectStmt) =
     let scalarOrRow = function [ value ] -> value | values -> Row values
     let eligible =
         match values with
@@ -37135,7 +37135,7 @@ let internal selectLockedPrimaryKeys qualifier keys values (select: SelectStmt) 
             let key = keys |> List.map (fun column -> QualifiedCol(qualifier, column)) |> scalarOrRow
             In(key, values |> List.map (List.map Lit >> scalarOrRow))
     let where = select.Where |> Option.map (fun predicate -> BinOp(And, predicate, eligible)) |> Option.defaultValue eligible
-    { select with Where = Some where; Offset = None }
+    { select with Where = Some where; Offset = if consumedInIndexOrder then None else select.Offset }
 
 let private transactionWriteTargetsIn
     (temporaryCatalog: Catalog option)

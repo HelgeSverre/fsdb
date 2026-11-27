@@ -8513,6 +8513,113 @@ let tests =
                   if isolation = "REPEATABLE READ" then TestSupport.Sql.expectError 1205 neighbor "the visited gap is retained"
                   else Expect.equal neighbor (Affected 1UL) "READ COMMITTED leaves the neighboring gap open"
 
+          testCase "ordered decimal and binary primary reads lock only the visited range"
+          <| fun _ ->
+              for columnType, bounds, keys, gap, expected in
+                  [ "DECIMAL(23,5)",
+                    ("9007199254740993.00015", "9007199254740993.00045"),
+                    ("9007199254740993.00010", "9007199254740993.00020", "9007199254740993.00030",
+                     "9007199254740993.00040", "9007199254740993.00050"), "9007199254740993.00033",
+                    [ "9007199254740993.00020"; "9007199254740993.00040" ]
+                    "VARBINARY(4)", ("X'15'", "X'45'"), ("X'10'", "X'20'", "X'30'", "X'40'", "X'50'"),
+                    "X'33'", [ " "; "@" ] ] do
+                  let lower, upper = bounds
+                  let first, admitted, blocked, next, later = keys
+                  let store = Fsdb.Storage.create ()
+                  let run session sql expected =
+                      let next, actual = handle session sql
+                      Expect.equal actual expected sql
+                      next
+                  let owner = create 1 store
+                  let observer = run (create 2 store) "SET innodb_lock_wait_timeout=1" (Affected 0UL)
+                  let reader = create 3 store
+                  run owner $"CREATE TABLE gate(id {columnType} PRIMARY KEY,n INT)" (Affected 0UL) |> ignore
+                  let rows = [ first; admitted; blocked; next; later ] |> List.map (fun id -> $"({id},0)") |> String.concat ","
+                  run owner $"INSERT INTO gate VALUES {rows}" (Affected 5UL) |> ignore
+                  let holder = run owner "BEGIN" (Affected 0UL)
+                  let holder = run holder $"UPDATE gate SET n=1 WHERE id={blocked}" (Affected 1UL)
+                  let query limit mode = $"SELECT id FROM gate WHERE id BETWEEN {lower} AND {upper} ORDER BY id LIMIT {limit} FOR UPDATE {mode}"
+                  let transaction = run reader "BEGIN" (Affected 0UL)
+                  let transaction = run transaction (query 1 "NOWAIT") (ResultSet([ "id" ], [ [ Some expected.Head ] ]))
+                  run transaction "ROLLBACK" (Affected 0UL) |> ignore
+
+                  let transaction = run reader "BEGIN" (Affected 0UL)
+                  let transaction, conflict = handle transaction (query 2 "NOWAIT")
+                  TestSupport.Sql.expectError 3572 conflict "the next matching record is locked"
+                  TestSupport.Sql.expectError 3572
+                      (handle observer $"SELECT id FROM gate WHERE id={admitted} FOR UPDATE NOWAIT" |> snd)
+                      "the failed NOWAIT keeps the first record lock"
+                  run transaction "ROLLBACK" (Affected 0UL) |> ignore
+
+                  let transaction = run reader "BEGIN" (Affected 0UL)
+                  let selected = expected |> List.map (fun id -> [ Some id ])
+                  let transaction = run transaction (query 2 "SKIP LOCKED") (ResultSet([ "id" ], selected))
+                  run observer $"UPDATE gate SET n=2 WHERE id={later}" (Affected 1UL) |> ignore
+                  TestSupport.Sql.expectError 1205 (handle observer $"INSERT INTO gate VALUES ({gap},3)" |> snd)
+                      "the skipped scan still protects the gap before the next admitted record"
+                  run transaction "ROLLBACK" (Affected 0UL) |> ignore
+                  run holder "ROLLBACK" (Affected 0UL) |> ignore
+
+          testCase "primary range filesort retains cursor locks and applies OFFSET to sorted rows"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, actual = handle session sql
+                  Expect.equal actual expected sql
+                  next
+              let owner = create 1 store
+              let observer = create 2 store
+              let reader = create 3 store
+              run owner "CREATE TABLE gate(tenant VARBINARY(2),id DECIMAL(8,3),n INT,PRIMARY KEY(tenant ASC,id DESC))" (Affected 0UL) |> ignore
+              run owner "INSERT INTO gate VALUES (X'21',1.125,0),(X'21',2.125,0),(X'21',3.125,0),(X'21',4.125,0),(X'21',5.125,0)" (Affected 5UL) |> ignore
+              let holder = run owner "BEGIN" (Affected 0UL)
+              let holder = run holder "UPDATE gate SET n=1 WHERE tenant=X'21' AND id=3.125" (Affected 1UL)
+              let query = "SELECT id FROM gate FORCE INDEX (PRIMARY) WHERE tenant=X'21' AND id BETWEEN 1.500 AND 4.500 ORDER BY id ASC LIMIT 1"
+              let transaction = run reader "BEGIN" (Affected 0UL)
+              let transaction, conflict = handle transaction (query + " FOR UPDATE NOWAIT")
+              TestSupport.Sql.expectError 3572 conflict "filesort first visits the descending index range"
+              TestSupport.Sql.expectError 3572
+                  (handle observer "SELECT id FROM gate WHERE tenant=X'21' AND id=4.125 FOR UPDATE NOWAIT" |> snd)
+                  "the failed cursor retains the first row visited in index order"
+              run transaction "ROLLBACK" (Affected 0UL) |> ignore
+              let transaction = run reader "BEGIN" (Affected 0UL)
+              let transaction = run transaction (query + " OFFSET 1 FOR UPDATE SKIP LOCKED")
+                                    (ResultSet([ "id" ], [ [ Some "4.125" ] ]))
+              run observer "UPDATE gate SET n=2 WHERE tenant=X'21' AND id=5.125" (Affected 1UL) |> ignore
+              run transaction "ROLLBACK" (Affected 0UL) |> ignore
+              run holder "ROLLBACK" (Affected 0UL) |> ignore
+
+          testCase "a blocking read committed OFFSET keeps the record it waited for"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, actual = handle session sql
+                  Expect.equal actual expected sql
+                  next
+              let owner = create 1 store
+              let observer = create 2 store
+              run owner "CREATE TABLE gate(id DECIMAL(8,3) PRIMARY KEY,n INT)" (Affected 0UL) |> ignore
+              run owner "INSERT INTO gate VALUES(1.125,0),(2.125,0),(3.125,0)" (Affected 3UL) |> ignore
+              let holder = run owner "BEGIN" (Affected 0UL)
+              let holder = run holder "UPDATE gate SET n=1 WHERE id=1.125" (Affected 1UL)
+              let reader = run (create 3 store) "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED" (Affected 0UL)
+              let reader = run reader "BEGIN" (Affected 0UL)
+              use started = new Threading.ManualResetEventSlim(false)
+              let waiting = Threading.Tasks.Task.Run(fun () ->
+                  started.Set()
+                  handle reader "SELECT id FROM gate WHERE id BETWEEN 1.000 AND 3.999 ORDER BY id LIMIT 1 OFFSET 1 FOR UPDATE")
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 5.0)) "the reader starts"
+              let completedEarly = waiting.Wait(TimeSpan.FromMilliseconds 100.0)
+              run holder "COMMIT" (Affected 0UL) |> ignore
+              Expect.isFalse completedEarly "the reader waits for the skipped record"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the reader resumes after COMMIT"
+              let reader, result = waiting.Result
+              Expect.equal result (ResultSet([ "id" ], [ [ Some "2.125" ] ])) "only the second row is returned"
+              TestSupport.Sql.expectError 3572 (handle observer "SELECT id FROM gate WHERE id=1.125 FOR UPDATE NOWAIT" |> snd)
+                  "the reader retains the record it waited for"
+              run observer "UPDATE gate SET n=1 WHERE id=3.125" (Affected 1UL) |> ignore
+              run reader "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "ordered NOWAIT at READ COMMITTED checks OFFSET rows and releases them"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

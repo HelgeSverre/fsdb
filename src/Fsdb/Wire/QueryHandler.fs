@@ -3754,7 +3754,7 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
                                                     | Storage.ReadSelectedPrimaryKeys(readStore, rows, consumed) ->
                                                         consumedOffset <- consumed
                                                         let qualifier = source.Alias |> Option.defaultValue source.Table
-                                                        readStore, Executor.selectLockedPrimaryKeys qualifier keys rows orderedSelect)
+                                                        readStore, Executor.selectLockedPrimaryKeys plan.ReadRangeLimit.IsSome qualifier keys rows orderedSelect)
                                                 |> Option.defaultValue (planningStore, select)
                                         | _ -> store, select)
                                     |> Option.defaultWith (fun () -> consistentReadStore (), select)

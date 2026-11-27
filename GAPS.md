@@ -3195,6 +3195,12 @@ implementation effort:
    A [recursive CTE with two natural left joins to writable views](torture/findings/2026-11-06-recursive-cte-mixed-natural-view-update.md)
    and a mixed natural right-then-left chain now match MySQL, including an
    independent holder on each physical target in the mixed case.
+   [Decimal and binary primary-key locking reads](torture/findings/2026-11-27-missing-primary-write-gaps.md#decimal-and-binary-primary-key-ranges)
+   honor ordered limits for blocking, NOWAIT, and SKIP LOCKED reads.
+   Audited reverse composite filesorts acquire locks in scan order and
+   apply the limit and offset after sorting. At lower isolation, a blocking
+   offset scan retains a row it had to wait for. Collated text ranges and
+   competing secondary-index plans remain open.
    Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.

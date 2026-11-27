@@ -102,7 +102,7 @@ the neighboring gap open. If the writer rolls back, the reader returns
 no rows and protects the gap at REPEATABLE READ. At READ COMMITTED and
 READ UNCOMMITTED, the reader also waits for the exact key, and the
 neighboring gap remains open whichever way the writer finishes.
-Secondary-key reads and noninteger primary ranges remain outside this coverage.
+Secondary-key reads and collated text primary ranges remain outside this coverage.
 
 All 108 schedules matched MySQL 8.4.11 in memory and with WAL enabled.
 The matrix covered seven key fixtures at four isolation levels, with
@@ -177,7 +177,45 @@ concurrent readers each acquired a different row and left a later row
 available for updates.
 
 Ranges that require a filesort or have competing access paths remain
-outside the audited `NOWAIT` and `SKIP LOCKED` coverage.
+outside the original ordered integer comparison. See the composite
+filesort follow-up below.
+
+## Decimal and binary primary-key ranges
+
+The ordered locking cursor now handles primary keys formed from
+integers, DECIMAL, BINARY, and VARBINARY. It uses exact stored key
+values for the index bounds and the pending-write check, including
+decimal fractions above `2^53`.
+
+With DECIMAL keys `9007199254740993.00020`, `.00030`, and `.00040`,
+hold the middle record in a writer transaction. An ascending range
+read with `LIMIT 1 FOR UPDATE NOWAIT` returns the first key. With
+`LIMIT 2`, the reader reports 3572 and retains the first record lock.
+`LIMIT 2 FOR UPDATE SKIP LOCKED` returns the first and last keys,
+leaving records beyond its scan available to other writers.
+
+For the audited mixed-direction composite indexes, MySQL scans in
+physical index order before filesort. A failure retains the rows the
+cursor visited, and SKIP LOCKED filters out blocked keys before
+sorting and applying the SQL offset. With a blocking ordered
+`OFFSET` at READ COMMITTED, the cursor retains the skipped record
+when it had to wait for it. An uncontended skipped record remains
+available to writers.
+
+The matrix improved from 136 to 576 exact matches in memory and with
+WAL enabled. It covered all four isolation levels, both lock strengths,
+both scan directions, composite keys, and pending inserts. Sixteen
+blocking schedules also matched when a row appeared beyond a held
+record or pending insert. The resumed statement returned and locked
+the new row if it reached that part of the scan. Four blocking
+offset schedules matched the retained locks. Binary prepared statements
+with DECIMAL or VARBINARY bounds returned the first row at limit one
+and the same NOWAIT error at limit two. The composite range and filesort
+checks also matched after a checkpoint restart.
+[MySQL locking reads](https://dev.mysql.com/doc/refman/8.4/en/innodb-locking-reads.html)
+
+Collated text ranges, competing indexes, and other filesort shapes
+remain outside this comparison.
 
 ## Locking reads with LIMIT 0
 

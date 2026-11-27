@@ -6084,11 +6084,11 @@ let private exactPrimaryValues store table indices values =
         | _ -> Error())
     |> Result.toOption
 
-let internal isExactPrimaryKeyPrefix store table (values: Value list) =
+let internal tryExactPrimaryKeyPrefix store table (values: Value list) =
     uniqueKeyGroups table
-    |> List.exists (fun group ->
-        group.Name = "PRIMARY" && indexesWholeColumns group && values.Length <= group.Indices.Length
-        && (exactPrimaryValues store table (List.take values.Length group.Indices) values).IsSome)
+    |> List.tryFind (fun group ->
+        group.Name = "PRIMARY" && indexesWholeColumns group && values.Length <= group.Indices.Length)
+    |> Option.bind (fun group -> exactPrimaryValues store table (List.take values.Length group.Indices) values)
 
 let private tryExactWriteLockTargets (store: Store) (table: Table) name (values: Value list) =
     uniqueKeyGroups table
@@ -6782,13 +6782,16 @@ type internal PrimaryReadOutcome =
     | SkippedPrimaryPoint of Store
     | ReadSelectedPrimaryKeys of Store * Value list list * consumedOffset: int
 
-let internal compareIntegerPrimaryValues = compareIndexedValues None
+let internal comparePrimaryRangeValues = compareIndexedValues None
 
 let private isTextPrimaryKeyType = function TChar _ | TVarchar _ -> true | _ -> false
 
-let private supportsPrimaryPointGap = function
-    | TDecimal _ | TBinary _ | TVarBinary _ | TChar _ | TVarchar _ -> true
+let internal supportsPrimaryRangeKeyType = function
+    | TDecimal _ | TBinary _ | TVarBinary _ -> true
     | columnType -> isIntegerKeyType columnType
+
+let private supportsPrimaryPointGap columnType =
+    supportsPrimaryRangeKeyType columnType || isTextPrimaryKeyType columnType
 
 let private tryPrimaryGapPoint width key =
     tryPrimaryGapLockValues width key |> Option.map (fun parts -> PrimaryPoint(key, parts))
@@ -6846,7 +6849,7 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
             let columnType = observed.Columns.[column].Type
             match read with
             | PrimaryPoint _ -> supportsPrimaryPointGap columnType
-            | PrimaryRange _ -> isIntegerKeyType columnType
+            | PrimaryRange _ -> supportsPrimaryRangeKeyType columnType
         uniqueKeyGroups observed
         |> List.tryFind (fun group ->
             group.Name = "PRIMARY" && indexesWholeColumns group
@@ -7318,7 +7321,7 @@ let private lockPrimaryRange timeout (live: Store) (refresh: unit -> Store) stre
 
     let lockRangeRows snapshot savedGaps direction lower upper canRetain selected (endRecord: RowId option) isCurrent =
         let rowIds = List.map fst selected
-        if not canRetain && plan.ReadWait = WaitForLocks then
+        if not canRetain && plan.ReadWait = WaitForLocks && plan.ReadGaps then
             lockRows WaitForLocks snapshot rowIds
             Ok RangeRowsLocked
         else
@@ -7392,8 +7395,18 @@ let private lockPrimaryRange timeout (live: Store) (refresh: unit -> Store) stre
                     | ReopenRange -> Ok ReopenRange
                     | RangeRowsLocked ->
                         let visited = selected |> List.tryLast |> Option.map snd
+                        let wait () =
+                            pending.Wait(remaining ())
+                            // Lower isolation can drop an uncontended OFFSET
+                            // record but keeps its lock if the cursor waited.
+                            if not plan.ReadGaps && selected.Length < plan.ReadOffset then
+                                let refreshed = refresh ()
+                                rows refreshed |> Option.iter (fun selection ->
+                                    selection.Rows |> List.tryFind (fun (id, key) ->
+                                        selection.EndRecord <> Some id && pending.CompareKey key = 0)
+                                    |> Option.iter (fun (id, _) -> lockRows WaitForLocks refreshed [ id ]))
                         finishConflict current savedGaps direction lower upper visited pending.Values
-                            (fun () -> pending.Wait(remaining ())))
+                            wait)
 
     let nextSelection outcome selection current =
         match rows current with
@@ -7405,8 +7418,9 @@ let private lockPrimaryRange timeout (live: Store) (refresh: unit -> Store) stre
 
     let rec acquire canRetain snapshot selection =
         let savedGaps = transactionGapLocks snapshot
+        let scan = if plan.ReadGaps then OrdinaryGap else ProbeLimitedRange ForwardScan
         let acquired =
-            match acquirePrimaryGap (remaining ()) live snapshot database tableName OrdinaryGap canRetain plan.ReadAccess with
+            match acquirePrimaryGap (remaining ()) live snapshot database tableName scan (canRetain || plan.ReadWait = NoWait) plan.ReadAccess with
             | GapHasPendingKey pending -> lockBeforePending snapshot savedGaps ForwardScan lower upper pending
             | GapNeedsRefresh -> Ok ReopenRange
             | GapSkippedPoint -> invalidOp "A primary range cannot skip an exact key"
@@ -7536,9 +7550,8 @@ let internal lockPrimaryRead timeout live refresh strength (plan: PrimaryReadPla
     match plan.ReadAccess with
     | PrimaryPoint(key, _) -> lockPrimaryPoint timeout live refresh strength plan key
     | PrimaryRange(lower, upper) when plan.ReadWait = SkipLocked ->
-        match plan.ReadRangeLimit with
-        | Some(direction, count) -> lockPrimarySkipRange live refresh strength plan lower upper direction count
-        | None -> invalidOp "SKIP LOCKED primary ranges require an ordered limit"
+        let direction, count = plan.ReadRangeLimit |> Option.defaultValue (ForwardScan, Int32.MaxValue)
+        lockPrimarySkipRange live refresh strength plan lower upper direction count
     | PrimaryRange(lower, upper) -> ReadPrimary(lockPrimaryRange timeout live refresh strength plan lower upper)
 
 /// Read either side of an indexed NULL test after any exact bound leading key
