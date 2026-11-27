@@ -176,7 +176,7 @@ type private IndexedDocument =
 
 type private PrefixPosting<'id when 'id: comparison> =
     { Rows: Map<'id, int>
-      GramDocumentCount: int64 }
+      TermDocumentCount: int64 }
 
 type private DeletedPostings =
     { Documents: Map<int64, string[]>
@@ -255,10 +255,7 @@ let internal readView (index: Index<'id>) : ReadView<'id> =
       Rules = activeRules index
       DocumentCount = index.Documents.Count
       VisibleDocumentIds = None
-      FlushedThrough =
-          if tracksNgramPostingSources index then
-              index.FlushedThrough |> Option.filter (fun through -> through < index.NextDocumentOrder - 1L)
-          else None
+      FlushedThrough = index.FlushedThrough |> Option.filter (fun through -> through < index.NextDocumentOrder - 1L)
       CachedTerms = index.CachedTerms
       FlushedAccentTerms = index.FlushedAccentTerms
       CachedPostingTails = index.CacheBudget.Tails
@@ -491,16 +488,16 @@ let private prefixKeys (collation: Collation) (token: Token) =
                | None -> () |]
     |> Array.distinct
 
-let private ngramDocumentPrefixes (collation: Collation) (words: (string * Token[])[]) =
+let private documentPrefixes (collation: Collation) tokenizer (words: (string * Token[])[]) =
     // Accent-sensitive searches visit the ordered gram postings directly.
-    if collation.Name = "utf8mb4_0900_as_ci" then [||]
+    if usesAccentSensitivePrefixes collation tokenizer then [||]
     else
-        // InnoDB keeps the first matching gram's TF but tallies every gram's posting.
+        // InnoDB keeps the first matching term's frequency but tallies every term's posting.
         let prefixes = Collections.Generic.Dictionary<string, int * int64>()
 
-        for _, grams in Array.sortBy fst words do
+        for _, tokens in Array.sortBy fst words do
             let keys =
-                grams
+                tokens
                 |> Array.distinctBy _.Text
                 |> Array.collect (prefixKeys collation)
                 |> Array.distinct
@@ -508,18 +505,9 @@ let private ngramDocumentPrefixes (collation: Collation) (words: (string * Token
             for key in keys do
                 match prefixes.TryGetValue key with
                 | true, (frequency, count) -> prefixes.[key] <- frequency, count + 1L
-                | false, _ -> prefixes.Add(key, (grams.Length, 1L))
+                | false, _ -> prefixes.Add(key, (tokens.Length, 1L))
 
         prefixes |> Seq.map (fun (KeyValue(key, counts)) -> key, counts) |> Seq.toArray
-
-let private documentPrefixes collation tokenizer tokens words =
-    match tokenizer with
-    | Words _ ->
-        tokens
-        |> Array.collect (prefixKeys collation)
-        |> Array.countBy id
-        |> Array.map (fun (key, frequency) -> key, (frequency, 0L))
-    | Ngrams _ -> ngramDocumentPrefixes collation words
 
 let private removePosting id key postings =
     match Map.tryFind key postings with
@@ -541,10 +529,10 @@ let private addDeletedDocument order (tokens: Token[]) words prefixes (history: 
 let private deletedTokens (collation: Collation) texts =
     texts |> Array.map (tokenOfFolded collation)
 
-let private removeDeletedDocument collation order texts (history: DeletedPostings) =
+let private removeDeletedDocument collation tokenizer order texts (history: DeletedPostings) =
     let tokens = deletedTokens collation texts
     let words = tokens |> Array.groupBy _.Key
-    let prefixes = ngramDocumentPrefixes collation words
+    let prefixes = documentPrefixes collation tokenizer words
     { Documents = Map.remove order history.Documents
       Words = words |> Array.fold (fun rows (key, _) -> removePosting order key rows) history.Words
       Prefixes = prefixes |> Array.fold (fun rows (key, _) -> removePosting order key rows) history.Prefixes }
@@ -613,7 +601,7 @@ let private removeDocumentCore retainPosting (id: 'id) (index: Index<'id>) : Ind
     | Some indexed ->
         let document = indexed.Content
         let tokens, words = documentPostings document
-        let prefixes = documentPrefixes index.Collation document.Rules.Tokenizer tokens words
+        let prefixes = documentPrefixes index.Collation document.Rules.Tokenizer words
 
         let postings =
             words
@@ -621,12 +609,12 @@ let private removeDocumentCore retainPosting (id: 'id) (index: Index<'id>) : Ind
 
         let prefixPostings =
             prefixes
-            |> Array.fold (fun postings (key, (_, gramCount)) ->
+            |> Array.fold (fun postings (key, (_, termCount)) ->
                 postings
                 |> Map.change key (Option.bind (fun posting ->
                     let remaining = Map.remove id posting.Rows
                     if remaining.IsEmpty then None
-                    else Some { Rows = remaining; GramDocumentCount = posting.GramDocumentCount - gramCount })))
+                    else Some { Rows = remaining; TermDocumentCount = posting.TermDocumentCount - termCount })))
                 index.PrefixPostings
 
         { index with
@@ -642,7 +630,7 @@ let removeDocument id index = removeDocumentCore true id index
 
 let private addDocumentData id (document: Document) (index: Index<'id>) =
     let index = removeDocument id index
-    let postingTokens, words = documentPostings document
+    let _, words = documentPostings document
 
     let postings =
         words
@@ -653,14 +641,14 @@ let private addDocumentData id (document: Document) (index: Index<'id>) =
             index.Postings
 
     let prefixPostings =
-        documentPrefixes index.Collation document.Rules.Tokenizer postingTokens words
+        documentPrefixes index.Collation document.Rules.Tokenizer words
         |> Array.fold
-            (fun postings (key, (frequency, gramCount)) ->
+            (fun postings (key, (frequency, termCount)) ->
                 postings
                 |> Map.change key (fun existing ->
-                    let posting = existing |> Option.defaultValue { Rows = Map.empty; GramDocumentCount = 0L }
+                    let posting = existing |> Option.defaultValue { Rows = Map.empty; TermDocumentCount = 0L }
                     Some { Rows = Map.add id frequency posting.Rows
-                           GramDocumentCount = posting.GramDocumentCount + gramCount }))
+                           TermDocumentCount = posting.TermDocumentCount + termCount }))
             index.PrefixPostings
 
     { index with
@@ -859,7 +847,7 @@ let internal restoreDeletedPostings (saved: Map<int64, string[]>) (index: Index<
             |> Map.fold (fun history order texts ->
                 let tokens = deletedTokens index.Collation texts
                 let words = tokens |> Array.groupBy _.Key
-                let prefixes = ngramDocumentPrefixes index.Collation words
+                let prefixes = documentPrefixes index.Collation index.Rules.Tokenizer words
                 addDeletedDocument order tokens words prefixes history) emptyDeletedPostings
         { index with
             Deleted = history
@@ -965,7 +953,7 @@ let internal publishCachedTerms (baseline: Index<'id>) (index: Index<'id>) =
             else
                 index.Deleted.Documents |> Map.fold (fun history order texts ->
                     if order < baseline.NextDocumentOrder then history
-                    else removeDeletedDocument index.Collation order texts history) index.Deleted
+                    else removeDeletedDocument index.Collation index.Rules.Tokenizer order texts history) index.Deleted
         { index with CachedTerms = terms; CacheBudget = budget; Deleted = deleted }
 
 let internal rulesInUse (index: Index<'id>) =
@@ -1658,23 +1646,20 @@ let private proximityMatches (doc: Token[]) (words: Token[]) distance =
 
         matched
 
-let private ngramPrefixWeight documentCount frequency =
+let private prefixIdf documentCount frequency =
     let documents = float documentCount
     if frequency = documents then idfFloor else log10 (documents / frequency)
 
 let private prefixWeight (view: ReadView<'id>) key (posting: PrefixPosting<'id>) =
-    match view.Rules.Tokenizer with
-    | Ngrams _ when posting.GramDocumentCount > 0L ->
-        let retained =
-            match Map.tryFind key view.Deleted.Prefixes with
-            | Some deleted ->
-                // The single, unmodified prefix path subtracts one per deleted
-                // document after totaling the postings from all matching grams.
-                deleted |> Map.fold (fun count _ grams -> count + grams - 1L) 0L
-            | None -> 0L
-        let frequency = float (posting.GramDocumentCount + retained)
-        ngramPrefixWeight view.DocumentCount frequency
-    | _ -> idf view posting.Rows.Count
+    let retained =
+        match Map.tryFind key view.Deleted.Prefixes with
+        | Some deleted ->
+            // The single, unmodified prefix path subtracts one per deleted
+            // document after totaling the postings from all matching terms.
+            deleted |> Map.fold (fun count _ terms -> count + terms - 1L) 0L
+        | None -> 0L
+    let frequency = float (posting.TermDocumentCount + retained)
+    prefixIdf view.DocumentCount frequency
 
 let private restrictScores (candidateIds: Set<'id> option) (scores: Map<'id, 'value>) =
     match candidateIds with
@@ -1733,7 +1718,7 @@ let private accentPrefixPosting diskOnly (term: Token) (view: ReadView<'id>) =
             if Map.containsKey id found then found else Map.add id frequency found) rows
         deleted <- history |> Map.fold (fun found order grams ->
             found |> Map.change order (fun count -> Some(grams + Option.defaultValue 0L count))) deleted
-    { Rows = rows; GramDocumentCount = total }, (deleted |> Map.values |> Seq.sum), int64 deleted.Count
+    { Rows = rows; TermDocumentCount = total }, (deleted |> Map.values |> Seq.sum), int64 deleted.Count
 
 let private prefixRowsWithCacheOrder candidateIds key (view: ReadView<'id>) (rows: Map<'id, int>) =
     match view.FlushedThrough with
@@ -1769,8 +1754,8 @@ let private prefixRowsWithCacheOrder candidateIds key (view: ReadView<'id>) (row
 let private weightedPrefixRows candidateIds (term: Token) (view: ReadView<'id>) =
     if usesAccentSensitivePrefixes view.Collation view.Rules.Tokenizer then
         let posting, retained, deleted = accentPrefixPosting false term view
-        let frequency = float (posting.GramDocumentCount + retained - deleted)
-        Some(posting.Rows, ngramPrefixWeight view.DocumentCount frequency)
+        let frequency = float (posting.TermDocumentCount + retained - deleted)
+        Some(posting.Rows, prefixIdf view.DocumentCount frequency)
     else
         Map.tryFind term.Key view.PrefixPostings
         |> Option.map (fun posting -> prefixRowsWithCacheOrder candidateIds term.Key view posting.Rows, prefixWeight view term.Key posting)
@@ -2071,7 +2056,7 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                                             |> Array.filter (fun gram -> prefixKeys view.Collation gram |> Array.contains key)
                                             |> Array.distinctBy _.Key
                                         count + int64 grams.Length) 0L
-                                { Rows = rows; GramDocumentCount = frequency })
+                                { Rows = rows; TermDocumentCount = frequency })
                         diskPrefixes.Add(key, posting)
                         posting
                 | _ -> all
@@ -2200,7 +2185,7 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                                     Some posting, retained
                                 else
                                     prefixPosting diskOnly word.Key, retainedPrefixFrequency diskOnly word.Key
-                            let frequency = posting |> Option.map _.GramDocumentCount |> Option.defaultValue 0L
+                            let frequency = posting |> Option.map _.TermDocumentCount |> Option.defaultValue 0L
                             countDocuments word.Key (frequency + retained)
                             match posting with
                             | None -> Map.empty
@@ -2292,7 +2277,7 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                 let frequency = float documentCounts.[key]
                 let occurrences, weight =
                     if sharedKeys.Contains key || (accentSensitive && frequencies.ContainsKey(NgramPrefix key)) then
-                        sharedRowFrequencies.[key].[id], ngramPrefixWeight view.DocumentCount frequency
+                        sharedRowFrequencies.[key].[id], prefixIdf view.DocumentCount frequency
                     elif frequencies.ContainsKey(NgramPrefix key) then
                         let rows =
                             match scoringPrefixes.TryGetValue key with
@@ -2301,7 +2286,7 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                                 let rows = prefixRowsWithCacheOrder candidateIds key view view.PrefixPostings.[key].Rows
                                 scoringPrefixes.Add(key, rows)
                                 rows
-                        rows.[id], ngramPrefixWeight view.DocumentCount frequency
+                        rows.[id], prefixIdf view.DocumentCount frequency
                     else
                         view.Postings.[key].[id], wordFrequencyWeight view frequency
 

@@ -1003,6 +1003,35 @@ let tests =
               Expect.equal (booleanScores replaced "生*" |> ids) [ 3 ] "replacement clears the old generation"
               Expect.equal (naturalScores replaced "中文检" |> ids) [ 1 ] "replacement uses the current generation"
 
+          testCase "word wildcard relevance uses every word posting and the first visited frequency"
+          <| fun _ ->
+              let documents =
+                  [ 1, "京apple 京apple 京apple 京apply 京apex 京apex"
+                    2, "京apply 京apply 京apply"
+                    3, "京apex"
+                    4, "noise"; 5, "sound"; 6, "cloud"; 7, "clear"; 8, "field" ]
+              let bulk = buildIndexWith defaultCollation documents |> flushPostings
+              let cached =
+                  buildIndexWith defaultCollation (List.skip 3 documents)
+                  |> flushPostings
+                  |> fun index ->
+                      (index, List.take 3 documents)
+                      ||> List.fold (fun index (id, body) -> addDocument id body index)
+
+              for index, firstScore in [ bulk, 0.083329938352108; cached, 0.1249949038028717 ] do
+                  let expected = [ 1, firstScore; 2, 0.1249949038028717; 3, 0.041664969176054 ]
+                  let scores = booleanScores index "京ap*"
+                  Expect.equal (scores |> Map.keys |> Seq.toList) [ 1; 2; 3 ] "prefix membership"
+                  for id, score in expected do
+                      closeTo score scores.[id] "MySQL wildcard relevance"
+
+                  let restricted = set [ 1; 3 ]
+                  let windowed = booleanScoresWithin restricted index "京ap*"
+                  let fastPath = tryFlatBooleanScoresDictionaryWithin (Some restricted) index "京ap*" |> Option.get
+                  for id in restricted do
+                      closeTo scores.[id] windowed.[id] "a filter preserves corpus frequency"
+                      closeTo scores.[id] fastPath.[id] "posting and general paths agree"
+
           testCase "ngram prefixes use per-word document frequency and the first matching word"
           <| fun _ ->
               let collation = tryFind "utf8mb4_bin" |> Option.get

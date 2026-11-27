@@ -1614,8 +1614,11 @@ for both parsers, including under binary collations. Phrase anchors use
 retained posting positions and query expansion reads the document spelling.
 [Dotted and dotless I in both legacy general collations](torture/findings/2026-11-27-fulltext-bulk-spelling.md#dotted-and-dotless-i)
 now share a full-text posting key. Recovery syncs historical cache streams
-when their keys merge. Some wildcard searches and other legacy collation
-keys remain open.
+when their keys merge. [Default-parser Boolean wildcard relevance](torture/findings/2026-11-27-fulltext-bulk-spelling.md#boolean-wildcard-relevance)
+now counts matching word postings and uses the first visited posting's
+frequency for each row, including write-cache order. Short wildcard
+comparisons under `utf8mb4_0900_as_cs` and other legacy collation keys
+remain open.
 
 [Exact legacy `WEIGHT_STRING` bytes](torture/findings/2026-11-04-extension-a-exact-weights.md#implicit-ideograph-encoder-follow-up)
 now match all 137,910 adjacent-pair oracle cases across Extension A and the

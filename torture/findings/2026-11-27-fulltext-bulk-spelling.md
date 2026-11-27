@@ -84,6 +84,8 @@ with no regressions. All 260 remaining differences in that matrix are
 Boolean wildcard searches. SQL comparison and weight-string handling
 of dotless I remain open.
 
+## Boolean wildcard relevance
+
 In a default-parser probe, eight documents include three with words
 starting with `京ap`. The first matching document contains three
 `京apple`, one `京apply`, and two `京apex`. The other matching documents
@@ -91,5 +93,31 @@ contain three `京apply` and one `京apex`. For `京ap*`, MySQL uses a
 document frequency of five, the sum of matching word postings, and
 the first visited word's frequency for each row. The first document
 scores about 0.08333 after a bulk build and 0.12499 when it is in the
-write cache. Fsdb currently scores it about 1.08870 in both histories.
+write cache. Fsdb previously scored it about 1.08870 in both histories.
 [MySQL posting frequency accumulation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L2736-L2824)
+
+The default parser now uses the same posting-count rule as ngrams.
+All 72 focused queries match MySQL across bulk, incremental, and
+mixed histories, including required and excluded terms. The bulk
+and mixed results also reproduce from WAL and checkpoints written
+before and after the fix.
+
+The 22,320-query matrix gained 204 matches with no regressions.
+The remaining 56 cases all use `utf8mb4_0900_as_cs` and involve
+Boolean wildcard matching of width variants.
+
+A separate 126-query compound search probe gained 45 matches with
+no regressions. Its remaining differences include repeated wildcard
+terms, exact and wildcard terms with the same key, and soft wildcard
+terms. For `京ap* 京ap*`, MySQL counts both visits toward document
+frequency and applies one relevance contribution for the prefix.
+
+A separate 270-query width probe found 15 divergences, all in
+`utf8mb4_0900_as_cs` ngrams. With rows containing `Ａ花`, `ａ花`,
+`A花`, `a花`, `ａ木`, and `Ａ木`, MySQL returns no rows for `ａ*`
+after a bulk build and a subset from the write cache. The exact
+`ａ花` query matches the two fullwidth flower rows in both histories.
+MySQL uses a prefix comparator to traverse the cache and an InnoDB
+internal `LIKE` cursor for flushed postings.
+[Cache comparator](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/handler/ha_innodb.cc#L7460-L7475)
+[Flushed posting cursor](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0opt.cc#L448-L499)
