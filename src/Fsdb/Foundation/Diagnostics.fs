@@ -59,10 +59,12 @@ let warning code message =
           Message = message
           Information = Map.empty }
 
+let internal numericConversionCondition code message =
+    if strictNumericConversion.Value then raise (RaisedCondition(SqlState.create code message))
+    else warning code message
+
 let numericConversion kind text =
-    let message = sprintf "Truncated incorrect %s value: '%s'" kind text
-    if strictNumericConversion.Value then raise (RaisedCondition(SqlState.create 1292 message))
-    else warning 1292 message
+    numericConversionCondition 1292 (sprintf "Truncated incorrect %s value: '%s'" kind text)
 
 let withStrictNumericConversion strict body =
     DynamicScope.withValue strictNumericConversion strict body

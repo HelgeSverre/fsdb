@@ -1514,6 +1514,8 @@ let private genericFuncCall: Parser<Expr, unit> =
 
                 let arguments =
                     if not qualified && normalizedName = "name_const" then nameConstArguments
+                    elif not qualified && normalizedName = "point" then
+                        pipe2 (expr .>> sym ",") expr (fun x y -> [ x; y ])
                     else sepBy (if not qualified && distinctAggregates.Contains name then distinctArg else expr) (sym ",")
 
                 openParen

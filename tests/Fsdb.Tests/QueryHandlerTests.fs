@@ -5510,6 +5510,48 @@ let tests =
                       [ TypeDouble, 23u, BinaryFlag; TypeGeometry, UInt32.MaxValue, BinaryFlag ] "prepared getter and setter results"
               | Error error -> failtestf "expected coordinates to prepare, got %A" error
 
+          testCase "POINT constructs typed Cartesian geometry from numeric arguments"
+          <| fun _ ->
+              let run = queryFixture [ "USE fsdb" ]
+              let row sql expected =
+                  match run sql with
+                  | ResultSet(_, [ actual ]) -> Expect.equal actual expected sql
+                  | other -> failtestf "%s returned %A" sql other
+
+              row "SELECT HEX(POINT (1,2)), ST_SRID(POINT(1,2)), ST_AsText(POINT(0x0A,b'11'))"
+                  [ Some "000000000101000000000000000000F03F0000000000000040"; Some "0"; Some "POINT(10 3)" ]
+              row "SELECT ST_AsText(POINT('2.5junk','bad')), POINT(NULL,'oops')"
+                  [ Some "POINT(2.5 0)"; None ]
+              match run "SHOW WARNINGS" with
+              | ResultSet(_, warnings) ->
+                  Expect.equal (warnings |> List.map (fun warning -> warning[1])) (List.replicate 3 (Some "1292")) "both coordinates are coerced"
+              | other -> failtestf "expected coordinate warnings, got %A" other
+
+              row "SELECT ST_AsText(POINT(CAST('true' AS JSON),CAST('2.5' AS JSON)))"
+                  [ Some "POINT(1 2.5)" ]
+              TestSupport.Sql.expectError 1210 (run "SELECT POINT(NULL,POINT(1,2))") "geometry is not a coordinate"
+              TestSupport.Sql.expectError 1064 (run "SELECT POINT(1)") "syntax requires two coordinates"
+
+              TestSupport.Sql.expectOk (run "CREATE TABLE ctor_points(id INT PRIMARY KEY,p POINT NOT NULL SRID 0,SPATIAL KEY sx(p))") "create indexed points"
+              TestSupport.Sql.expectOk (run "INSERT INTO ctor_points VALUES(1,POINT(-1.25,2)),(2,POINT(2,3))") "insert constructed points"
+              let probe hint = $"SELECT id FROM ctor_points{hint} WHERE MBRIntersects(p,POINT(-1.25,2))"
+              let plan = run ("EXPLAIN " + probe "") |> TestSupport.Sql.explainRow
+              Expect.equal plan.Key (Some "sx") "constructor supplies the spatial range key"
+              row (probe "") [ Some "1" ]
+              row (probe " IGNORE INDEX (sx)") [ Some "1" ]
+
+              let session = create 1 (Fsdb.Storage.create ())
+              match prepareStatementForSession session "SELECT POINT(?,?) AS p" with
+              | Ok(statement, count) ->
+                  let parameters, columns = preparedMetadata session statement count
+                  let wire metadata =
+                      metadata.TypeId, metadata.ColumnLength, metadata.Flags, metadata.Decimals, metadata.CollationId
+                  Expect.equal (parameters |> List.map wire)
+                      (List.replicate 2 (TypeDouble, 23u, BinaryFlag, 31uy, Some Fsdb.Collation.binaryId)) "coordinate parameters"
+                  Expect.equal (columns |> List.map (fun column -> wire column.Metadata))
+                      [ TypeGeometry, UInt32.MaxValue, BinaryFlag, 0uy, Some Fsdb.Collation.binaryId ] "geometry result"
+              | Error error -> failtestf "expected POINT to prepare, got %A" error
+
           testCase "planar geometry functions retain result metadata without rows"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

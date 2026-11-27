@@ -1573,18 +1573,22 @@ let mysqlTypeOf (v: Value) : byte = (mysqlMetadataOf v).TypeId
 let private leadingNumeric =
     Regex(@"^\s*[-+]?(\d+\.\d*|\.\d+|\d+)([eE][-+]?\d+)?")
 
-let coerceLeadingDouble (s: string) : float * bool =
+let internal tryLeadingDouble (s: string) =
     let m = leadingNumeric.Match s
-    let hasTrailingText = m.Success && not (String.IsNullOrWhiteSpace(s.Substring m.Length))
-
     if m.Success then
         match Double.TryParse(m.Value.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture) with
-        | true, d when Double.IsPositiveInfinity d -> Double.MaxValue, true
-        | true, d when Double.IsNegativeInfinity d -> -Double.MaxValue, true
-        | true, d -> d, hasTrailingText
-        | false, _ -> 0.0, true
+        | true, d when Double.IsPositiveInfinity d -> Some(Double.MaxValue, m.Length, true)
+        | true, d when Double.IsNegativeInfinity d -> Some(-Double.MaxValue, m.Length, true)
+        | true, d -> Some(d, m.Length, false)
+        | false, _ -> None
     else
-        0.0, not (String.IsNullOrWhiteSpace s)
+        None
+
+let coerceLeadingDouble (s: string) : float * bool =
+    match tryLeadingDouble s with
+    | Some(number, consumed, overflow) ->
+        number, (overflow || not (String.IsNullOrWhiteSpace(s.Substring consumed)))
+    | None -> 0.0, not (String.IsNullOrWhiteSpace s)
 
 let tryLeadingDecimal (text: string) =
     let matched = leadingNumeric.Match text

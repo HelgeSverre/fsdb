@@ -6338,13 +6338,40 @@ let private geometrySimplicityFn: Scalar =
         VInt(if geometryIsSimple referenceSystem geometry then 1L else 0L)
     | _ -> nativeParameterCountError "ST_IsSimple"
 
-let private geometryNumericArgument = function
+let internal geometryNumericArgument = function
     | (VString _ | VBytes _ | VEncodedString _) as value ->
         let text = toText value |> Option.defaultValue ""
         let number, truncated = Value.coerceLeadingDouble text
         if truncated then Diagnostics.numericConversion "DOUBLE" text
         number
     | value -> toDouble value
+
+let internal jsonDoubleArgument (json: string) : float * int option =
+    try
+        use document = JsonDocument.Parse json
+        let root = document.RootElement
+        match root.ValueKind with
+        | JsonValueKind.Number -> root.GetDouble(), None
+        | JsonValueKind.True -> 1.0, None
+        | JsonValueKind.False -> 0.0, None
+        | JsonValueKind.String ->
+            let text = root.GetString()
+            match Value.tryLeadingDouble text with
+            | Some(number, _, true) -> number, Some 3155
+            | Some(number, consumed, false) -> number, (if consumed = text.Length then None else Some 3156)
+            | None -> 0.0, Some 3156
+        | _ -> 0.0, Some 3156
+    with :? JsonException -> 0.0, Some 3156
+
+let private pointConstructorFn: Scalar = function
+    | [ VGeometry _; _ ] | [ _; VGeometry _ ] ->
+        raise (SqlError(1210, "Incorrect arguments to point"))
+    | [ x; y ] ->
+        let first = geometryNumericArgument x
+        let second = geometryNumericArgument y
+        if x = VNull || y = VNull then VNull
+        else VGeometry { Srid = 0; Shape = GPoint(first, second) }
+    | _ -> nativeParameterCountError "point"
 
 type private PointCoordinate = XCoordinate | YCoordinate | LatitudeCoordinate | LongitudeCoordinate
 
@@ -7083,6 +7110,7 @@ let private registerGeometryConstructors construct constructors registry =
 let private registerSpatialBuiltins registry =
     let geometry = ColumnWire.parameterMetadataOfType(TGeometry Geometry)
     let geometryResult = { geometry with ColumnLength = UInt32.MaxValue; Decimals = 0uy }
+    let pointResult = { geometryResult with Flags = BinaryFlag; CollationId = Some Collation.binaryId }
     let spatialDouble =
         { ColumnWire.parameterMetadataOfType(TDouble false) with CollationId = Some Collation.binaryId }
     let validityResult =
@@ -7095,6 +7123,7 @@ let private registerSpatialBuiltins registry =
     registry
     |> registerGeometryConstructors geometryFromTextFn wktGeometryConstructors
     |> registerGeometryConstructors geometryFromWkbFn wkbGeometryConstructors
+    |> registerScalarWithSignature "POINT" [ spatialDouble; spatialDouble ] pointResult pointConstructorFn
     |> registerScalar "ST_ASTEXT" (geometryToTextFn "ST_AsText")
     |> registerScalar "ST_ASWKT" (geometryToTextFn "ST_AsWKT")
     |> registerScalar "ASTEXT" (geometryToTextFn "AsText")

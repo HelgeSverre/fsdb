@@ -30,6 +30,5 @@ the relevant range. Binary-protocol preparation matched parameter
 and result types, widths, flags, scale, and collation for all four
 functions and for literal `NULL` arguments.
 
-The numeric constructor `POINT(x,y)` remains a separate gap.
-MySQL accepts `SELECT ST_AsText(POINT(1,2))`. Fsdb resolves `POINT`
-as an unknown function.
+See the subsequent [numeric constructor audit](2026-11-27-point-constructor.md)
+for `POINT(x,y)` support.

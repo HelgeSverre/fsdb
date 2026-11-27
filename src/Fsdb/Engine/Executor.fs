@@ -9604,6 +9604,24 @@ and private validateCharComputedOverflow ctx name expressions values : Result<un
         |> Option.map Error
         |> Option.defaultValue (Ok ())
 
+and private jsonNumericSourceName ctx expression =
+    match expression with
+    | Cast(_, TJson) -> "cast_as_json"
+    | FuncCall(functionName, _) -> functionName.ToLowerInvariant()
+    | Col columnName
+    | QualifiedCol(_, columnName) ->
+        tryDirectColumnForExpr ctx expression
+        |> Option.bind (fun (index, _) -> Map.tryFind index ctx.JsonViewSourceNames)
+        |> Option.defaultValue columnName
+    | _ -> (exprLabel expression).ToLowerInvariant()
+
+and private reportJsonNumericConversion report ctx expression target = function
+    | None -> ()
+    | Some code ->
+        let reason = if code = 3155 then "Out of range" else "Invalid"
+        let source = jsonNumericSourceName ctx expression
+        report code (sprintf "%s JSON value for CAST to %s from column %s at row %d" reason target source (Diagnostics.currentRowNumber ()))
+
 and private prepareCharArgument ctx expression value =
     match value with
     | VDouble number when number >= 18446744073709551616.0 || number <= -9223372036854775808.0 ->
@@ -9614,25 +9632,37 @@ and private prepareCharArgument ctx expression value =
         value
     | VJson json ->
         let word, warningCode = Functions.charJsonInteger json
-        let source =
-            match expression with
-            | Cast(_, TJson) -> "cast_as_json"
-            | FuncCall(functionName, _) -> functionName.ToLowerInvariant()
-            | Col columnName
-            | QualifiedCol(_, columnName) ->
-                tryDirectColumnForExpr ctx expression
-                |> Option.bind (fun (index, _) -> Map.tryFind index ctx.JsonViewSourceNames)
-                |> Option.defaultValue columnName
-            | _ -> (exprLabel expression).ToLowerInvariant()
-        warningCode
-        |> Option.iter (fun code ->
-            let reason = if code = 3155 then "Out of range" else "Invalid"
-            Diagnostics.warning code (sprintf "%s JSON value for CAST to INTEGER from column %s at row %d" reason source (Diagnostics.currentRowNumber ())))
+        reportJsonNumericConversion Diagnostics.warning ctx expression "INTEGER" warningCode
         VUInt(uint64 word)
     | _ -> value
 
+and private preparePointArguments ctx expressions values =
+    let arguments = List.zip expressions values
+    let hasGeometryArgument =
+        arguments |> List.exists (function
+            | _, VGeometry _ -> true
+            | expression, VNull ->
+                metadataOfExpr ctx expression |> Option.exists (fun metadata -> metadata.TypeId = TypeGeometry)
+            | _ -> false)
+    if hasGeometryArgument then
+        raise (Functions.SqlError(1210, "Incorrect arguments to point"))
+
+    arguments |> List.map (fun (expression, value) ->
+        match value with
+        | VJson json ->
+            let number, warningCode = Functions.jsonDoubleArgument json
+            reportJsonNumericConversion Diagnostics.numericConversionCondition ctx expression "DOUBLE" warningCode
+            VDouble number
+        | VNull -> VNull
+        | _ -> VDouble(Functions.geometryNumericArgument value))
+
 and private prepareScalarArguments ctx name expressions values =
     let charBuiltin = isBuiltinCharFunction ctx.Registry name
+    let values =
+        if name.Equals("POINT", System.StringComparison.OrdinalIgnoreCase)
+           && Functions.isUnmodifiedBuiltinScalar name ctx.Registry then
+            preparePointArguments ctx expressions values
+        else values
 
     List.zip expressions values
     |> List.mapi (fun index (expression, value) ->
@@ -16734,12 +16764,18 @@ and private functionalRangeUsesStoredCollation
 and private spatialLookupPredicates scope registry (tref: TableRef) whereExpr : SpatialLookupPredicate list =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
-    let isGeometryTextConstructor (name: string) =
+    let isStaticGeometryConstructor (name: string) args =
         match name.ToUpperInvariant() with
         | "ST_GEOMFROMTEXT"
         | "ST_GEOMETRYFROMTEXT"
         | "GEOMFROMTEXT"
         | "GEOMETRYFROMTEXT" -> Functions.isUnmodifiedBuiltinScalar name registry
+        | "POINT" ->
+            Functions.isUnmodifiedBuiltinScalar name registry
+            && (args |> List.forall (function
+                | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VBit _ | VBinaryLiteral _) -> true
+                | LiteralValue(VDouble number) -> System.Double.IsFinite number
+                | _ -> false))
         | _ -> false
 
     let columnName = function
@@ -16751,7 +16787,7 @@ and private spatialLookupPredicates scope registry (tref: TableRef) whereExpr : 
         match expression with
         | LiteralValue(VGeometry value) when SpatialReferenceSystems.tryFind value.Srid |> Option.isSome ->
             Some value
-        | FuncCall(name, args) when isGeometryTextConstructor name ->
+        | FuncCall(name, args) when isStaticGeometryConstructor name args ->
             let literals =
                 args |> traverse (function LiteralValue value -> Ok value | _ -> Error())
             match literals, Functions.lookup name registry with
