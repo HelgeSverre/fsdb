@@ -955,6 +955,9 @@ including when the locking read is inside a subquery, CTE, or UNION.
 [Offset accounting](torture/findings/2026-11-27-missing-primary-write-gaps.md#found_rows-and-offset)
 counts consumed rows in `FOUND_ROWS()`. An ordered primary-key locking
 scan also honors a positive offset when its limit is zero.
+[User-variable assignments in projections](torture/findings/2026-11-27-missing-primary-write-gaps.md#ordered-projection-assignments)
+run on the output rows for audited scans with independent sort keys,
+including when `SQL_CALC_FOUND_ROWS` counts the rest of the result.
 
 [Unique secondary-key moves](torture/findings/2026-11-27-unique-secondary-key-moves.md)
 now hold the destination key through commit or rollback, including in a

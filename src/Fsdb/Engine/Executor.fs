@@ -1068,7 +1068,12 @@ let private synchronousVariableContext = new System.Threading.ThreadLocal<Variab
 let private routineVariables = System.Threading.AsyncLocal<Map<string, RoutineVariable> ref option>()
 // Trigger statements execute synchronously inside the owning QueryHandler call.
 let private triggerSessionExecutor = new System.Threading.ThreadLocal<(TriggerSessionExecution -> TriggerSessionStatement -> QueryResult) option>()
-let private foundRowsOutputSlice = System.Threading.AsyncLocal<(int option * int option) option>()
+type private FoundRowsOutputSlice =
+    { Limit: int option
+      Offset: int option
+      mutable CountBeforeProjection: uint64 option }
+
+let private foundRowsOutputSlice = System.Threading.AsyncLocal<FoundRowsOutputSlice option>()
 type private FoundRowsOffset = { Expression: Expr; mutable Consumed: int }
 let private foundRowsOffset = new System.Threading.ThreadLocal<FoundRowsOffset option>()
 
@@ -6111,6 +6116,8 @@ let private streamLimited
     (offsetExpr: Expr option)
     (offset: int)
     (limit: int option)
+    (filterUnreturned: ('a -> Result<bool, 'e>) option)
+    (countAll: FoundRowsOutputSlice option)
     (f: 'a -> Result<('key * 'b) option, 'e>)
     (xs: 'a seq)
     : Result<('key * 'b) list, 'e> =
@@ -6118,31 +6125,41 @@ let private streamLimited
     let seen = if distinct then Some(System.Collections.Generic.HashSet<'key>(HashIdentity.Structural)) else None
     let acc = ResizeArray()
     let mutable skipped = 0
+    let mutable afterLimit = 0
     let mutable error : 'e option = None
     let mutable i = 0
     use enumerator = xs.GetEnumerator()
 
     let wantMore () = limit |> Option.forall (fun l -> acc.Count < l)
 
-    while error.IsNone && wantMore () && enumerator.MoveNext() do
+    while error.IsNone && (countAll.IsSome || wantMore ()) && enumerator.MoveNext() do
         if i % cancellationCheckInterval = 0 then
             Limits.checkQueryInterruption token
 
         i <- i + 1
 
-        match f enumerator.Current with
-        | Error e -> error <- Some e
-        | Ok None -> ()
-        | Ok(Some(key, value)) ->
-            let isNew = seen |> Option.forall (fun s -> s.Add key)
-
-            if isNew then
-                if skipped < offset then skipped <- skipped + 1 else acc.Add(key, value)
+        match filterUnreturned with
+        | Some matches when skipped < offset || not (wantMore ()) ->
+            match matches enumerator.Current with
+            | Error e -> error <- Some e
+            | Ok false -> ()
+            | Ok true when skipped < offset -> skipped <- skipped + 1
+            | Ok true -> afterLimit <- afterLimit + 1
+        | _ ->
+            match f enumerator.Current with
+            | Error e -> error <- Some e
+            | Ok None -> ()
+            | Ok(Some(key, value)) ->
+                let isNew = seen |> Option.forall (fun s -> s.Add key)
+                if isNew then
+                    if skipped < offset then skipped <- skipped + 1 else acc.Add(key, value)
 
     match error with
     | Some e -> Error e
     | None ->
         recordConsumedOffset offsetExpr skipped
+        countAll |> Option.iter (fun slice ->
+            slice.CountBeforeProjection <- Some(uint64 skipped + uint64 acc.Count + uint64 afterLimit))
         Ok(List.ofSeq acc)
 
 let private hashBuckets
@@ -23685,7 +23702,7 @@ and private runGroupedSelect
                         |> Result.map ignore
                     let returned =
                         match select.CalculateFoundRows, foundRowsOutputSlice.Value with
-                        | true, Some(limit, offset) -> limited |> applyLimitOffset limit offset
+                        | true, Some slice -> limited |> applyLimitOffset slice.Limit slice.Offset
                         | _ -> limited
                     let restored =
                         if returnedAssignments.IsEmpty then Ok ()
@@ -25992,34 +26009,53 @@ and private runSelect
         | QualifiedCol _ as column -> Some column
         | _ -> None
 
-    let directOrderExpressions =
-        // These functions have no side effects and do not supply the order
-        // key. MySQL evaluates their projections after selecting direct-key
-        // top-N rows, including their row-indexed conversion diagnostics.
-        let rec deferableProjection = function
-            | Col _
-            | QualifiedCol _
-            | Lit _ -> true
-            | FuncCall(name, arguments)
-                when (name.Equals("HEX", System.StringComparison.OrdinalIgnoreCase)
-                      || name.Equals("CHAR", System.StringComparison.OrdinalIgnoreCase)
-                      || name.Equals("CHAR_USING", System.StringComparison.OrdinalIgnoreCase))
-                     && Functions.isUnmodifiedBuiltinScalar name registry ->
-                arguments |> List.forall deferableProjection
-            | _ -> false
+    // MySQL evaluates these built-ins after direct-key top-N selection,
+    // including their row-indexed conversion diagnostics.
+    let rec deferableProjection = function
+        | Col _ | QualifiedCol _ | Lit _ -> true
+        | FuncCall(name, arguments)
+            when (name.Equals("HEX", System.StringComparison.OrdinalIgnoreCase)
+                  || name.Equals("CHAR", System.StringComparison.OrdinalIgnoreCase)
+                  || name.Equals("CHAR_USING", System.StringComparison.OrdinalIgnoreCase))
+                 && Functions.isUnmodifiedBuiltinScalar name registry ->
+            arguments |> List.forall deferableProjection
+        | _ -> false
 
-        if projections |> List.forall (_.Expression >> deferableProjection) then
-            let rec collect resolved =
-                function
+    let rec orderedScalar allowAssignments = function
+        | UserVariable _ | Star _ when allowAssignments -> true
+        | AssignUserVariable(_, value) when allowAssignments -> orderedScalar true value
+        | Neg value | RuntimeExpression value -> orderedScalar allowAssignments value
+        | BinOp((Add | Sub | SignedSub | Mul | Div | IntDiv), left, right) ->
+            orderedScalar allowAssignments left && orderedScalar allowAssignments right
+        | expression -> deferableProjection expression
+
+    let ordinaryDirectProjections = projections |> List.forall (_.Expression >> deferableProjection)
+    let deferredAssignments =
+        not ordinaryDirectProjections && not select.Distinct && select.Having.IsNone
+        && (not orderBy.IsEmpty || offset.IsSome || select.CalculateFoundRows)
+        && (projections |> List.exists (_.Expression >> Expression.exists (function AssignUserVariable _ -> true | _ -> false)))
+        && (projections |> List.forall (_.Expression >> orderedScalar true))
+    let orderedAssignments =
+        deferredAssignments && not orderBy.IsEmpty
+        && not (whereExpr |> Option.exists (Expression.exists (function UserVariable _ | AssignUserVariable _ -> true | _ -> false)))
+
+    let directOrderExpressions =
+        if ordinaryDirectProjections || orderedAssignments then
+            let rec collect resolved = function
                 | [] -> Some(List.rev resolved)
                 | (expression, _) :: rest ->
-                    match directOrderExpression expression with
+                    let key =
+                        if orderedAssignments then
+                            // Order aliases and positions can refer back to the assignment itself.
+                            directOrderExpression expression
+                            |> Option.orElseWith (fun () -> Some(resolveOrderExpr expression))
+                            |> Option.filter (orderedScalar false)
+                        else directOrderExpression expression
+                    match key with
                     | Some direct -> collect (direct :: resolved) rest
                     | None -> None
-
             collect [] orderBy
-        else
-            None
+        else None
 
     // A non-aggregate, GROUP-BY-less `HAVING` (e.g. `HAVING v > 5`) filters
     // per-row exactly like `WHERE` — `runGroupedSelect` only owns the case
@@ -26192,7 +26228,13 @@ and private runSelect
                     else
                         Ok None)
 
-            match rows |> streamLimited select.Distinct select.Offset (Option.defaultValue 0 offset) limit evalPaired with
+            let countAll =
+                if deferredAssignments && select.CalculateFoundRows && not metadataProbe.Value then foundRowsOutputSlice.Value
+                else None
+            let streamLimit, streamOffset =
+                match countAll with Some slice -> slice.Limit, slice.Offset | None -> limit, offset
+            let filterUnreturned = if deferredAssignments then Some matches else None
+            match rows |> streamLimited select.Distinct select.Offset (Option.defaultValue 0 streamOffset) streamLimit filterUnreturned countAll evalPaired with
             | Error(code, message) -> Err(code, message), [], []
             | Ok limited -> ResultSet(colNames, limited |> List.map (snd >> fst)), typesOf (limited |> List.map (snd >> snd)), limited |> List.map (snd >> snd)
 
@@ -26240,8 +26282,13 @@ and private runSelect
                     keyed
                     |> List.sortWith (fun (left, _) (right, _) -> compareByOrderKeys directions left right)
                     |> List.map snd
-                    |> applyTrackedLimitOffset select.Offset limit offset
-                match sorted |> traverse projectRow with
+                let selected =
+                    match orderedAssignments, select.CalculateFoundRows, foundRowsOutputSlice.Value with
+                    | true, true, Some slice when not metadataProbe.Value ->
+                        slice.CountBeforeProjection <- Some(uint64 sorted.Length)
+                        sorted |> applyLimitOffset slice.Limit slice.Offset
+                    | _ -> sorted |> applyTrackedLimitOffset select.Offset limit offset
+                match selected |> traverse projectRow with
                 | Error(code, message) -> Err(code, message), [], []
                 | Ok projected ->
                     let limited = projected |> List.map pairOf
@@ -26484,7 +26531,7 @@ let private selectMutationTargets
 
     if orderBy.IsEmpty then
         rows
-        |> streamLimited false None 0 limit (fun ((_, row) as positioned) ->
+        |> streamLimited false None 0 limit None None (fun ((_, row) as positioned) ->
             matches row
             |> Result.map (fun matched ->
                 if matched then Some((), positioned) else None))
@@ -29698,16 +29745,19 @@ let runTopLevelSelect
 
         let limit = select.Limit |> Option.map rowCount
         let offset = select.Offset |> Option.map rowCount
-        // Counting evaluates all rows, but grouped assignment replay belongs only to returned rows.
+        let slice = { Limit = limit; Offset = offset; CountBeforeProjection = None }
+        // Grouped assignments replay on output rows. Ordered independent
+        // assignments can also defer projection until the output slice is known.
         let result, types, values =
-            DynamicScope.withValue foundRowsOutputSlice (Some(limit, offset)) (fun () ->
+            DynamicScope.withValue foundRowsOutputSlice (Some slice) (fun () ->
                 runSelectStmt store registry dbName unbounded None)
 
-        match result with
-        | ResultSet(columns, rows) ->
+        match result, slice.CountBeforeProjection with
+        | ResultSet _, Some count -> result, types, Some count, values
+        | ResultSet(columns, rows), None ->
             let limitedValues = applyLimitOffset limit offset values
             ResultSet(columns, applyLimitOffset limit offset rows), types, Some(uint64 values.Length), limitedValues
-        | error -> error, types, None, []
+        | error, _ -> error, types, None, []
     else
         let offset = trackFoundRowsOffset executable.Offset
         let result, types, values =

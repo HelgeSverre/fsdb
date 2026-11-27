@@ -14534,6 +14534,30 @@ let tests =
               Expect.equal count (ResultSet([ "FOUND_ROWS()" ], [ [ Some "2" ] ])) "only unlocked offsets count"
               Expect.equal untouched (ResultSet([ "id" ], [ [ Some "4" ] ])) "the locking scan stops at the offset"
 
+          testCase "ordered projections assign user variables on returned rows in output order"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE assignment_order(id INT,n INT)"
+              let session, _ = handle session "INSERT INTO assignment_order VALUES(3,30),(1,10),(4,40),(2,20)"
+              let session, _ = handle session "CREATE TABLE assignment_indexed(id INT PRIMARY KEY,n INT)"
+              let session, _ = handle session "INSERT INTO assignment_indexed SELECT * FROM assignment_order"
+              for sql, expected, calls, found in
+                  [ "SELECT id,@seq:=@seq+1 FROM assignment_order ORDER BY id DESC LIMIT 1 OFFSET 1", [ [ "3"; "1" ] ], "1", "2"
+                    "SELECT -id AS picked,10+(@seq:=@seq+1) FROM assignment_order ORDER BY picked LIMIT 1 OFFSET 1", [ [ "-3"; "11" ] ], "1", "2"
+                    "SELECT id,@seq,@seq:=@seq+n FROM assignment_order ORDER BY id LIMIT 2 OFFSET 1", [ [ "2"; "0"; "20" ]; [ "3"; "20"; "50" ] ], "50", "3"
+                    "SELECT x.id,@seq:=@seq+x.n FROM assignment_indexed x ORDER BY x.id LIMIT 1 OFFSET 1", [ [ "2"; "20" ] ], "20", "2"
+                    "SELECT id,@seq:=@seq+1 FROM assignment_order LIMIT 1 OFFSET 1", [ [ "1"; "1" ] ], "1", "2"
+                    "SELECT SQL_CALC_FOUND_ROWS id,@seq:=@seq+1 FROM assignment_order LIMIT 1 OFFSET 1", [ [ "1"; "1" ] ], "1", "4"
+                    "SELECT SQL_CALC_FOUND_ROWS id,@seq:=@seq+1 FROM assignment_order ORDER BY id LIMIT 1 OFFSET 1", [ [ "2"; "1" ] ], "1", "4"
+                    "SELECT id,@seq:=@seq+1 AS picked FROM assignment_order ORDER BY picked LIMIT 1 OFFSET 1", [ [ "1"; "2" ] ], "4", "2" ] do
+                  let session, _ = handle session "SET @seq=0"
+                  let session, result = handle session sql
+                  match result, handle session "SELECT @seq,FOUND_ROWS()" |> snd with
+                  | ResultSet(_, rows), ResultSet(_, values) ->
+                      Expect.equal rows (expected |> List.map (List.map Some)) sql
+                      Expect.equal values [ [ Some calls; Some found ] ] sql
+                  | other -> failtestf "%s: expected projected rows and session state, got %A" sql other
+
           testCase "LAST_INSERT_ID() stays 0 for an explicit AUTO_INCREMENT id, unlike the OK packet's last_insert_id"
           <| fun _ ->
               // Real MySQL 8.4: PDO::lastInsertId()/the OK packet reports an

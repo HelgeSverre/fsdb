@@ -218,7 +218,27 @@ and READ UNCOMMITTED it checks those records without retaining the locks.
 The offset counts matched MySQL 8.4.11 across 411 schedules in memory and
 with WAL enabled. These covered streaming and ordered reads, DISTINCT,
 grouping, windows, prepared statements, nested queries, set operations,
-and locking reads. The existing session-variable assignment divergence
-in ordered projections was also reproduced. With `SELECT @n:=@n+1 ...
-ORDER BY id LIMIT 1 OFFSET 2`, MySQL evaluates the assignment for the
-returned row. Fsdb still evaluates it on the rows entering the sort.
+and locking reads.
+
+## Ordered projection assignments
+
+In the audited MySQL 8.4.11 queries, a projection such as `@seq:=@seq+1`
+uses the output order when the sort key is independent of the assignment.
+`SELECT id,@seq:=@seq+1 FROM t ORDER BY id DESC LIMIT 1 OFFSET 1`
+increments an initialized `@seq` once. The offset row and rows beyond the
+limit leave it alone. Fsdb now evaluates these projections after the
+filesort slice or while emitting rows from the ordered index.
+
+`SQL_CALC_FOUND_ROWS` still counts matching rows outside the slice. A
+division-by-zero warning from a projection appears only when the affected
+row is projected in the audited example. The comparison covered 180
+cases in memory and with WAL enabled, including arithmetic sort keys,
+aliases, positions, assignment order within a row, and warnings. The
+numeric comparison ignored the existing DECIMAL display-scale difference
+for `@seq:=1/(id-1)`.
+
+Sort keys and predicates that depend on the assigned variable, along
+with DISTINCT and HAVING, can use plan-dependent evaluation. Those
+shapes remain outside this coverage. MySQL leaves user-variable
+evaluation order undefined in its manual.
+[MySQL user-defined variables](https://dev.mysql.com/doc/refman/8.4/en/user-variables.html)
