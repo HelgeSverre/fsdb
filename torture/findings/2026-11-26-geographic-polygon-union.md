@@ -189,3 +189,34 @@ Sixteen of 18 ordered controls match exact WKT. The other two
 combined multipart areas, boundary lines, and points and differ
 in coordinate serialization. The 612 earlier polygon cases and
 432 mixed difference cases retained their previous Fsdb outputs.
+
+### Mixed collection symmetric difference
+
+For two collections, `ST_SymDifference` applies the first collection's
+normalized polygon, line, and point groups to the second in sequence.
+Each group sees the result of the previous operation. An empty group
+can still normalize the intermediate collection. For a single shape
+against a collection, the shape's dimension determines the order of
+the result groups. Singleton multipart members can remain wrapped
+inside a mixed result. An empty collection on the left preserves
+the nested members of the right operand in the audited control.
+[MySQL collection symmetric difference](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/symdifference_functor.cc#L721-L750)
+
+The audit reused the 72 pairs, both directions, and three SRIDs from
+the difference and intersection audits. All 432 cases returned error
+1235 at `5411a2ec`. All now return the same SQL geometry type as pinned
+MySQL 8.4.11, and memory and WAL results agree. The outputs are within
+0.0001° planar Hausdorff distance in 388 cases. Normalized members and
+vertices match within 10⁻⁸ degrees in 370 cases, and exact WKT matches
+in 250 cases. Some area crossings still retain a lobe in Fsdb that
+MySQL drops. The resulting polygon boundaries can also change how
+later line and point members are clipped.
+
+Three cases needed to keep the area rings already assembled by the
+overlay when a second dissolve failed at rounded crossings. Fsdb
+still clips the intermediate lower-dimensional members against those
+rings. All 20 ordered controls match normalized members and vertices
+within 10⁻⁸ degrees, including the asymmetric empty collection case.
+Twelve of the earlier 612 polygon cases now match serialized member
+order exactly. The other 600 polygon cases and the 864 mixed
+difference and intersection cases returned their previous results.

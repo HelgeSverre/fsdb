@@ -764,6 +764,50 @@ let tests =
                         Expect.equal (call "ST_SRID" [ result ]) (VInt 4326L) "the operation retains the SRID"
                         Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"{operation} of {left} and {right}"
 
+                testCase "geographic collection symmetric difference keeps multipart dimension groups"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let area = "POLYGON((0 -2,6 -2,6 2,0 2,0 -2))"
+                    let inner = "POLYGON((2 -1,4 -1,4 1,2 1,2 -1))"
+                    let line = "LINESTRING(-4 0,10 0)"
+                    let point = "POINT(-5 0)"
+                    let source = $"GEOMETRYCOLLECTION({area},GEOMETRYCOLLECTION({line},{point},POINT(3 0),POINT(8 0)))"
+                    let mask = $"GEOMETRYCOLLECTION({inner},LINESTRING(6 0,8 0),{point})"
+                    let hole = "POLYGON((0 -2,6 -2,6 2,0 2,0 -2),(2 -1,2 1,4 1,4 -1,2 -1))"
+                    let symDifference first second = call "ST_SymDifference" [ geometry first; geometry second ]
+                    for operand, expected in
+                        [ area, $"GEOMETRYCOLLECTION({hole},MULTILINESTRING((6 0,8 0)),MULTIPOINT((-5 0)))"
+                          line, "GEOMETRYCOLLECTION(MULTIPOLYGON(((2 -1,4 -1,4 1,2 1,2 -1))),MULTILINESTRING((-4 0,2 0),(4 0,6 0),(8 0,10 0)),MULTIPOINT((-5 0)))"
+                          point, "GEOMETRYCOLLECTION(MULTILINESTRING((6 0,8 0)),MULTIPOLYGON(((2 -1,4 -1,4 1,2 1,2 -1))))" ] do
+                        for left, right in [ operand, mask; mask, operand ] do
+                            let result = symDifference left right
+                            Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"symmetric difference of {left} and {right}"
+
+                    for left, right in [ source, mask; mask, source ] do
+                        match symDifference left right with
+                        | VGeometry { Srid = 4326
+                                      Shape = GGeometryCollection [
+                                          { Shape = GMultiLineString [ [ (0.0, -4.0); (0.0, cut) ]; [ (0.0, 8.0); (0.0, 10.0) ] ] };
+                                          { Shape = GMultiPolygon [ rings ] } ] } ->
+                            Expect.isLessThan (abs cut) 1e-10 "the exterior line stops at the original area's boundary"
+                            let polygon = VGeometry { Srid = 4326; Shape = GPolygon rings }
+                            Expect.equal (call "ST_AsText" [ polygon; axis ]) (VString hole) "the symmetric difference keeps the hole"
+                        | actual -> failtestf "expected grouped lines and a grouped polygon, got %A" actual
+
+                    let emptyFirst = symDifference "GEOMETRYCOLLECTION EMPTY" source
+                    Expect.equal (call "ST_AsText" [ emptyFirst; axis ]) (VString source) "an empty first collection preserves the nested source"
+
+                    let crossing = "GEOMETRYCOLLECTION(POLYGON((8 -36,13 -36,13 -30,8 -30,8 -36)),LINESTRING(6 -33,6 -30),POINT(2 -33))"
+                    let nested = "GEOMETRYCOLLECTION(POLYGON((5 -35,11 -35,11 -31,5 -31,5 -35)),GEOMETRYCOLLECTION(LINESTRING(1 -33,15 -33),POINT(0 -33),POINT(8 -33),POINT(13 -33)))"
+                    match symDifference crossing nested with
+                    | VGeometry { Shape = GGeometryCollection [
+                                      { Shape = GMultiPoint _ };
+                                      { Shape = GMultiLineString lines };
+                                      { Shape = GMultiPolygon (_ :: _) } ] } ->
+                        Expect.hasLength lines 3 "the lower-dimensional pass can clip against separately rounded area rings"
+                    | actual -> failtestf "expected points, three lines, and an area from the crossing, got %A" actual
+
                 testCase "geographic collection intersection keeps ordered dimension results"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"

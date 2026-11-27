@@ -3538,9 +3538,10 @@ implementation effort:
    normalizes areas, lines, and points before applying the mask.
    [Geographic collection intersection](torture/findings/2026-11-26-geographic-polygon-union.md#mixed-collection-intersection)
    also clips normalized dimensions against each other and retains
-   the collection's result order. Some near-boundary points and member
-   grouping still differ. Mixed-collection symmetric difference remains
-   open.
+   the collection's result order. [Geographic collection symmetric difference](torture/findings/2026-11-26-geographic-polygon-union.md#mixed-collection-symmetric-difference)
+   applies normalized area, line, and point groups in sequence. Some
+   near-boundary points, member grouping, and rounded area crossings
+   still differ.
    Broader geographic polygon relation and precision rules remain open.
    Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
    and [line-to-line distance](torture/findings/2026-10-11-geographic-line-line-distance.md)

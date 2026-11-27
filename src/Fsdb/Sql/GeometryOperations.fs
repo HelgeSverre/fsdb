@@ -3964,16 +3964,18 @@ let private dissolveGeographicAreas referenceSystem polygons =
     ||> List.fold (fun state polygon ->
         state |> Option.bind (fun existing -> tryGeographicPolygonUnion referenceSystem (polygon :: existing)))
 
+let private geographicExteriorMembers referenceSystem srid points lines areas =
+    subtractGeographicPolygonsFromLines referenceSystem srid lines areas
+    |> Option.map (fun exterior ->
+        let uncovered point =
+            not (geographicAreaCoversPoint referenceSystem areas point
+                 || geographicLineworkCoversPoint referenceSystem exterior point)
+        List.filter uncovered points, exterior, areas)
+
 let private geographicUncoveredMembers referenceSystem srid shape =
     let points, lines, polygons = collectionParts shape
     dissolveGeographicAreas referenceSystem polygons
-    |> Option.bind (fun areas ->
-        subtractGeographicPolygonsFromLines referenceSystem srid lines areas
-        |> Option.map (fun exterior ->
-            let uncovered point =
-                not (geographicAreaCoversPoint referenceSystem areas point
-                     || geographicLineworkCoversPoint referenceSystem exterior point)
-            List.filter uncovered points, exterior, areas))
+    |> Option.bind (geographicExteriorMembers referenceSystem srid points lines)
 
 let internal geographicCollectionEquals referenceSystem (first: Geometry) (second: Geometry) =
     let withoutCoveredMembers geometry =
@@ -4102,6 +4104,86 @@ let private tryGeographicCollectionIntersection referenceSystem srid intersectMe
         | _ -> tryOverlayGeographicGroups groups (fun group -> intersectMember group other) compose
 
     geographicCollectionGroups referenceSystem srid collection |> Option.bind intersectGroups
+
+let private tryGeographicCollectionSymmetricDifference referenceSystem srid overlayMember left right =
+    let kind = OverlayKind.SymmetricDifference
+    let multiPoints points = if List.isEmpty points then GEmpty else GMultiPoint points
+    let multiLines lines = if List.isEmpty lines then GEmpty else GMultiLineString lines
+    let multiPolygons polygons = if List.isEmpty polygons then GEmpty else GMultiPolygon polygons
+    let compose = List.filter ((<>) GEmpty) >> geographicOverlayCollection srid >> narrowGeographicOverlayShape
+    let subtractAreas = subtractGeographicPolygonsFromLines referenceSystem srid
+    let pointResult shape = geographicPointMembers shape |> Option.defaultValue []
+
+    let normalized = geographicUncoveredMembers referenceSystem srid
+    let normalizeIntermediate collection =
+        let points, lines, polygons = collectionParts collection
+        // The area overlay has already assembled these rings. If rounding
+        // prevents a second dissolve, clip the lower dimensions against them.
+        let areas = dissolveGeographicAreas referenceSystem polygons |> Option.defaultValue polygons
+        geographicExteriorMembers referenceSystem srid points lines areas
+
+    let againstCollection normalizeCollection source collection =
+        normalizeCollection collection
+        |> Option.bind (fun (points, lines, polygons) ->
+            let withPoints sourcePoints =
+                let outside =
+                    overlayGeographicPoints kind source sourcePoints (GMultiPoint points) points
+                    |> pointResult
+                    |> List.filter (fun point ->
+                        not (geographicLineworkCoversPoint referenceSystem lines point
+                             || geographicAreaCoversPoint referenceSystem polygons point))
+                Some(compose [ multiPoints outside; multiLines lines; multiPolygons polygons ])
+
+            let withLines sourceLines =
+                subtractAreas sourceLines polygons
+                |> Option.bind (tryGeographicLineOverlay referenceSystem kind srid lines)
+                |> Option.map (fun remaining ->
+                    let outside = points |> List.filter (geographicLineworkCoversPoint referenceSystem sourceLines >> not)
+                    compose [ multiPolygons polygons; remaining; multiPoints outside ])
+
+            let withPolygons sourcePolygons =
+                let areas =
+                    match sourcePolygons, polygons with
+                    | [], _ -> Some(geographicAreaShape polygons)
+                    | _, [] -> Some(orientGeographicPolygons referenceSystem source |> narrowGeographicOverlayShape)
+                    | _ -> tryGeographicPolygonOverlay referenceSystem kind srid sourcePolygons polygons
+                areas
+                |> Option.bind (fun area ->
+                    subtractAreas lines sourcePolygons
+                    |> Option.map (fun outsideLines ->
+                        let outside = points |> List.filter (geographicAreaCoversPoint referenceSystem sourcePolygons >> not)
+                        compose [ area; multiLines outsideLines; multiPoints outside ]))
+
+            match source with
+            | GPoint(latitude, longitude) -> withPoints [ latitude, longitude ]
+            | GMultiPoint sourcePoints -> withPoints sourcePoints
+            | GLineString line -> withLines [ line ]
+            | GMultiLineString sourceLines -> withLines sourceLines
+            | GPolygon polygon -> withPolygons [ polygon ]
+            | GMultiPolygon sourcePolygons -> withPolygons sourcePolygons
+            | _ -> None)
+
+    let apply normalizeCollection source other =
+        match other with
+        | GGeometryCollection _ -> againstCollection normalizeCollection source other
+        | _ ->
+            match source, other with
+            | (GMultiPoint [] | GMultiLineString [] | GMultiPolygon []), _ -> Some other
+            | _, GEmpty -> Some(narrowGeographicOverlayShape source)
+            | _ -> overlayMember source other
+
+    match left, right with
+    | GEmpty, _ -> Some right
+    | (GGeometryCollection _ as collection), (GGeometryCollection _ | GEmpty) ->
+        geographicUncoveredMembers referenceSystem srid collection
+        |> Option.bind (fun (points, lines, polygons) ->
+            // Apply each dimension to the previous result. An empty group
+            // can still normalize a collection produced by an earlier group.
+            apply normalized (GMultiPolygon polygons) right
+            |> Option.bind (apply normalizeIntermediate (GMultiLineString lines))
+            |> Option.bind (apply normalizeIntermediate (GMultiPoint points)))
+    | GGeometryCollection _, _ -> againstCollection normalized right left
+    | _ -> againstCollection normalized left right
 
 let rec internal tryGeographicOverlay referenceSystem kind (first: Geometry) (second: Geometry) =
     let result shape = { Srid = first.Srid; Shape = shape }
@@ -4252,10 +4334,6 @@ let rec internal tryGeographicOverlay referenceSystem kind (first: Geometry) (se
         | Some points, None when leftCollection && not rightCollection -> withNonpoint left true points right
         | None, Some points when rightCollection && not leftCollection -> withNonpoint right false points left
         | _ ->
-            let tryAreas shape =
-                let points, lines, polygons = collectionParts shape
-                if points.IsEmpty && lines.IsEmpty then Some polygons else None
-
             match kind with
             | OverlayKind.Union -> unionAreas ()
             | OverlayKind.Difference ->
@@ -4277,9 +4355,10 @@ let rec internal tryGeographicOverlay referenceSystem kind (first: Geometry) (se
                         |> Option.map _.Shape
                     tryGeographicCollectionIntersection referenceSystem first.Srid intersectMember collection other
             | OverlayKind.SymmetricDifference ->
-                match tryAreas left, tryAreas right with
-                | Some a, Some b -> tryGeographicPolygonOverlay referenceSystem kind first.Srid a b
-                | _ -> None
+                let overlayMember firstShape secondShape =
+                    tryGeographicOverlay referenceSystem OverlayKind.SymmetricDifference (result firstShape) (result secondShape)
+                    |> Option.map _.Shape
+                tryGeographicCollectionSymmetricDifference referenceSystem first.Srid overlayMember left right
 
     let shape =
         match first.Shape, second.Shape with
