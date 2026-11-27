@@ -404,6 +404,55 @@ let tests =
               Expect.equal (rows store "SELECT id,n FROM items ORDER BY id") [ [ Some "1"; Some "10" ] ]
                   "only the four visible target rows are deleted"
 
+          testCase "EXPLAIN DELETE plans merged views with the caller's explain privileges"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable root = Fsdb.Session.create 1 store
+              let apply sql =
+                  let next, result = Fsdb.QueryHandler.handle root sql
+                  root <- next
+                  expectOk result sql
+              for sql in
+                  [ "CREATE TABLE explain_items(id INT PRIMARY KEY,n INT)"
+                    "INSERT INTO explain_items VALUES(1,10),(2,20),(3,30)"
+                    "CREATE VIEW explain_metric AS SELECT n*2 AS score FROM explain_items AS t WHERE id=2"
+                    "CREATE VIEW explain_outer AS SELECT score+1 AS score FROM explain_metric"
+                    "CREATE ALGORITHM=TEMPTABLE VIEW explain_materialized AS SELECT n*2 AS score FROM explain_items"
+                    "CREATE USER planner"
+                    "GRANT SELECT, DELETE, SHOW VIEW ON fsdb.explain_outer TO planner"
+                    "GRANT SELECT(score), SHOW VIEW ON fsdb.explain_metric TO planner" ] do
+                  apply sql
+
+              let explain = "EXPLAIN DELETE FROM explain_outer AS v WHERE v.score=41"
+              let expectPlan result =
+                  match result with
+                  | ResultSet(columns, [ row ]) ->
+                      let values = List.zip columns row |> Map.ofList
+                      Expect.equal values["table"] (Some "t") "the base alias is visible in the plan"
+                      Expect.equal values["key"] (Some "PRIMARY") "the saved view predicate uses its base index"
+                      Expect.equal values["type"] (Some "range") "single-table DELETE shows a primary-key range"
+                  | other -> failtestf "expected one DELETE plan row, got %A" other
+
+              expectPlan (Fsdb.QueryHandler.handle root explain |> snd)
+              let planner = { Fsdb.Session.create 2 store with User = "planner" }
+              TestSupport.Sql.expectError 1345 (Fsdb.QueryHandler.handle planner explain |> snd) "plan disclosure needs SELECT on the base"
+              apply "GRANT SELECT(n) ON fsdb.explain_items TO planner"
+              expectPlan (Fsdb.QueryHandler.handle planner explain |> snd)
+              apply "REVOKE SELECT(n) ON fsdb.explain_items FROM planner"
+              apply "CREATE ROLE explain_reader"
+              apply "GRANT SELECT(n) ON fsdb.explain_items TO explain_reader"
+              apply "GRANT explain_reader TO planner"
+              let activePlanner, activated = Fsdb.QueryHandler.handle planner "SET ROLE explain_reader"
+              expectOk activated "activate the plan disclosure role"
+              expectPlan (Fsdb.QueryHandler.handle activePlanner explain |> snd)
+              TestSupport.Sql.expectError 1345 (Fsdb.QueryHandler.handle planner explain |> snd) "an inactive role does not allow disclosure"
+              apply "REVOKE SHOW VIEW ON fsdb.explain_metric FROM planner"
+              TestSupport.Sql.expectError 1345 (Fsdb.QueryHandler.handle activePlanner explain |> snd) "nested view definitions are protected"
+              TestSupport.Sql.expectError 1288 (Fsdb.QueryHandler.handle root "EXPLAIN DELETE FROM explain_materialized WHERE score=40" |> snd)
+                  "a materialized view cannot be planned for deletion"
+              Expect.equal (rows store "SELECT id FROM explain_items ORDER BY id") [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]
+                  "EXPLAIN leaves the rows untouched"
+
           testCase "a layer over a materialized view cannot write its base rows"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

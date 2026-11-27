@@ -124,8 +124,31 @@ WAL test also matched MySQL's row-lock timeout and deleted the row after the
 holding transaction rolled back.
 
 For fully computed projections, UPDATE and INSERT refuse the write with
-different diagnostics from MySQL. EXPLAIN DELETE still names the view
-and omits the base table estimate that MySQL reports.
+different diagnostics from MySQL.
+
+## EXPLAIN DELETE through merged views
+
+Standalone DELETE and its EXPLAIN share the view rewrite and predicate.
+The plan names the permanent base table or its saved alias and uses the
+mutation's index candidate selection. Caller expressions still bind to the
+view's exposed columns. A materialized view reports 1288 before checking
+the caller's predicate. Direct single-table DELETE likewise reports
+primary-key equality as a range, including a folded arithmetic bound.
+
+The pinned MySQL 8.4.11 comparison matched five traditional primary-key
+plans and eleven audited privilege decisions in memory and with WAL.
+The plan needed SHOW VIEW on both saved-view layers, SELECT on an
+underlying column, and SELECT access to the extra table read by a
+subquery. Active role grants satisfy these checks, and inactive grants
+do not. A temporary table with the same name did not shadow the base
+table in the view plan. A checkpoint restart preserved the plans and
+base rows.
+
+JSON omits MySQL's DELETE marker and some index and condition fields.
+The saved-subquery plan uses different block numbering and access labels,
+and unknown-column diagnostics still name a different clause. View
+expansion stays on the original path when rewriting a subquery would
+change the statement's temporary, CTE, or cross-schema namespace.
 
 ## Direct joined updates
 

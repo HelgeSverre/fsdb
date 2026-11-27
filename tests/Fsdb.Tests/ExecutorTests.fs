@@ -1837,7 +1837,7 @@ let tests =
                         ()
                     | other -> failtestf "expected a const plan for the alias-qualified lookup, got %A" other
 
-                testCase "row-independent numeric key expressions use const access"
+                testCase "row-independent numeric key expressions use indexed access"
                 <| fun _ ->
                     let mutable calls = 0
 
@@ -1903,9 +1903,9 @@ let tests =
                     | other -> failtestf "expected a const UPDATE plan for a row-independent key, got %A" other
 
                     match runDefault store "EXPLAIN DELETE FROM users WHERE id = 2 * 2" with
-                    | ResultSet(_, [ [ _; Some "DELETE"; _; _; Some "const"; _; Some "PRIMARY"; _; Some "const"; Some "1"; _; _ ] ]) ->
+                    | ResultSet(_, [ [ _; Some "DELETE"; _; _; Some "range"; _; Some "PRIMARY"; _; Some "const"; Some "1"; _; Some "Using where" ] ]) ->
                         ()
-                    | other -> failtestf "expected a const DELETE plan for a row-independent key, got %A" other
+                    | other -> failtestf "expected a DELETE range plan for a row-independent key, got %A" other
 
                     runDefault store "CREATE TABLE amounts (amount DECIMAL(10,2) PRIMARY KEY)" |> ignore
                     runDefault store "INSERT INTO amounts VALUES (2.00), (3.00)" |> ignore
@@ -1991,7 +1991,7 @@ let tests =
                         ()
                     | other -> failtestf "expected a constant-expression IN range plan, got %A" other
 
-                testCase "EXPLAIN UPDATE/DELETE by primary key report the same const row a SELECT does"
+                testCase "EXPLAIN UPDATE and DELETE report their primary-key access types"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE users (id INT PRIMARY KEY, v INT)" |> ignore
@@ -2003,9 +2003,9 @@ let tests =
                     | other -> failtestf "expected a const UPDATE plan, got %A" other
 
                     match runDefault store "EXPLAIN DELETE FROM users WHERE id = 2" with
-                    | ResultSet(_, [ [ Some "1"; Some "DELETE"; Some "users"; None; Some "const"; Some "PRIMARY"; Some "PRIMARY"; Some "4"; Some "const"; Some "1"; Some "100.00"; None ] ]) ->
+                    | ResultSet(_, [ [ Some "1"; Some "DELETE"; Some "users"; None; Some "range"; Some "PRIMARY"; Some "PRIMARY"; Some "4"; Some "const"; Some "1"; Some "100.00"; Some "Using where" ] ]) ->
                         ()
-                    | other -> failtestf "expected a const DELETE plan, got %A" other
+                    | other -> failtestf "expected a primary-key DELETE range plan, got %A" other
 
                 testCase "EXPLAIN UPDATE reports both bound keys for a merged checked view"
                 <| fun _ ->

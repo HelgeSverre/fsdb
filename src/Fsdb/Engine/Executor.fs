@@ -28459,6 +28459,17 @@ let private combineViewPredicate predicate whereClause =
     | Some predicate, None -> Some predicate
     | None, whereClause -> whereClause
 
+let private rewriteStandaloneViewDelete (view: UpdatableView) delete =
+    let rewrite = rewriteViewExpression view
+    { delete with
+        Source = SingleDeleteTable view.UpdateFrom
+        Targets = [ view.UpdateFrom.Alias |> Option.defaultValue view.Table ]
+        Where = combineViewPredicate view.Predicate (delete.Where |> Option.map rewrite)
+        OrderBy =
+            if delete.OrderBy.IsEmpty then view.OrderBy
+            else delete.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
+        Limit = delete.Limit |> Option.map rewrite }
+
 let private rewriteStandaloneViewUpdate (view: UpdatableView) (update: UpdateStmt) : Result<UpdateStmt * ViewColumnTarget, EvalError> =
     if not view.UpdateJoins.IsEmpty && (not view.OrderBy.IsEmpty || not update.OrderBy.IsEmpty) then
         Error(1221, "Incorrect usage of UPDATE and ORDER BY")
@@ -28855,7 +28866,12 @@ let private explainViewExpansion (store: Store) (root: StoredView) =
         let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
         if Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting then None
         else
-            match parseStoredViewStatement view with
+            let definition =
+                parseStoredViewStatement view
+                |> Result.map (function
+                    | Select select -> Select(Expression.pruneUnusedTopLevelCtes select)
+                    | statement -> statement)
+            match definition with
             | Ok(Select select as statement) when select.Ctes.IsEmpty ->
                 let next = Set.add key seen
                 let resolve = function
@@ -28878,6 +28894,52 @@ let private explainViewExpansion (store: Store) (root: StoredView) =
             | _ -> None
 
     expand Set.empty root
+
+let private explainViewDeleteSource store registry account dbName (delete: DeleteStmt) =
+    match delete.Source with
+    | SingleDeleteTable source
+        when source.Database.IsSome || not (Map.containsKey (source.Table.ToLowerInvariant()) (currentCteScope ())) ->
+        let database = source.Database |> Option.defaultValue dbName
+        match tryStoredView store database source.Table with
+        | None -> Ok(store, delete)
+        | Some stored ->
+            match tryDeletableView store registry database source.Table with
+            | None ->
+                let alias = source.Alias |> Option.defaultValue source.Table
+                probeMutationSources store registry dbName (Some(FromTable source)) [] delete.Ctes
+                |> Result.bind (fun () -> Error(Err(nonUpdatableTarget "DELETE" alias)))
+            | Some view when view.UpdateJoins.IsEmpty ->
+                let viewStore = storeForStoredView store
+                match explainViewExpansion viewStore stored with
+                | Some([ baseTable ], requirements) when
+                    equalsIgnoreCase baseTable.Table view.Table
+                    && (baseTable.Database |> Option.exists (equalsIgnoreCase view.Database)) ->
+                    let plan = rewriteStandaloneViewDelete view delete
+                    let hasScopedSubquery =
+                        let differentNamespace =
+                            not store.TableShadows.IsEmpty || not (currentCteScope ()).IsEmpty
+                            || (requirements |> List.exists (function
+                                | "SHOW VIEW", Auth.OnTable(schema, _) -> not (equalsIgnoreCase schema dbName)
+                                | _ -> false))
+                        differentNamespace
+                        && (Option.toList plan.Where @ List.map fst plan.OrderBy
+                            |> List.exists (Expression.collectSubqueries >> List.isEmpty >> not))
+                    if hasScopedSubquery then Ok(store, delete)
+                    else
+                        let disclosureRequirement = function
+                            | "SELECT", (Auth.OnColumn(schema, table, _) | Auth.OnAllColumns(schema, table)) ->
+                                "SELECT", Auth.OnTable(schema, table)
+                            | requirement -> requirement
+                        let requirements =
+                            ("SELECT", Auth.OnTable(view.Database, view.Table))
+                            :: List.map disclosureRequirement requirements
+                        let roles = InformationSchema.currentViewerRoles account
+                        Auth.checkForAccountWithRoles viewStore account roles (List.distinct requirements)
+                        |> Result.mapError (fun _ -> Err(1345, "EXPLAIN/SHOW can not be issued; lacking privileges for underlying table"))
+                        |> Result.map (fun () -> viewStore, plan)
+                | _ -> Ok(store, delete)
+            | Some _ -> Ok(store, delete)
+    | _ -> Ok(store, delete)
 
 let private explainPrefixKeyLen (column: ColumnDef) (prefixLength: int option) =
     let narrowed =
@@ -29401,6 +29463,7 @@ let rec private explainJoinBlock
 
     let tryExplainIndexedAccess accessExtra (whereExpr: Expr option) (tref: TableRef) : bool =
         let sourceTable = physicalFastPathTable store dbName tref
+        let singleDelete = selectType = "DELETE" && tableCount = 1
 
         let sourceKey name columns indices prefixLengths =
             explainIndexKeyLen sourceTable name columns indices prefixLengths
@@ -29437,7 +29500,8 @@ let rec private explainJoinBlock
         let candidates =
             physicalFastPathTable store dbName tref
             |> Option.map (fun table ->
-                physicalAccessCandidatesInTableWith CostedRead store registry table tref whereExpr)
+                let policy = if singleDelete then CandidateNarrowing else CostedRead
+                physicalAccessCandidatesInTableWith policy store registry table tref whereExpr)
             |> Option.defaultValue []
 
         let equality =
@@ -29463,11 +29527,11 @@ let rec private explainJoinBlock
                     { Id = Some id
                       SelectType = selectType
                       Table = Some(tref.Alias |> Option.defaultValue tref.Table)
-                      Type = Some(if plan.Unique then "const" else "ref")
+                      Type = Some(if singleDelete then "range" elif plan.Unique then "const" else "ref")
                       Key = sourceKey plan.KeyName plan.Columns plan.ColumnIndices plan.PrefixLengths
                       Ref = Some(List.replicate plan.ColumnIndices.Length "const")
                       Rows = Some(uint64 plan.CandidateCount)
-                      Extra = if plan.Unique then accessExtra |> List.filter ((<>) "Using where") else accessExtra }
+                      Extra = if plan.Unique && not singleDelete then accessExtra |> List.filter ((<>) "Using where") else accessExtra }
             | MembershipAccess plan ->
                 acc.Add
                     { Id = Some id
@@ -29495,7 +29559,7 @@ let rec private explainJoinBlock
                       Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                       Type = Some "range"
                       Key = sourceKey plan.RangeIndexName plan.RangeColumns [ plan.RangeColumnIndex ] [ plan.RangePrefixLength ]
-                      Ref = None
+                      Ref = if singleDelete then Some [ "const" ] else None
                       Rows = Some(uint64 plan.RangeRowCount)
                       Extra = accessExtra }
             | IndexMergeAccess plan ->
@@ -30372,17 +30436,19 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             withCteQueryResult store registry dbName ctes (fun () -> explainStatement format store registry account dbName (Delete { d with Ctes = [] }))
     | Delete d ->
         let id = nextId ()
-        let extra = [ if d.Where.IsSome then "Using where"
-                      if not d.OrderBy.IsEmpty then "Using filesort" ]
-        let subqueryExprs = d.Where |> Option.toList
-
         finish (
             validateJoinedDeleteTargets store registry dbName d
-            |> Result.bind (fun () -> checkMutationWhere d.From d.Joins (d.Where |> Option.toList))
-            |> Result.bind (fun () ->
-                let consumption = joinConsumptionFor d.Limit
+            |> Result.bind (fun () -> explainViewDeleteSource store registry account dbName d)
+            // Bind the caller's expressions against the exposed view columns.
+            |> Result.bind (fun plan ->
+                checkMutationWhere d.From d.Joins (d.Where |> Option.toList) |> Result.map (fun () -> plan))
+            |> Result.bind (fun (planStore, plan) ->
+                let extra = [ if plan.Where.IsSome then "Using where"
+                              if not plan.OrderBy.IsEmpty then "Using filesort" ]
+                let subqueryExprs = plan.Where |> Option.toList
+                let consumption = joinConsumptionFor plan.Limit
 
-                explainJoinBlock store registry dbName nextId acc analysis id "DELETE" (Some d.From) d.Joins d.Where extra subqueryExprs 0 None consumption None None)
+                explainJoinBlock planStore registry dbName nextId acc analysis id "DELETE" (Some plan.From) plan.Joins plan.Where extra subqueryExprs 0 None consumption None None)
         )
     | Insert(table, _, rowsExprs, _, _)
     | Replace(table, _, rowsExprs) ->
@@ -36940,21 +37006,8 @@ let rec private executeAsWithViewSources
             let target = source.Alias |> Option.defaultValue source.Table
             ids, Err(nonUpdatableTarget "DELETE" target)
         | None, Some view ->
-            let rewrite = rewriteViewExpression view
-            let rewritten =
-                { deleteStmt with
-                    Source = SingleDeleteTable view.UpdateFrom
-                    Targets = [ view.UpdateFrom.Alias |> Option.defaultValue view.Table ]
-                    Where = combineViewPredicate view.Predicate (deleteStmt.Where |> Option.map rewrite)
-                    OrderBy =
-                        if deleteStmt.OrderBy.IsEmpty then
-                            view.OrderBy
-                        else
-                            deleteStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
-                    Limit = deleteStmt.Limit |> Option.map rewrite }
-
             let targetKey = viewDeleteTargetKey view
-            executeViewWrite view view targetKey targetKey (Delete rewritten) None None
+            executeViewWrite view view targetKey targetKey (Delete(rewriteStandaloneViewDelete view deleteStmt)) None None
 
     | Delete ({ Source = SingleDeleteTable source } as deleteStmt) ->
         let db, table = (source.Database |> Option.defaultValue dbName), source.Table

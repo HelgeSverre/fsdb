@@ -1135,8 +1135,11 @@ reject writes through outer layers. Some joined UPDATE, PREPARE, and EXPLAIN
 diagnostics still differ.
 [DELETE through computed-only projections](torture/findings/2026-11-27-saved-view-self-reads.md#delete-through-computed-projections)
 locates physical rows in audited merged single-table views, including nested
-layers and when the view is a target of a joined DELETE. EXPLAIN still
-names the view, and UPDATE and INSERT return different diagnostics.
+layers and when the view is a target of a joined DELETE. UPDATE and INSERT
+return different diagnostics for the same projections.
+[EXPLAIN DELETE](torture/findings/2026-11-27-saved-view-self-reads.md#explain-delete-through-merged-views)
+shows the base table and mutation index for audited standalone deletes through
+merged views. Some JSON fields, subquery plans, and binding messages still differ.
 [Audited `UNION DISTINCT` derived and CTE read sources](torture/findings/2026-11-04-union-distinct-updatable-view.md)
 also precede a writable physical target in an inner joined view, including
 duplicate elimination, ordered limited sources, one target write, and cascaded

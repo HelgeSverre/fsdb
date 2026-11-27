@@ -914,6 +914,12 @@ let private currentViewer = System.Threading.AsyncLocal<Viewer option>()
 
 let currentViewerAccount () = currentViewer.Value |> Option.map _.Account
 
+let internal currentViewerRoles account =
+    currentViewer.Value
+    |> Option.filter (fun viewer -> Fsdb.Auth.sameAccount viewer.Account account)
+    |> Option.map _.ActiveRoles
+    |> Option.defaultValue []
+
 /// Runs a query with information-schema visibility scoped to one account.
 let withViewer store account activeRoles (body: unit -> 'a) : 'a =
     DynamicScope.withValue
