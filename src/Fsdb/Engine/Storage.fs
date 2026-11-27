@@ -8323,6 +8323,12 @@ let private tryOrderedKeyTraversal allowed table (terms: OrderedKeyTerm list) in
             |> Option.map (fun traversal -> group, traversal)
         else None)
 
+let internal isExactTemporalIndexBound columnType value =
+    match columnType, value with
+    | (TDate | TDateTime _), (VDate _ | VDateTime _)
+    | TTime _, VTime _ -> true
+    | _ -> false
+
 let internal tryOrderedIndexNameWith allowed (table: Table) terms =
     terms
     |> traverse (fun term -> resolveColumn table.Columns term.OrderedColumnName)
@@ -8353,8 +8359,11 @@ let private tryOrderedIndexWithPrefix
                     let exact =
                         // Keep the comparison boundary, including fractions a stored key cannot represent.
                         match prefixLength, transform, column.Type, value with
+                        | None, None, _, VNull -> Some value
                         | None, None, TDecimal _, (VDecimal _ | VInt _ | VUInt _)
                         | None, None, (TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _), VDecimal _ ->
+                            Some value
+                        | None, None, ty, value when isExactTemporalIndexBound ty value ->
                             Some value
                         | _ -> exactProbeValue store table index value
 

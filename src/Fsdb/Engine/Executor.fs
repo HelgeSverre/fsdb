@@ -16727,6 +16727,12 @@ and private isExactNumericIndexType = function
     | TDecimal _ -> true
     | ty -> isExactIntegerIndexType ty
 
+and private temporalOrderProbeValue = function
+    | TDate -> Some(VDate(System.DateOnly(2000, 1, 1)))
+    | TDateTime _ -> Some(VDateTime(System.DateTime(2000, 1, 1)))
+    | TTime _ -> Some(VTime(timeValueOrClamp 0L))
+    | _ -> None
+
 /// For exact integer keys, inequality is the union of the two strict ranges.
 /// Keep the source expression for filtering; this form only chooses candidates.
 and private normalizeIndexedInequality registry (table: Table) tref expression =
@@ -21445,12 +21451,39 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
                 match tryCorrelatedInnerColumn source expression with
                 | Some name -> innerColumn name
                 | None -> tryColumnDefForExpr context expression
+            let temporalColumn expression =
+                match expression with
+                | Col _ | QualifiedCol _ ->
+                    columnOf expression |> Option.bind (fun column -> temporalOrderProbeValue column.Type)
+                | _ -> None
             let unsupported = function
                 | (Col _ | QualifiedCol _) as expression ->
                     columnOf expression |> Option.exists (_.Type >> isExactNumericIndexType) |> not
                 | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VNull) -> false
                 | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _ -> true
                 | _ -> false
+
+            let temporalComparison left right =
+                let fits columnExpression boundExpression =
+                    let bound =
+                        match boundExpression with
+                        | LiteralValue value -> Some value
+                        | _ -> temporalColumn boundExpression
+                    match columnExpression with
+                    | Col _ | QualifiedCol _ ->
+                        columnOf columnExpression
+                        |> Option.exists (fun column -> bound |> Option.exists (Storage.isExactTemporalIndexBound column.Type))
+                    | _ -> false
+                fits left right || fits right left
+
+            let rec safeResidual expression =
+                match expression with
+                | BinOp((And | Or), left, right) -> safeResidual left && safeResidual right
+                | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), left, right) when temporalComparison left right -> true
+                | Between(value, lower, upper) when temporalComparison value lower && temporalComparison value upper -> true
+                | IsNull value | IsNotNull value when (temporalColumn value).IsSome -> true
+                | Not value -> safeResidual value
+                | _ -> not (Expression.exists unsupported expression)
 
             let key (column: ColumnDef) value = { Column = column.Name; Transform = None; Value = value }
             let indexedColumn expression = tryCorrelatedInnerColumn source expression |> Option.bind innerColumn
@@ -21468,6 +21501,7 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
                     | LiteralValue VNull when comparison = NullSafeEq -> Some(key column VNull, None)
                     | LiteralValue(VString _ as value) when usesStoredTextCollation None -> Some(key column value, None)
                     | LiteralValue(VDecimal _ as value) when isExactNumericIndexType column.Type -> Some(key column value, None)
+                    | LiteralValue value when Storage.isExactTemporalIndexBound column.Type value -> Some(key column value, None)
                     | Col _ | QualifiedCol _ ->
                         let boundColumn = tryColumnDefForExpr context bound
                         let numericKey =
@@ -21475,11 +21509,15 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
                             && (boundColumn |> Option.exists (_.Type >> isExactNumericIndexType))
                         let textKey () =
                             isTextColumn boundColumn && usesStoredTextCollation boundColumn
+                        let temporalKey =
+                            boundColumn |> Option.bind (_.Type >> temporalOrderProbeValue)
+                            |> Option.exists (Storage.isExactTemporalIndexBound column.Type)
 
                         match readOuter source context bound boundColumn with
                         | Some(VInt _ | VUInt _ | VDecimal _ as value) when numericKey -> Some(key column value, Some bound)
                         | Some(VString _ as value) when textKey () -> Some(key column value, Some bound)
-                        | Some VNull when (comparison = NullSafeEq || canSeekNull) && (numericKey || textKey ()) ->
+                        | Some value when temporalKey && Storage.isExactTemporalIndexBound column.Type value -> Some(key column value, Some bound)
+                        | Some VNull when temporalKey || ((comparison = NullSafeEq || canSeekNull) && (numericKey || textKey ())) ->
                             Some(key column VNull, Some bound)
                         | _ -> None
                     | _ -> None)
@@ -21492,7 +21530,7 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
 
             let clauses = predicate |> conjuncts |> List.map (fun expression -> expression, tryPrefixPin expression)
             if not (isPlainRowPredicate predicate)
-               || (clauses |> List.exists (fun (expression, pin) -> pin.IsNone && Expression.exists unsupported expression)) then None
+               || (clauses |> List.exists (fun (expression, pin) -> pin.IsNone && not (safeResidual expression))) then None
             else
                 let pins = clauses |> List.choose snd
                 let correlatedPins =
@@ -21503,9 +21541,8 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
                     term.Transform.IsNone
                     && (innerColumn term.Column |> Option.exists (fun column ->
                         isTextColumn (Some column)
-                        || (match column.Type with
-                            | TDate | TDateTime _ -> true
-                            | ty -> isExactNumericIndexType ty)))
+                        || isExactNumericIndexType column.Type
+                        || (temporalOrderProbeValue column.Type).IsSome))
 
                 if correlatedPins.IsEmpty then None
                 else
@@ -21585,10 +21622,23 @@ and private tryCorrelatedTopOrder store registry dbName fromItem select outer =
             | (Col _ | QualifiedCol _) as expression -> tryCorrelatedOuterValue source context expression |> Option.map Lit
             | _ -> None)
     let plan = planCorrelatedTopOrder store registry dbName fromItem select outer readOuter bindPredicate
+    let rejectsNull = function
+        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), LiteralValue VNull, _)
+        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), _, LiteralValue VNull)
+        | Between(LiteralValue VNull, _, _)
+        | Between(_, LiteralValue VNull, _)
+        | Between(_, _, LiteralValue VNull) -> true
+        | _ -> false
     let lookup =
         plan |> Option.bind (fun plan ->
             let correlatedPins = plan.References |> List.map fst |> Set.ofList
-            tryFixedPrefixIndexOrder store registry dbName plan.TableRef plan.Predicate plan.Terms correlatedPins plan.Pins)
+            tryFixedPrefixIndexOrder store registry dbName plan.TableRef plan.Predicate plan.Terms correlatedPins plan.Pins
+            |> Option.map (fun lookup ->
+                // A NULL comparison cannot pass a top-level AND. Keep the
+                // ordered plan but skip the rejected slice, even in metadata probes.
+                if plan.Predicate |> Option.exists (conjuncts >> List.exists rejectsNull) then
+                    { lookup with OrderedRows = Seq.empty }
+                else lookup))
 
     let projectedTable =
         plan |> Option.bind (fun plan -> plan.Projection |> Option.map (fun _ -> plan.TableRef))
@@ -28853,6 +28903,9 @@ let private explainKeyLen (col: ColumnDef) : int option =
         | TDouble _ -> Some 8
         | TDecimal(precision, scale, _) -> Some(Storage.decimalKeyBytes precision scale)
         | TDate -> Some 3
+        | TTime fsp -> Some(3 + (fsp + 1) / 2)
+        | TDateTime fsp -> Some(5 + (fsp + 1) / 2)
+        | TTimestamp fsp -> Some(4 + (fsp + 1) / 2)
         | TEnum values -> Some(if List.length values <= 255 then 1 else 2)
         | _ -> None
 
@@ -29379,7 +29432,7 @@ let private explainCorrelatedOrder store registry dbName outer fromItem select =
                 | TDecimal _ -> Some(VDecimal 0M)
                 | ty when isExactIntegerIndexType ty -> Some(VInt 0L)
                 | _ when isTextColumn (Some definition) -> Some(VString "")
-                | _ -> None))
+                | ty -> temporalOrderProbeValue ty))
 
     planCorrelatedTopOrder store registry dbName fromItem select (outer |> Option.map _.Context) readOuter (fun _ _ predicate -> predicate)
     |> Option.bind (fun plan ->

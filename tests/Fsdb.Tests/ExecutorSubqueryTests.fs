@@ -83,6 +83,49 @@ let tests =
               Expect.equal (access.SelectType, access.AccessType) (Some "DEPENDENT SUBQUERY", Some "ref") "dependent prefix lookup"
               Expect.equal (access.Key, access.KeyLength, access.Reference) (Some "recent", Some "12", Some "fsdb.o.k") "packed DECIMAL prefix metadata"
 
+          testCase "correlated top-N seeks temporal keys without rounding the outer bounds"
+          <| fun _ ->
+              let store = newStore ()
+              for sql in
+                  [ "CREATE TABLE digit(n INT PRIMARY KEY)"
+                    "INSERT INTO digit VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)"
+                    "CREATE TABLE requests(id INT PRIMARY KEY,d DATE,dt DATETIME(6),clock TIME(6),cutoff TIME(6))"
+                    "INSERT INTO requests VALUES (1,'2026-11-02','2026-11-02 00:00:00','01:00:00.12','00:00:09.550500'),"
+                    + "(2,NULL,NULL,NULL,'00:00:09.550500'),(3,'2026-11-03','2026-11-03 00:00:00.000001','02:00:00.120001','00:00:08.100001'),"
+                    + "(4,'2026-11-08','2026-11-08 00:00:00','-12:00:00.12','00:00:00.850001'),"
+                    + "(5,'2026-12-01','2026-12-01 00:00:00','23:00:00.12','00:00:09.550500')"
+                    "CREATE TABLE events(id INT PRIMARY KEY, day_key DATE, civil_key DATETIME(2), clock_key TIME(2), stamp TIME(2), visible INT,"
+                    + " KEY by_day(day_key,stamp DESC,id), KEY by_civil(civil_key,stamp DESC,id), KEY by_clock(clock_key,stamp DESC,id))"
+                    "INSERT INTO events SELECT g.n*100+x.n*10+y.n, IF(g.n=0,NULL,DATE_ADD('2026-11-01',INTERVAL g.n DAY)),"
+                    + " IF(g.n=0,NULL,DATE_ADD('2026-11-01',INTERVAL g.n DAY)),"
+                    + " CASE g.n WHEN 0 THEN NULL WHEN 7 THEN '-12:00:00.12' ELSE SEC_TO_TIME(g.n*3600+0.12) END,"
+                    + " SEC_TO_TIME((x.n*10+y.n)/10), MOD(y.n,3) FROM digit g CROSS JOIN digit x CROSS JOIN digit y" ] do
+                  runDefault store sql |> fun result -> TestSupport.Sql.expectOk result sql
+
+              for column, index, comparison, outerColumn, keyLength, expected in
+                  [ "day_key", "by_day", "<=>", "d", "4", [ Some 194; Some 94; Some 278; Some 707; None ]
+                    "civil_key", "by_civil", "<=>", "dt", "7", [ Some 194; Some 94; None; Some 707; None ]
+                    "clock_key", "by_clock", "<=>", "clock", "5", [ Some 194; Some 94; None; Some 707; None ]
+                    "day_key", "by_day", "<=>", "dt", "4", [ Some 194; Some 94; None; Some 707; None ]
+                    "civil_key", "by_civil", "<=>", "d", "7", [ Some 194; Some 94; Some 278; Some 707; None ]
+                    "day_key", "by_day", "=", "d", "4", [ Some 194; None; Some 278; Some 707; None ] ] do
+                  let query hint =
+                      $"SELECT r.id,(SELECT e.id FROM events e {hint} WHERE e.{column}{comparison}r.{outerColumn} "
+                      + "AND e.stamp<=r.cutoff AND e.visible>0 ORDER BY e.stamp DESC,e.id LIMIT 1 OFFSET 1) AS chosen FROM requests r ORDER BY r.id"
+                  let rows = expected |> List.mapi (fun index chosen -> [ Some(string (index + 1)); Option.map string chosen ])
+                  let indexed, examined = withExaminedRows (fun () -> runDefault store (query $"FORCE INDEX ({index})"))
+                  let scanned = runDefault store (query "IGNORE INDEX (by_day,by_civil,by_clock)")
+                  Expect.equal indexed (ResultSet([ "id"; "chosen" ], rows)) "MySQL rows with fractional misses and cutoffs"
+                  Expect.equal scanned indexed "ignoring the indexes gives the same rows"
+                  Expect.isLessThan examined 50L "the range seek and residual stop before scanning each key group"
+                  let access =
+                      runDefault store ("EXPLAIN " + query $"FORCE INDEX ({index})")
+                      |> TestSupport.Sql.explainRows
+                      |> List.find (fun row -> row.Table = Some "e")
+                  Expect.equal (access.SelectType, access.AccessType, access.Key, access.KeyLength, access.Reference)
+                      (Some "DEPENDENT SUBQUERY", Some "ref", Some index, Some keyLength, Some $"fsdb.r.{outerColumn}")
+                      "the inner ref lookup describes the temporal prefix"
+
           testCase "correlated top-N streams a composite index slice before applying its limit"
           <| fun _ ->
               let store = newStore ()

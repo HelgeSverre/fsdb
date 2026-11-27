@@ -3165,6 +3165,9 @@ implementation effort:
    [Exact decimal prefixes and suffixes](torture/findings/2026-11-27-correlated-decimal-top-n.md)
    also stream the ordered slice for audited DECIMAL and integer comparisons.
    The lateral fixture examines 19 rows, down from 1,310.
+   [Temporal prefixes and suffixes](torture/findings/2026-11-27-correlated-temporal-top-n.md)
+   stream DATE, DATETIME, and TIME keys while preserving fractional outer
+   bounds. The date-key fixture examines 15 rows, down from 4,105.
    [Derived projections with renamed columns](torture/findings/2026-11-27-correlated-derived-top-n.md)
    can retain the physical index order through audited filters and aliases.
    The scalar fixture examines 40 rows, down from 1,610.
