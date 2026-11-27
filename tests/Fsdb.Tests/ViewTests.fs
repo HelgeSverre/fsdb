@@ -4678,19 +4678,19 @@ let tests =
                   [ [ Some "1"; Some "12" ]; [ Some "2"; Some "21" ] ]
                   "reused CTE values come from one materialization"
 
-          testCase "a direct view predicate limits UPDATE and DELETE but not INSERT"
+          testCase "a direct view predicate filters UPDATE and DELETE targets"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               expectOk (run store "CREATE TABLE accounts (id INT PRIMARY KEY, name VARCHAR(20), score INT)") "create accounts"
               expectOk (run store "INSERT INTO accounts VALUES (1, 'visible', 10), (2, 'hidden', 1)") "seed accounts"
               expectOk (run store "CREATE VIEW visible_accounts AS SELECT id, name FROM accounts WHERE score >= 5") "create view"
 
-              [ "INSERT INTO visible_accounts VALUES (2, 'upserted') ON DUPLICATE KEY UPDATE name = VALUES(name)"
-                "REPLACE INTO visible_accounts VALUES (2, 'replaced')" ]
-              |> List.iter (fun sql ->
-                  match run store sql with
-                  | Err(1369, _) -> ()
-                  | other -> failtestf "expected hidden-row conflict rejection for %s, got %A" sql other)
+              Expect.equal
+                  (run store "INSERT INTO visible_accounts VALUES (2, 'upserted') ON DUPLICATE KEY UPDATE name = VALUES(name)")
+                  (Affected 2UL) "a duplicate insert updates the hidden base row"
+              TestSupport.Sql.expectError 3059
+                  (run store "REPLACE INTO visible_accounts VALUES (2, 'replaced')")
+                  "a replacement cannot delete the hidden base row"
 
               let mutable predicateCalls = 0
               let registry =
@@ -4721,7 +4721,7 @@ let tests =
 
               Expect.equal
                   (rows store "SELECT id, name, score FROM accounts ORDER BY id")
-                  [ [ Some "2"; Some "hidden"; Some "1" ]; [ Some "3"; Some "invisible"; None ] ]
+                  [ [ Some "2"; Some "upserted"; Some "1" ]; [ Some "3"; Some "invisible"; None ] ]
                   "only rows selected by the view predicate are updateable or deletable"
 
           testCase "WITH CHECK OPTION validates direct view writes"
@@ -4769,6 +4769,54 @@ let tests =
               expectOk (run store "CREATE VIEW filtered AS SELECT id, name FROM vendors WHERE id IN (SELECT vendor_id FROM receipts)") "create view"
               expectOk (run store "UPDATE filtered SET name = 'updated'") "update through subquery predicate"
               Expect.equal (rows store "SELECT name FROM vendors ORDER BY id") [ [ Some "updated" ]; [ Some "updated" ] ] "matching rows update"
+
+          testCase "nested views distinguish hidden duplicate updates from replacement deletes"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE item(id INT PRIMARY KEY,code INT UNIQUE,qty INT)"
+                    "INSERT INTO item VALUES(1,10,-1),(2,20,100),(3,30,NULL),(4,40,-1),(5,50,-1)"
+                    "CREATE VIEW visible AS SELECT id,code,qty FROM item WHERE qty>0"
+                    "CREATE VIEW guarded AS SELECT id,code,qty FROM visible WITH CASCADED CHECK OPTION"
+                    "CREATE VIEW local_guard AS SELECT id,code,qty FROM visible WHERE qty<20 WITH LOCAL CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+
+              for view, id, code, qty in [ "visible", 1, 10, 8; "guarded", 4, 40, 8; "local_guard", 5, 50, -4 ] do
+                  let sql = $"INSERT INTO {view} VALUES({id},{code},{qty}) ON DUPLICATE KEY UPDATE qty=VALUES(qty)"
+                  Expect.equal (run store sql) (Affected 2UL) sql
+
+              Expect.equal
+                  (run store "INSERT INTO guarded VALUES(5,50,8) ON DUPLICATE KEY UPDATE qty='-4'")
+                  (Affected 0UL) "a coerced no-op keeps the hidden row"
+
+              for sql in
+                  [ "INSERT INTO guarded VALUES(4,40,-5) ON DUPLICATE KEY UPDATE qty=8"
+                    "INSERT INTO guarded VALUES(4,40,8) ON DUPLICATE KEY UPDATE qty=-5"
+                    "REPLACE INTO guarded VALUES(3,30,-5)" ] do
+                  TestSupport.Sql.expectError 1369 (run store sql) sql
+
+              for sql in
+                  [ "REPLACE INTO visible VALUES(3,30,5)"
+                    "REPLACE INTO visible VALUES(2,30,5)"
+                    "REPLACE INTO guarded VALUES(99,99,5),(3,30,5)"
+                    "REPLACE INTO visible SET id=3,code=30,qty=5"
+                    "REPLACE INTO visible (id,code,qty) SELECT 3,30,5" ] do
+                  Expect.equal (run store sql)
+                      (Err(3059, "REPLACE cannot be executed as it requires deleting rows that are not in the view")) sql
+
+              Expect.equal (rows store "SELECT id,qty FROM item ORDER BY id")
+                  [ [ Some "1"; Some "8" ]; [ Some "2"; Some "100" ]; [ Some "3"; None ]
+                    [ Some "4"; Some "8" ]; [ Some "5"; Some "-4" ] ]
+                  "failed replacements preserve both conflicts and roll back earlier rows"
+              Expect.equal (run store "REPLACE INTO guarded VALUES(2,20,11)") (Affected 2UL) "a visible conflict can be replaced"
+
+              let session, _ = Fsdb.QueryHandler.handle (Fsdb.Session.create 1 store) "USE fsdb"
+              let prepare column =
+                  Fsdb.QueryHandler.prepareStatementForSession session
+                      $"INSERT INTO guarded VALUES(?,?,?) ON DUPLICATE KEY UPDATE qty=VALUES({column})"
+              match prepare "guarded.qty", prepare "absent" with
+              | Ok(_, 3), Error(1054, _) -> ()
+              | actual -> failtestf "VALUES must bind to an exposed target column at prepare time, got %A" actual
 
           testCase "writable views do not expose unprojected base columns"
           <| fun _ ->

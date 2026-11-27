@@ -26651,15 +26651,23 @@ let private qualifyViewReference qualifier =
 /// `funcCallAtom` already parses `VALUES(col)` as an ordinary `FuncCall`
 /// since it just looks like one syntactically, so this is a plain
 /// pre-evaluation rewrite rather than new grammar.
-let private substituteValuesFunc (columnIndex: Map<string, int list>) (candidate: Value[]) : Expr -> Expr =
+let private (|InsertCandidateReference|_|) = function
+    | FuncCall(name, [ (Col _ | QualifiedCol _) as reference ]) when equalsIgnoreCase name "VALUES" ->
+        Some reference
+    | _ -> None
+
+let private substituteValuesFunc table (columnIndex: Map<string, int list>) (candidate: Value[]) : Expr -> Expr =
     rewriteExprWith (function
-        | FuncCall(name, [ Col c ]) when System.String.Equals(name, "VALUES", System.StringComparison.OrdinalIgnoreCase) ->
+        | InsertCandidateReference reference ->
             // `candidate` is always the row for the one table this INSERT
             // targets, so there's no cross-table ambiguity to consider here
             // the way `resolveCol` has to for a JOIN — just take the column.
-            match Map.tryFind (c.ToLowerInvariant()) columnIndex with
-            | Some(i :: _) -> Some(Lit candidate.[i])
+            match reference with
+            | Col column -> Some column
+            | QualifiedCol(owner, column) when equalsIgnoreCase owner table -> Some column
             | _ -> None
+            |> Option.bind (fun column -> Map.tryFind (column.ToLowerInvariant()) columnIndex)
+            |> Option.bind (List.tryHead >> Option.map (fun index -> Lit candidate.[index]))
         | _ -> None)
 
 let private insertSelectSourceReferences (assignments: (string * Expr) list) : Expr list =
@@ -26675,9 +26683,7 @@ let private insertSelectSourceReferences (assignments: (string * Expr) list) : E
     let rec collect shadowed expression =
         expression
         |> rewriteExprWith (function
-            | FuncCall(name, [ Col _ ]) as values
-                when name.Equals("VALUES", System.StringComparison.OrdinalIgnoreCase) ->
-                Some values
+            | InsertCandidateReference _ as values -> Some values
             | Col _ as reference when shadowed |> Set.isEmpty ->
                 references.Add reference
                 Some reference
@@ -29636,6 +29642,36 @@ let private validateBindingsWith describeColumns validateFunction store registry
                          Expression.tryLiteralNodeDiagnostic id validateFunction)
         |> Result.map ignore
 
+    let validateDuplicateAssignments target assignments =
+        let database, table = splitQualified schema target
+        let columns =
+            lazy (
+                if (tryStoredView store database table).IsSome then
+                    describeStoredViewColumns store registry database table
+                else scan store database table |> Result.toOption |> Option.map fst)
+        let validateReference = function
+            | QualifiedCol(owner, column) when not (equalsIgnoreCase owner table) ->
+                Error(unknownColumn (owner + "." + column))
+            | Col column | QualifiedCol(_, column) ->
+                match columns.Value with
+                | Some columns when not (columns |> List.exists (fun definition -> equalsIgnoreCase definition.Name column)) ->
+                    Error(unknownColumn column)
+                | _ -> Ok()
+            | _ -> Ok()
+
+        assignments
+        |> traverse (fun (_, expression) ->
+            Expression.collect (function
+                | InsertCandidateReference reference -> Some reference
+                | _ -> None) expression
+            |> traverse validateReference
+            |> Result.bind (fun _ ->
+                expression
+                |> rewriteExprWith (function InsertCandidateReference _ -> Some(Lit VNull) | _ -> None)
+                |> List.singleton
+                |> validateExpressions))
+        |> Result.map ignore
+
     let rec validate = function
         | Select select -> validateBody (PlainSelect select)
         | Union(first, rest, orderBy, limit, offset) ->
@@ -29652,11 +29688,13 @@ let private validateBindingsWith describeColumns validateFunction store registry
             |> Result.bind (fun () ->
                 mutationSourceQuery (Some delete.From) delete.Joins delete.Ctes (Option.toList delete.Where)
                 |> PlainSelect |> validateBody)
-        | InsertSelect(_, _, select, assignments, _) ->
+        | InsertSelect(target, _, select, assignments, _) ->
             validateBody (PlainSelect select)
-            |> Result.bind (fun () -> validateExpressions (assignments |> List.map snd))
+            |> Result.bind (fun () -> validateDuplicateAssignments target assignments)
         | ReplaceSelect(_, _, select) -> validateBody (PlainSelect select)
-        | Insert(_, _, rows, assignments, _) -> validateExpressions (List.concat rows @ (assignments |> List.map snd))
+        | Insert(target, _, rows, assignments, _) ->
+            validateExpressions (List.concat rows)
+            |> Result.bind (fun () -> validateDuplicateAssignments target assignments)
         | Replace(_, _, rows) -> validateExpressions (List.concat rows)
         | ReplaceSet(_, assignments) -> validateExpressions (assignments |> List.map snd)
         | Do expressions -> validateExpressions expressions
@@ -31782,6 +31820,13 @@ let rec private executeAsWithViewSources
                         if selected then deleteRow rowId row (Map.tryFind rowId selectedImages |> Option.defaultValue row) else Ok 0)))
         |> Result.map List.sum
 
+    let viewCheckForTarget (runStore: Store) (db: string) (table: string) =
+        viewCheckScope.Value
+        |> Option.filter (fun scope ->
+            not (isTemporaryTable runStore db table)
+            && scope.Database.Equals(db, System.StringComparison.OrdinalIgnoreCase)
+            && scope.Table.Equals(table, System.StringComparison.OrdinalIgnoreCase))
+
     let validateViewCandidate
         (runStore: Store)
         (db: string)
@@ -31790,11 +31835,8 @@ let rec private executeAsWithViewSources
         (oldRow: Value[] option)
         (candidate: Value[])
         =
-        match viewCheckScope.Value with
-        | Some scope
-            when not (isTemporaryTable runStore db table)
-                 && scope.Database.Equals(db, System.StringComparison.OrdinalIgnoreCase)
-                 && scope.Table.Equals(table, System.StringComparison.OrdinalIgnoreCase) ->
+        match viewCheckForTarget runStore db table with
+        | Some scope ->
             let checkPredicate =
                 match scope.CheckPredicate with
                 | None -> Ok candidate
@@ -31900,29 +31942,17 @@ let rec private executeAsWithViewSources
                 | Some join -> checkJoin join candidate)
         | _ -> Ok candidate
 
-    let validateViewExisting (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (row: Value[]) =
-        match viewCheckScope.Value with
-        | Some scope
-            when scope.Database.Equals(db, System.StringComparison.OrdinalIgnoreCase)
-                 && scope.Table.Equals(table, System.StringComparison.OrdinalIgnoreCase) ->
-            match scope.JoinCheck, scope.VisibilityPredicate with
-            | Some _, _ -> Error(ExpressionError(1369, sprintf "CHECK OPTION failed '%s'" scope.View))
-            | None, None -> Ok()
-            | None, Some predicate ->
-                let context =
-                    contextFactory
-                        runStore
-                        registry
-                        db
-                        (columnIndexOf columns)
-                        (singleQualifier scope.Qualifier columns)
-                        None
-                        row
-
-                match evalExpr { context with Clause = WhereClause } predicate with
-                | Ok value when truthy value = Some true -> Ok()
-                | Ok _ -> Error(ExpressionError(1369, sprintf "CHECK OPTION failed '%s'" scope.View))
-                | Error error -> Error(ExpressionError error)
+    let validateReplaceConflict runStore db table columns row =
+        let visibility =
+            viewCheckForTarget runStore db table
+            |> Option.bind (fun scope -> scope.VisibilityPredicate |> Option.map (fun predicate -> scope.Qualifier, predicate))
+        match visibility with
+        | Some(qualifier, predicate) ->
+            let context = contextFactory runStore registry db (columnIndexOf columns) (singleQualifier qualifier columns) None row
+            match evalExpr { context with Clause = WhereClause } predicate with
+            | Ok value when truthy value = Some true -> Ok()
+            | Ok _ -> Error(ExpressionError(3059, "REPLACE cannot be executed as it requires deleting rows that are not in the view"))
+            | Error error -> Error(ExpressionError error)
         | _ -> Ok()
 
     let evaluateFunctionalDefaults
@@ -32131,7 +32161,7 @@ let rec private executeAsWithViewSources
             | Ok idx ->
                 let expression =
                     expr
-                    |> substituteValuesFunc columnIndex candidate
+                    |> substituteValuesFunc table columnIndex candidate
 
                 if isSelfAssignment true table tableColumns.[idx].Name expression then
                     Ok(idx, existing.[idx])
@@ -32172,16 +32202,22 @@ let rec private executeAsWithViewSources
                     |> Result.bind (computeGeneratedRow s registry db table tableColumns)
                     |> Result.bind (validateViewCandidate s db table tableColumns None)
 
+                let checkScope = viewCheckForTarget s db table
                 let applyUpdate ordinal existing candidate =
-                    validateViewExisting s db table tableColumns existing
-                    |> Result.bind (fun () ->
-                        onDuplicateUpdater table tableColumns columnIndex onDuplicateUpdate sourceBindings.[ordinal] existing candidate)
-                    |> Result.bind (fun updated ->
-                        computeGeneratedRow s registry db table tableColumns updated
-                        |> Result.bind (validateViewCandidate s db table tableColumns (Some existing)))
+                    match checkScope with
+                    | Some scope when scope.JoinCheck.IsSome ->
+                        Error(ExpressionError(1369, sprintf "CHECK OPTION failed '%s'" scope.View))
+                    | _ ->
+                        onDuplicateUpdater table tableColumns columnIndex onDuplicateUpdate sourceBindings.[ordinal] existing candidate
+                        |> Result.bind (computeGeneratedRow s registry db table tableColumns)
+
+                let checkChangedRow =
+                    checkScope
+                    |> Option.filter (fun scope -> scope.CheckPredicate.IsSome)
+                    |> Option.map (fun _ -> fun existing -> validateViewCandidate s db table tableColumns (Some existing))
 
                 if not (Storage.dynamicWriteRebaseActive s) then
-                    upsertRowsWithOrdinal s db table cols rowsValues prepare applyUpdate (Some coercedAssignments) foundRows
+                    upsertRowsWithOrdinalChecked s db table cols rowsValues prepare applyUpdate checkChangedRow (Some coercedAssignments) foundRows
                 else
                     rowsValues
                     |> List.indexed
@@ -32204,7 +32240,7 @@ let rec private executeAsWithViewSources
 
                         Storage.acquirePreparedInsertWriteTargets s db table candidates
 
-                        upsertRowsWithOrdinal
+                        upsertRowsWithOrdinalChecked
                             s
                             db
                             table
@@ -32212,6 +32248,7 @@ let rec private executeAsWithViewSources
                             (candidates |> List.map Array.toList)
                             (fun _ row -> Ok row)
                             (fun ordinal existing row -> applyUpdate (fst prepared.[ordinal]) existing row)
+                            checkChangedRow
                             (Some coercedAssignments)
                             foundRows
                         |> Result.map (fun outcome ->
@@ -32273,7 +32310,7 @@ let rec private executeAsWithViewSources
 
             let deleteConflict result ((rowId, oldRow) as conflict) =
                 result
-                |> Result.bind (fun () -> validateViewExisting snapshot db table tableColumns oldRow |> Result.mapError storageErr)
+                |> Result.bind (fun () -> validateReplaceConflict snapshot db table tableColumns oldRow |> Result.mapError storageErr)
                 |> Result.bind (fun () -> fire Before TriggerDelete beforeDelete [ Some oldRow, None ])
                 |> Result.bind (fun () ->
                     deleteRowsCandidates snapshot db table [ conflict ] (fun _ -> Ok true)

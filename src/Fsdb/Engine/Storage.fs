@@ -11555,6 +11555,20 @@ and upsertRowsWithOrdinal
     (assignedColumns: Set<int> option)
     (foundRows: bool)
     : Result<InsertOutcome, StorageError> =
+    upsertRowsWithOrdinalChecked store dbName tableName columns rowsIn prepare applyUpdate None assignedColumns foundRows
+
+and internal upsertRowsWithOrdinalChecked
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columns: string list option)
+    (rowsIn: Value list list)
+    (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
+    (applyUpdate: int -> Value[] -> Value[] -> Result<Value[], StorageError>)
+    (checkChangedRow: (Value[] -> Value[] -> Result<Value[], StorageError>) option)
+    (assignedColumns: Set<int> option)
+    (foundRows: bool)
+    : Result<InsertOutcome, StorageError> =
         let key = normalizeTableName tableName
 
         let eventsOf
@@ -11577,7 +11591,8 @@ and upsertRowsWithOrdinal
             withReferentialCatalogPublishing store dbName SharedAccess eventsOf (fun catalog db ->
                 virtualWriteGuard store dbName tableName
                 |> Result.bind (fun () -> tryGetTable dbName db tableName)
-                |> Result.bind (fun table -> upsertRowsInTable store dbName catalog key table columns rowsIn prepare applyUpdate assignedColumns foundRows)
+                |> Result.bind (fun table ->
+                    upsertRowsInTable store dbName catalog key table columns rowsIn prepare applyUpdate checkChangedRow assignedColumns foundRows)
                 |> Result.map (fun (catalog', cascaded, summary) -> catalog', (summary, cascaded, catalog)))
 
         let result =
@@ -11610,6 +11625,7 @@ and private upsertRowsInTable
     (rowsIn: Value list list)
     (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
     (applyUpdate: int -> Value[] -> Value[] -> Result<Value[], StorageError>)
+    (checkChangedRow: (Value[] -> Value[] -> Result<Value[], StorageError>) option)
     (assignedColumns: Set<int> option)
     (foundRows: bool)
     : Result<Catalog * Map<TableAddress, RowUpdate list> * UpsertSummary, StorageError> =
@@ -11662,6 +11678,10 @@ and private upsertRowsInTable
                                             | candidate, Some(pos, existing) ->
                                                 applyUpdate ordinal existing candidate
                                                 |> Result.bind (coerceMutationRow (temporalCoercionMode store) table.Columns assignedColumns existing)
+                                                |> Result.bind (fun applied ->
+                                                    match checkChangedRow with
+                                                    | Some check when applied <> existing -> check existing applied
+                                                    | _ -> Ok applied)
                                                 |> Result.bind (validateUpdatedUniqueKeys table uniqueGroups state.UniqueIndex pos)
                                                 |> Result.bind (fun applied ->
                                                     // ODKU validates child references and applies

@@ -1339,6 +1339,13 @@ trigger is created.
 can precede a writable physical target in an inner joined view. The
 audited UPDATE changes that target once, and cascaded CHECK OPTION
 rejection is atomic in both fsdb and MySQL 8.4.11.
+
+[Duplicate-key writes through nested single-table views](torture/findings/2026-11-27-nested-view-duplicate-writes.md)
+distinguish an upsert from a replacement delete. Upserts may update a
+hidden conflict and check changed rows after coercion. REPLACE
+returns 3059 for a hidden conflict and rolls back the statement.
+Prepared duplicate-key assignments bind `VALUES(column)` to the
+view's exposed columns.
 [Windowed `NATURAL JOIN` read sources](torture/findings/2026-11-06-window-natural-joined-view.md)
 also leave the physical target writable with either source order or a CTE
 input; duplicate joined rows still update that target once.
