@@ -21193,6 +21193,25 @@ and private indexOrderTerms (registry: Registry) (tref: TableRef) (select: Selec
         | _ -> Error())
     |> Result.toOption
 
+and private indexOrderPreservesSqlTies (columns: ColumnDef list) (terms: IndexOrderTerm list) =
+    let rec preserves = function
+        | [] | [ _ ] -> true
+        | (term: IndexOrderTerm) :: rest ->
+            // Physical keys can distinguish spellings that tie in SQL. That
+            // refinement is safe only after comparing the requested keys.
+            let compatible =
+                columns
+                |> List.tryFind (fun column -> equalsIgnoreCase column.Name term.Column)
+                |> Option.exists (fun column ->
+                    let text =
+                        match term.Transform with
+                        | None -> isTextColumn (Some column)
+                        | Some transform -> FunctionalIndex.hasTextResult transform
+                    not text || (Collation.findOrDefault column.Collation).EqualityIsOrderEquivalence)
+            compatible && preserves rest
+
+    preserves terms
+
 and private tryIndexOrder
     (store: Store)
     (registry: Registry)
@@ -21211,14 +21230,17 @@ and private tryIndexOrder
         && not (select.Projections |> List.exists (_.Expression >> containsAggregate registry))
         && not (select.Projections |> List.exists (_.Expression >> collectWindowFuncs >> List.isEmpty >> not))
 
+    let physicalTable = physicalFastPathTable store dbName tref
     let storedRowsAreDirect =
-        physicalFastPathTable store dbName tref
+        physicalTable
         |> Option.exists (fun table -> storedRowsMatchReadRows store table.Columns)
 
     if not storedRowsAreDirect || not canUseIndexOrder then
         None
     else
         indexOrderTerms registry tref select
+        |> Option.filter (fun terms ->
+            physicalTable |> Option.exists (fun table -> indexOrderPreservesSqlTies table.Columns terms))
         |> Option.bind (fun orderedColumns ->
             let plan
                 (keyName: string)
@@ -21368,9 +21390,10 @@ and private tryCorrelatedTopOrder store registry dbName (tref: TableRef) (select
                 let safeOrder (term: IndexOrderTerm) =
                     term.Transform.IsNone
                     && (innerColumn term.Column |> Option.exists (fun column ->
-                        match column.Type with
-                        | TDate | TDateTime _ -> true
-                        | ty -> isExactIntegerIndexType ty))
+                        isTextColumn (Some column)
+                        || (match column.Type with
+                            | TDate | TDateTime _ -> true
+                            | ty -> isExactIntegerIndexType ty)))
 
                 if correlatedPins.IsEmpty then None
                 else
@@ -21378,7 +21401,8 @@ and private tryCorrelatedTopOrder store registry dbName (tref: TableRef) (select
                     let orderProjections = expandOrderProjections table.Columns qualifiers select.Projections
                     let orderIsValid = validateOrderAliases (columnIndexOf table.Columns) qualifiers orderProjections select.OrderBy |> Result.isOk
                     indexOrderTerms registry tref select
-                    |> Option.filter (fun terms -> orderIsValid && List.forall safeOrder terms)
+                    |> Option.filter (fun terms ->
+                        orderIsValid && List.forall safeOrder terms && indexOrderPreservesSqlTies table.Columns terms)
                     |> Option.bind (fun terms ->
                         let bound =
                             Expression.rewrite (function
@@ -21462,7 +21486,7 @@ and private compareByOrderKeys (dirs: Direction list) (ka: (Value * Collation.Co
         | dir :: remainingDirs, (leftValue, collation) :: remainingLeft, (rightValue, _) :: remainingRight ->
             let result =
                 match leftValue, rightValue, collation with
-                | VString leftText, VString rightText, Some collation -> collation.Compare leftText rightText
+                | VString leftText, VString rightText, Some collation -> collation.ComparePrimary leftText rightText
                 | _ -> Value.compareTotal leftValue rightValue
 
             let directed = if dir = Asc then result else -result
@@ -22818,6 +22842,7 @@ and private tryGroupingIndexOrder
     : GroupingIndexLookup option =
     let allowed = indexAllowedForOrderedAccess IndexGroupBy tref
     orderedIndexPrefixMatches IndexGroupBy store registry dbName tref whereExpr groupTerms []
+    |> List.filter (fun resolved -> indexOrderPreservesSqlTies resolved.Table.Columns groupTerms)
     |> List.tryPick (fun resolved ->
         let terms = resolved.Match.Terms |> storageOrderTerms
         let lower, upper = fixedPrefixSuffixBounds store registry resolved.Table tref whereExpr resolved.Match
@@ -38204,7 +38229,11 @@ let private materializedWriteScan store registry scope (reference: TableRef) (se
             indexOrderTerms registry reference select
             |> Option.filter (List.forall (_.Transform >> Option.isNone))
             |> Option.map (fun terms ->
-                match Storage.tryOrderedIndexRowIdsInTableWith (equalsIgnoreCase "PRIMARY") store table (storageOrderTerms terms) with
+                let ordered =
+                    if indexOrderPreservesSqlTies table.Columns terms then
+                        Storage.tryOrderedIndexRowIdsInTableWith (equalsIgnoreCase "PRIMARY") store table (storageOrderTerms terms)
+                    else None
+                match ordered with
                 | Some ordered -> streamingRows ordered count
                 // Filesort consumes the source before applying LIMIT/OFFSET.
                 | None -> { Retained = fullScan (); Offset = [] })

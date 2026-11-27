@@ -2105,7 +2105,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
       PadSpace = spec.PadSpace
       EqualityIsOrderEquivalence =
         not spec.PadSpace
-        && (spec.ByteOrder || spec.Fold = CompareOptions.None) }
+        && (spec.ByteOrder || (spec.Fold = CompareOptions.None && name <> "utf8mb4_ja_0900_as_cs_ks")) }
 
 // ---------------------------------------------------------------------------
 // The registry — every utf8mb4 collation MySQL 8.4 ships.

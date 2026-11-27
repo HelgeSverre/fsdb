@@ -3107,6 +3107,10 @@ implementation effort:
    [Constant text prefixes](torture/findings/2026-11-26-correlated-index-top-n.md#constant-text-prefixes)
    use the same merge when the literal comparison uses the stored
    collation. The filtered fixture examines 22 rows, down from 608.
+   [Collation-equal sort keys](torture/findings/2026-11-26-correlated-index-top-n.md#collation-equal-sort-keys)
+   now compare the following SQL key. A correlated lookup can stream a
+   text suffix when its stored order preserves the requested tie-breakers.
+   Index-ordered grouping checks the same property before streaming groups.
    [NULL-safe equality prefixes](torture/findings/2026-11-27-correlated-null-safe-top-n.md)
    include nullable integer and text keys and direct `IS NULL` key parts.
    The lateral fixture examines 46 rows, down from 1,159.

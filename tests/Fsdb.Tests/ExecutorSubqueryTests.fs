@@ -191,6 +191,73 @@ let tests =
                   |> fun rows -> rows @ [ [ Some "3"; None; None ]; [ Some "4"; None; None ] ]
               Expect.equal fallback (ResultSet([ "id"; "id"; "stamp" ], caseSensitiveRows)) "the explicit collation distinguishes spellings"
 
+          testCase "ORDER BY uses the next key for collation-equal text"
+          <| fun _ ->
+              let store = newStore ()
+              for setup in
+                  [ "CREATE TABLE owners (id INT PRIMARY KEY)"
+                    "INSERT INTO owners VALUES (1)"
+                    "CREATE TABLE events(id INT PRIMARY KEY,tenant INT,state VARCHAR(8) COLLATE utf8mb4_0900_ai_ci,KEY recent(tenant,state,id))"
+                    "INSERT INTO events VALUES (1,1,'active'),(2,1,'ACTIVE'),(3,1,'áctive'),(4,1,'Active'),(5,1,'archived')" ] do
+                  match runDefault store setup with
+                  | Affected _ -> ()
+                  | other -> failtestf "%s: %A" setup other
+
+              let rows expected = expected |> List.map (List.map Some)
+              let sorted = rows [ [ "1"; "active" ]; [ "2"; "ACTIVE" ]; [ "3"; "áctive" ] ]
+              let reversed = rows [ [ "5"; "archived" ]; [ "4"; "Active" ]; [ "3"; "áctive" ] ]
+              for hint in [ ""; " IGNORE INDEX(recent)" ] do
+                  for order, expected in [ "state,id", sorted; "state DESC,id DESC", reversed ] do
+                      let query = "SELECT id,state FROM events" + hint + " WHERE tenant=1 ORDER BY " + order + " LIMIT 3"
+                      Expect.equal (runDefault store query) (ResultSet([ "id"; "state" ], expected)) query
+
+              let lateral =
+                  "SELECT q.id,q.state FROM owners o JOIN LATERAL (SELECT e.id,e.state FROM events e "
+                  + "WHERE e.tenant=o.id ORDER BY e.state,e.id LIMIT 3) q ON TRUE ORDER BY q.id"
+              Expect.equal (runDefault store lateral) (ResultSet([ "id"; "state" ], sorted)) "lateral top-N uses the numeric tie-breaker"
+
+              let scalar =
+                  "SELECT (SELECT e.id FROM events e WHERE e.tenant=o.id ORDER BY e.state,e.id LIMIT 1 OFFSET 1) AS chosen FROM owners o"
+              Expect.equal (runDefault store scalar) (ResultSet([ "chosen" ], rows [ [ "2" ] ])) "scalar offset uses the numeric tie-breaker"
+
+              let window = "SELECT id,RANK() OVER(ORDER BY state) AS ranked,ROW_NUMBER() OVER(ORDER BY state,id) AS numbered FROM events ORDER BY id"
+              let ranks = rows [ [ "1"; "1"; "1" ]; [ "2"; "1"; "2" ]; [ "3"; "1"; "3" ]; [ "4"; "1"; "4" ]; [ "5"; "5"; "5" ] ]
+              Expect.equal (runDefault store window) (ResultSet([ "id"; "ranked"; "numbered" ], ranks)) "window peers share the collation rank"
+
+              for setup in
+                  [ "CREATE TABLE binary_events(id INT PRIMARY KEY,tenant INT,state VARCHAR(8) COLLATE utf8mb4_0900_bin,KEY recent(tenant,state,id))"
+                    "INSERT INTO binary_events SELECT * FROM events" ] do
+                  match runDefault store setup with
+                  | Affected _ -> ()
+                  | other -> failtestf "%s: %A" setup other
+              let binary = scalar.Replace("FROM events e", "FROM binary_events e").Replace(" OFFSET 1", "")
+              Expect.equal (runDefault store binary) (ResultSet([ "chosen" ], rows [ [ "2" ] ])) "the binary collation sorts uppercase first"
+              match runDefault store ("EXPLAIN ANALYZE " + binary) with
+              | ResultSet(_, lines) ->
+                  let plan = lines |> List.choose (List.tryHead >> Option.flatten) |> String.concat "\n"
+                  Expect.stringContains plan "Ordered index lookup on e using recent" "the binary suffix can stream"
+              | other -> failtestf "expected an analyzed plan, got %A" other
+
+          testCase "GROUP BY keeps collation-equal text and its following key together"
+          <| fun _ ->
+              let store = newStore ()
+              for setup in
+                  [ "CREATE TABLE events(id INT PRIMARY KEY,state VARCHAR(8) COLLATE utf8mb4_0900_ai_ci,stamp INT,KEY recent(state,stamp,id))"
+                    "INSERT INTO events VALUES (1,'active',1),(2,'active',2),(3,'ACTIVE',1),(4,'Active',2),(5,'archived',1)" ] do
+                  match runDefault store setup with
+                  | Affected _ -> ()
+                  | other -> failtestf "%s: %A" setup other
+
+              let expected =
+                  [ [ "active"; "1"; "2" ]; [ "active"; "2"; "2" ]; [ "archived"; "1"; "1" ] ]
+                  |> List.map (List.map Some)
+                  |> fun rows -> ResultSet([ "label"; "stamp"; "total" ], rows)
+              for hint in [ ""; " IGNORE INDEX (recent)" ] do
+                  let query =
+                      "SELECT LOWER(e.state) AS label,e.stamp,COUNT(*) AS total FROM events e"
+                      + hint + " GROUP BY e.state,e.stamp ORDER BY label,e.stamp"
+                  Expect.equal (runDefault store query) expected query
+
           testList
               "joined correlated COUNT and EXISTS"
               [ let joinedStore () =

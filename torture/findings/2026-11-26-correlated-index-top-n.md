@@ -84,6 +84,36 @@ matched MySQL.
 A separate text-suffix probe uses `ORDER BY state,id LIMIT 3` with
 `state` under `utf8mb4_0900_ai_ci`. With IDs 1–4 holding `active`,
 `ACTIVE`, `áctive`, and `Active` respectively, MySQL's lateral query
-returns IDs 1, 2, and 3. Fsdb returns 1, 4, and 2. The current Fsdb sort
-breaks the tie by spelling before reaching `id`. A scalar lookup at
-`LIMIT 1 OFFSET 1` likewise returns ID 2 in MySQL and ID 4 in Fsdb.
+returns IDs 1, 2, and 3. Fsdb previously returned 1, 4, and 2. A scalar
+lookup at `LIMIT 1 OFFSET 1` returned ID 4 in Fsdb and ID 2 in MySQL.
+
+The SQL sort now moves to the next key when the current collation
+compares equal. The same comparison gives equivalent values the
+same window rank. Physical index order retains its spelling
+refinement for range and locking operations. Ordered SQL access
+uses the index when that refinement cannot override a later sort
+key, including binary-collated text in a correlated order suffix.
+
+All 512 generated queries match MySQL 8.4.11, up by 32 with no
+regressions. The comparison covered scans, index hints, correlated
+scalar and lateral queries, window rankings, NULLs, `CHAR` and
+`VARCHAR`, and four collations. The same ordered-query results matched
+with durable Fsdb storage.
+
+The same index-order check applies to `GROUP BY state,stamp`. Previously,
+physical spelling order could split the `active` group for stamp 1 into
+two groups with a count of 1. MySQL, the Fsdb scan, and the corrected
+indexed query return one group with a count of 2. All 128 generated
+grouping queries now match MySQL in both storage modes, up from 112.
+They cover direct and computed keys, index hints, filters, and `HAVING`.
+
+The binary-collated suffix switched from a scan to an ordered index
+lookup on 40,000 events and 100 outer rows. Native in-memory Debug builds
+returned the same rows as MySQL. The loopback client alternated baseline
+`cfe8fe06` and the updated build, taking the median of six measured runs
+after one warm-up per build. Validation was running on the same host.
+
+| Query | Before | After | Index rows per loop |
+| --- | ---: | ---: | ---: |
+| Lateral top-N | 1,673 ms | 25 ms | 9 |
+| Scalar top-N | 1,723 ms | 35 ms | 6 |
