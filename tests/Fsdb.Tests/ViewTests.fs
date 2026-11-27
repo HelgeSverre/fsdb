@@ -337,6 +337,64 @@ let tests =
               Expect.equal result (Err(1395, "Can not delete from join view 'fsdb.delete_joined'")) "derived source binds before target rejection"
               Expect.equal calls 0 "binding the source does not call its custom function"
 
+          testCase "DELETE classifies merged join views without a writable projection"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE a(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE b(id INT PRIMARY KEY)"
+                    "INSERT INTO a VALUES(1,10),(3,30)"
+                    "INSERT INTO b VALUES(1)"
+                    "CREATE VIEW cte_join AS WITH t AS (SELECT * FROM a) SELECT t.id,t.n FROM t JOIN b USING(id)"
+                    "CREATE VIEW derived_join AS SELECT t.id,t.n FROM (SELECT * FROM a) t JOIN b USING(id)"
+                    "CREATE VIEW layered_join AS SELECT id FROM cte_join"
+                    "CREATE VIEW constant_join AS SELECT 1 AS id FROM (SELECT * FROM a) t JOIN b USING(id)"
+                    "CREATE VIEW derived_only AS SELECT t.id FROM (SELECT * FROM a) t JOIN (SELECT * FROM b) u USING(id)"
+                    "CREATE VIEW outer_join AS SELECT t.id FROM (SELECT * FROM a) t LEFT JOIN b USING(id)"
+                    "CREATE ALGORITHM=TEMPTABLE VIEW temp_join AS SELECT t.id FROM (SELECT * FROM a) t JOIN b USING(id)"
+                    "CREATE TABLE removed_companion(id INT PRIMARY KEY)"
+                    "CREATE VIEW invalid_join AS SELECT t.id FROM (SELECT * FROM removed_companion) t JOIN b USING(id)"
+                    "DROP TABLE removed_companion" ] do
+                  expectOk (run store sql) sql
+
+              let joinError name = Err(1395, $"Can not delete from join view 'fsdb.{name}'")
+              for name in [ "cte_join"; "derived_join"; "layered_join"; "constant_join" ] do
+                  Expect.equal (run store $"DELETE FROM {name} AS v WHERE v.id=1") (joinError name) name
+                  Expect.equal (run store $"DELETE v FROM {name} v JOIN b USING(id)") (joinError name) name
+              for name in [ "derived_only"; "outer_join"; "temp_join" ] do
+                  TestSupport.Sql.expectError 1288 (run store $"DELETE FROM {name} WHERE id=1") name
+              TestSupport.Sql.expectError 1356 (run store "DELETE FROM invalid_join WHERE id=1")
+                  "an invalid source is reported before join-view eligibility"
+              Expect.equal (run store "EXPLAIN DELETE v FROM cte_join v JOIN b ON v.missing=b.id")
+                  (joinError "cte_join") "the target error precedes the outer join predicate"
+
+              let session, _ = Fsdb.QueryHandler.handle (Fsdb.Session.create 1 store) "USE fsdb"
+              for sql in [ "DELETE FROM cte_join WHERE id=?"; "DELETE v FROM derived_join v JOIN b USING(id) WHERE v.id=?" ] do
+                  match Fsdb.QueryHandler.prepareStatementForSession session sql with
+                  | Error(1395, _) -> ()
+                  | other -> failtestf "expected PREPARE to reject %s with 1395, got %A" sql other
+
+              Expect.equal (rows store "SELECT id,n FROM a ORDER BY id") [ [ Some "1"; Some "10" ]; [ Some "3"; Some "30" ] ] "base rows remain"
+              Expect.equal (rows store "SELECT id FROM b") [ [ Some "1" ] ] "join partner remains"
+
+          testCase "a layer over a materialized view cannot write its base rows"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE base(id INT PRIMARY KEY,n INT)"
+                    "INSERT INTO base VALUES(1,10),(3,30)"
+                    "CREATE ALGORITHM=TEMPTABLE VIEW middle_view AS SELECT id,n FROM base"
+                    "CREATE VIEW outer_view AS SELECT id,n FROM middle_view"
+                    "CREATE VIEW writable_control AS SELECT id,n FROM base" ] do
+                  expectOk (run store sql) sql
+              TestSupport.Sql.expectError 1288 (run store "UPDATE outer_view AS v SET v.n=11 WHERE v.id=1") "UPDATE cannot merge the inner view"
+              TestSupport.Sql.expectError 1288 (run store "DELETE FROM outer_view AS v WHERE v.id=1") "DELETE cannot merge the inner view"
+              TestSupport.Sql.expectError 1471 (run store "INSERT INTO outer_view VALUES(2,20)") "INSERT cannot merge the inner view"
+              Expect.equal (rows store "SELECT id,n FROM base ORDER BY id") [ [ Some "1"; Some "10" ]; [ Some "3"; Some "30" ] ]
+                  "rejected writes preserve the base rows"
+              Expect.equal (run store "UPDATE writable_control SET n=11 WHERE id=1") (Affected 1UL)
+                  "a direct writable projection still reaches the base"
+
           testCase "joined DELETE maps nested view projections to distinct base rows"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

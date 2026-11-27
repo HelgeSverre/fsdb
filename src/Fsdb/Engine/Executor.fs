@@ -1679,8 +1679,7 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
         | None, None -> None
 
     let hasWritableShape (select: SelectStmt) =
-        not (view.Algorithm.Equals("TEMPTABLE", System.StringComparison.OrdinalIgnoreCase))
-        && not select.Distinct
+        not select.Distinct
         && not select.CalculateFoundRows
         && select.GroupBy.IsEmpty
         && not select.Rollup
@@ -1881,7 +1880,8 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
             |> InformationSchema.flattenInnerJoinedOperands store.Catalog view.Schema
         let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
 
-        if Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting
+        if equalsIgnoreCase view.Algorithm "TEMPTABLE"
+           || Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting
            || (not allowHeuristicMerge && not (equalsIgnoreCase view.Algorithm "MERGE")
                && not (seen.IsEmpty && forceRootMerge && equalsIgnoreCase view.Algorithm "UNDEFINED")) then
             None
@@ -2045,7 +2045,7 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
 
                     if
                         unresolvedStar
-                        || (not allowHeuristicMerge && underlyingStored.IsSome && underlying.IsNone)
+                        || (underlyingStored.IsSome && underlying.IsNone)
                         || dependentProjection
                         || dependentPredicate
                         || not (namesMatchProjections outputNames projected)
@@ -3344,8 +3344,11 @@ let private unknownColumn name = unknownColumnIn FieldList name
 let private nonUpdatableTarget operation target : EvalError =
     1288, sprintf "The target table %s of the %s is not updatable" target operation
 
-let private joinViewDeleteError (view: UpdatableView) : EvalError =
-    1395, sprintf "Can not delete from join view '%s.%s'" view.ViewDatabase view.ViewName
+let private joinViewDeleteErrorFor schema name : EvalError =
+    1395, sprintf "Can not delete from join view '%s.%s'" schema name
+
+let private joinViewDeleteError (view: UpdatableView) =
+    joinViewDeleteErrorFor view.ViewDatabase view.ViewName
 
 let private validateReferencesWith resolve expression =
     Expression.collect (function
@@ -27461,6 +27464,58 @@ let private tryUpdatableViewWith allowHeuristicMerge (store: Store) (dbName: str
 let private tryUpdatableView store dbName viewName =
     tryUpdatableViewWith (not disableHeuristicViewMerge.Value) store dbName viewName
 
+/// DELETE checks whether a merged view has an updatable underlying table before
+/// checking its table count. The projected columns do not determine either fact.
+let private tryMergedJoinViewDeleteError store registry (root: StoredView) =
+    let permanent = storeForStoredView store
+    let rec sources first joins =
+        let source = function
+            | FromJoinGroup(first, joins) -> sources first joins
+            | source -> Some [ source ]
+        let innerSources (join: Join) =
+            match join.Kind with
+            | InnerJoin | StraightJoin | CrossJoin | NaturalJoin -> source join.Table
+            | _ -> None
+        (source first, joins)
+        ||> List.fold (fun found join -> Option.map2 (@) found (innerSources join))
+
+    let rec check seen (view: StoredView) =
+        let key = view.Schema.ToLowerInvariant(), normalizeTableName view.Name
+        let allowMerge =
+            not disableHeuristicViewMerge.Value
+            || (Set.isEmpty seen && (forcedViewMerges.Value |> Option.exists (Set.contains key)))
+        if Set.contains key seen || Set.count seen >= Limits.maxViewMetadataNesting then None
+        else
+            match parseStoredViewStatement view with
+            | Ok(Select select) when
+                not (InformationSchema.viewDefinitionHasWindow select)
+                && (if equalsIgnoreCase view.Algorithm "MERGE" then selectHasMergeableShape registry select
+                    else equalsIgnoreCase view.Algorithm "UNDEFINED" && allowMerge
+                         && queryBodyCanMerge registry (PlainSelect select)) ->
+                let ctes = select.Ctes |> List.map (_.CteName >> normalizeTableName) |> Set.ofList
+                let tableShape = function
+                    | FromTable table when table.Database.IsSome || not (Set.contains (normalizeTableName table.Table) ctes) ->
+                        let schema = table.Database |> Option.defaultValue view.Schema
+                        match InformationSchema.findTable permanent.Catalog schema table.Table with
+                        | Ok _ -> Some false
+                        | Error _ ->
+                            tryStoredView permanent schema table.Table |> Option.bind (check (Set.add key seen))
+                    | _ -> None
+                select.From
+                |> Option.bind (fun first -> sources first select.Joins)
+                |> Option.bind (fun tables ->
+                    tables |> List.tryPick tableShape
+                    |> Option.map (fun nestedJoin -> nestedJoin || tables.Length > 1))
+            | _ -> None
+
+    match check Set.empty root with
+    | Some true -> Some(joinViewDeleteErrorFor root.Schema root.Name)
+    | _ -> None
+
+let private tryJoinViewDeleteError store registry stored = function
+    | Some view when not view.UpdateJoins.IsEmpty -> Some(joinViewDeleteError view)
+    | _ -> tryMergedJoinViewDeleteError store registry stored
+
 let rec private viewWriteMergeError store dbName statement =
     let insertError fullName =
         let schema, name = splitQualified dbName fullName
@@ -27515,9 +27570,8 @@ let private bindJoinedDeleteTargetNames dbName (delete: DeleteStmt) =
         (currentCteScope () |> Map.keys |> Set.ofSeq, delete.Ctes)
         ||> List.fold (fun names cte -> Set.add (cte.CteName.ToLowerInvariant()) names)
     match delete.Source with
-    | SingleDeleteTable table when disableHeuristicViewMerge.Value ->
+    | SingleDeleteTable table ->
         Ok(cteNames, [ table.Alias |> Option.defaultValue table.Table, FromTable table ])
-    | SingleDeleteTable _ -> Ok(cteNames, [])
     | MultiDeleteSource(from, joins) ->
         let sources =
             (from :: (joins |> List.map _.Table))
@@ -27575,18 +27629,23 @@ let private probeMutationSources store registry dbName source joins ctes =
     | _ -> Ok()
 
 let private validateJoinedDeleteTargets store registry dbName (delete: DeleteStmt) =
+    let rejectNonUpdatable =
+        match delete.Source with
+        | MultiDeleteSource _ -> true
+        | SingleDeleteTable _ -> disableHeuristicViewMerge.Value
     let targetError cteNames (target, source) =
         match source with
         | FromTable table when table.Database.IsSome || not (Set.contains (table.Table.ToLowerInvariant()) cteNames) ->
             let schema = table.Database |> Option.defaultValue dbName
             match tryStoredView store schema table.Table with
             | None -> None
-            | Some _ ->
-                match tryUpdatableView store schema table.Table with
-                | Some view when not view.UpdateJoins.IsEmpty -> Some(joinViewDeleteError view)
-                | Some _ -> None
-                | None -> Some(nonUpdatableTarget "DELETE" target)
-        | _ -> Some(nonUpdatableTarget "DELETE" target)
+            | Some stored ->
+                let plan = tryUpdatableView store schema table.Table
+                tryJoinViewDeleteError store registry stored plan
+                |> Option.orElseWith (fun () ->
+                    if plan.IsNone && rejectNonUpdatable then Some(nonUpdatableTarget "DELETE" target) else None)
+        | _ when rejectNonUpdatable -> Some(nonUpdatableTarget "DELETE" target)
+        | _ -> None
 
     bindJoinedDeleteTargetNames dbName delete
     |> Result.bind (fun (cteNames, targets) ->
@@ -36835,15 +36894,19 @@ let rec private executeAsWithViewSources
     | Delete ({ Source = SingleDeleteTable source } as deleteStmt) when tryStoredView store (source.Database |> Option.defaultValue dbName) source.Table |> Option.isSome ->
         let viewDb = source.Database |> Option.defaultValue dbName
 
-        match tryUpdatableView store viewDb source.Table with
-        | None ->
-            let target =
-                if disableHeuristicViewMerge.Value then source.Alias |> Option.defaultValue source.Table
-                else source.Table
+        let plan = tryUpdatableView store viewDb source.Table
+        let joinError =
+            tryStoredView store viewDb source.Table
+            |> Option.bind (fun stored -> tryJoinViewDeleteError store registry stored plan)
+        match joinError, plan with
+        | Some error, _ ->
+            match probeMutationSources store registry dbName (Some(FromTable source)) [] deleteStmt.Ctes with
+            | Error bindingError -> ids, bindingError
+            | Ok() -> ids, Err error
+        | None, None ->
+            let target = source.Alias |> Option.defaultValue source.Table
             ids, Err(nonUpdatableTarget "DELETE" target)
-        | Some view when not view.UpdateJoins.IsEmpty ->
-            ids, Err(joinViewDeleteError view)
-        | Some view ->
+        | None, Some view ->
             let rewrite = rewriteViewExpression view
             let rewritten =
                 { deleteStmt with

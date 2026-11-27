@@ -73,11 +73,41 @@ The pinned MySQL 8.4.11 comparison matched all 42 tested CREATE, ALTER,
 and CREATE OR REPLACE decisions in memory and with WAL. The returned
 view metadata and rows in the restart fixture also matched before and
 after reopening the checkpoint. Rejected writes preserved the base rows.
-In a follow-up matrix of 13 standalone and joined DELETE statements, seven
-reported 1288 in Fsdb and 1395 in MySQL. The seven exposed a physical
-table alongside a CTE or derived table, including through a nested view
-and with a constant-only projection. Both engines rejected every write.
 Fsdb also quotes the view name in the corresponding 1471 INSERT diagnostic.
+
+## DELETE from merged join views
+
+MySQL checks whether the merged view has an updatable underlying table before
+checking whether it spans several tables. A physical table beside a CTE or
+derived table is enough for error 1395, even when the projection contains no
+column from the physical table. A view composed entirely of read-only query
+sources still reports 1288. The rule applies through nested merged views
+and names the outer view. Source binding can report an invalid view before
+either eligibility error.
+[MySQL DELETE preparation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_delete.cc#L672-L700)
+
+The pinned MySQL 8.4.11 comparison now matches the SQLSTATE, code, and
+message in all 32 tested errors across the original, extended, and
+invalid-view fixtures. Both storage modes agree. A checkpoint restart
+preserved the extended fixture's results, including PREPARE and EXPLAIN.
+No base rows changed.
+
+## Nested TEMPTABLE views
+
+Each nested definition now uses its own view algorithm during mutation
+planning. A stored view that cannot be merged supplies no physical write
+target to its outer view. The regression covers UPDATE, DELETE, and INSERT
+against an outer projection over TEMPTABLE and verifies the base rows.
+The pinned MySQL comparison confirmed matching execution error codes for
+those three statements in memory and with WAL. The checkpoint retained the
+original rows.
+
+Some diagnostic wording still differs for these writes. In the three-layer
+fixture, joined UPDATE reports 1146 instead of 1288. PREPARE can defer the
+rejection until EXECUTE, and PREPARE and EXPLAIN can report an outer binding
+error before the non-updatable error that MySQL returns. MySQL permits
+DELETE through a merged view over a physical table whose outputs are all
+computed or constant. Fsdb still refuses that shape.
 
 ## Direct joined updates
 

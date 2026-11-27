@@ -1126,7 +1126,13 @@ now follow MySQL's permissive outer-view `IS_UPDATABLE` metadata, including a
 recursive-only view that reports `YES` but still rejects UPDATE with 1288.
 [CHECK OPTION eligibility](torture/findings/2026-11-27-saved-view-self-reads.md#check-option-over-read-only-sources)
 also follows the outer view for direct projections and inner joins over read-only
-sources. Some writes through those joins still return a different diagnostic.
+sources.
+[DELETE on merged join views](torture/findings/2026-11-27-saved-view-self-reads.md#delete-from-merged-join-views)
+reports the join-view error when a physical table remains writable, including
+when no projected column belongs to it.
+[Nested TEMPTABLE views](torture/findings/2026-11-27-saved-view-self-reads.md#nested-temptable-views)
+reject writes through outer layers. Some PREPARE and EXPLAIN diagnostics
+and writes through projections containing only computed columns still differ.
 [Audited `UNION DISTINCT` derived and CTE read sources](torture/findings/2026-11-04-union-distinct-updatable-view.md)
 also precede a writable physical target in an inner joined view, including
 duplicate elimination, ordered limited sources, one target write, and cascaded
