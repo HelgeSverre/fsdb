@@ -668,6 +668,31 @@ let tests =
                   [ [ Some "ab" ] ]
                   "legacy stopped word remains indexed"
 
+          testCase "FSNZ snapshots sync general fulltext cache tails under the pinned weights"
+          <| fun _ ->
+              let dir = TestSupport.directory "fulltext-fsnz-general"
+              // Format 35 stored one pending cache term for the two format controls.
+              let snapshot = System.Convert.FromBase64String "RlNOWgEAAAAEZnNkYgEAAAAEZG9jcwRkb2NzAgAAAAJpZAQAAAAAAQAAAAAAAAAEYm9keQkBAAAAAAABEnV0ZjhtYjRfZ2VuZXJhbF9jaQAAAAACAAAAB1BSSU1BUlkBAAAABQBOOmlkAQEAAAJmdAEAAAAHAE46Ym9keQABAwVuZ3JhbQAAAAAAAAESdXRmOG1iNF9nZW5lcmFsX2NpAAAaHC2eukzfCAEAAAAAAAAABQAAAAQAAAAAAAADAAAAAgAAAgACAgABBgAAAAAAAAABAAAAAAAAAAIG5Lit4oGhBAAAAAAAAAAJAAAAAAAAABAAAAAAAAAAAAXkuK3OuQUAAAAAAAAAAwAAAAAAAAAQAAAAAAAAAAB7AwAAAAAAAAEEAAAAAAAAAAEF5LitzYUAAAAAAgAAAAEBAAAAAAAAAAQG5p2x5LqsAQEBAAAAAgAAAAECAAAAAAAAAAQK5Lit4oGhIOiKsQICAgAAAAIAAAABAwAAAAAAAAAECuS4reKBoiDoirECAwQAAAACAAAAAQUAAAAAAAAABAnkuK3OuSDoirECBQAAAACoAQAAAAAAAAssBOM="
+              System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, "snapshot.fsdb"), snapshot)
+              let index (store: Storage.Store) = store.Catalog.[Storage.defaultDatabase].["docs"].FullTextIndexes.["ft"]
+              let store = Persistence.load dir
+              let run = TestSupport.Sql.executeDefault store
+              let matches run term =
+                  run $"SELECT id FROM docs WHERE MATCH(body) AGAINST('{term}') ORDER BY id" |> rows
+
+              Expect.equal (FullText.flushedThrough (index store)) (Some 5L) "the legacy cache tails were synced"
+              Expect.isEmpty (FullText.cachedTermsInInsertionOrder (index store)) "the pending terms were cleared"
+              Expect.isNonEmpty (FullText.deletedPostings (index store)) "retained deletes survived"
+              Expect.equal (matches run "中\u2061") [ [ Some "2" ] ] "first control is searchable"
+              Expect.equal (matches run "中\u2062") [ [ Some "3" ] ] "second control is searchable"
+              Expect.equal (matches run "中\u0345") [ [ Some "5" ] ] "live iota remains searchable"
+              Expect.equal (run "INSERT INTO docs VALUES(6,'中\u2062 花')") (Affected 1UL) "write after recovery"
+
+              Persistence.snapshotNow dir store
+              let reopened = Persistence.load dir
+              Expect.equal (FullText.flushedThrough (index reopened)) (Some 5L) "current cache stays pending"
+              Expect.equal (matches (TestSupport.Sql.executeDefault reopened) "中\u2062") [ [ Some "3" ]; [ Some "6" ] ] "search after another checkpoint"
+
           testCase "snapshots reject missing and out-of-range fulltext rule references"
           <| fun _ ->
               let dir = TestSupport.directory "fulltext-invalid-rule-reference"
@@ -680,7 +705,7 @@ let tests =
               Persistence.snapshotNow dir store
               let path = System.IO.Path.Combine(dir, "snapshot.fsdb")
               let bytes = System.IO.File.ReadAllBytes path
-              Expect.equal (System.Text.Encoding.ASCII.GetString(bytes, 0, 4)) "FSNZ" "rule references use the current snapshot format"
+              Expect.equal (System.Text.Encoding.ASCII.GetString(bytes, 0, 4)) "FSNa" "rule references use the current snapshot format"
               let trailerSize, preparedCountSize = 12, 4
               let documentOrderSize = 1 // One length-encoded position for the single row.
               let lastRuleReference = bytes.Length - trailerSize - preparedCountSize - documentOrderSize - 1

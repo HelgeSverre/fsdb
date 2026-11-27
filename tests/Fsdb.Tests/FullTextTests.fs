@@ -276,6 +276,31 @@ let tests =
                               Expect.equal (scores |> Map.keys |> Seq.toList) [ row ] label
                               closeTo score scores.[row] label
 
+          testCase "legacy general ngram postings distinguish format controls and spaces"
+          <| fun _ ->
+              let terms =
+                  [ "中\u2061"; "中\u2062"; "中\ufeff"; "中\u200e"; "中\u202a"; "中\u00ad"
+                    "中\u202f"; "中\u2008"; "中\u2009"; "中文"; "東西" ]
+                  |> List.mapi (fun i term -> i + 1, term)
+              let documents = terms |> List.map (fun (id, term) -> id, [ term + " 花" ])
+              let documents = documents @ [ 12, [ "中\u0345 花" ]; 13, [ "中ι 花" ]; 14, [ "中Ι 花" ] ]
+              let ids scores = scores |> Map.keys |> Seq.toList
+
+              for name in [ "utf8mb3_general_ci"; "utf8mb4_general_ci" ] do
+                  let index =
+                      buildIndexWithStopwords StopwordPolicy.Disabled (Ngrams 2) (tryFind name |> Option.get) documents
+
+                  for view in [ index; flushPostings index ] do
+                      for id, term in terms do
+                          let label = $"{name} row {id}"
+                          Expect.equal (naturalScores view term |> ids) [ id ] label
+
+                      let iota = [ 12; 13; 14 ]
+                      Expect.equal (naturalScores view "中\u0345" |> ids) iota "Greek ypogegrammeni shares iota's weight"
+                      Expect.equal (booleanScores view "中\u0345" |> ids) iota "exact Greek ypogegrammeni"
+                      Expect.equal (booleanScores view "中\u0345*" |> ids) iota "Greek ypogegrammeni prefix"
+                      Expect.isEmpty (booleanScores view "中\u2061") "the format control ends the Boolean word"
+
           testCase "recovery syncs cached ngram streams whose collation keys have merged"
           <| fun _ ->
               let collation = tryFind "utf8mb4_general_ci" |> Option.get

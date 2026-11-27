@@ -2092,9 +2092,11 @@ keeps mark positions in `utf8mb4_general_ci` keys. Its original two-column
 corpus had smaller-size differences; the [current-head rerun](torture/findings/2026-11-06-cjk-current-head-ngram-rerun.md)
 matches all 387 searches at each size 1–10.
 The [format-control probe](torture/findings/2026-10-17-general-ci-format-controls.md)
-also keeps nine audited format/space characters distinct. The maintained
-two-column corpus now matches at token sizes 1–10; broader collation behavior
-remains open.
+now uses MySQL's pinned scalar weights in both legacy general full-text
+collations. The measured format controls and spaces keep distinct postings,
+and U+0345 shares Greek iota's posting. The maintained two-column corpus
+matches at token sizes 1–10. Broader tokenizer and ranking behavior remains
+open.
 The [decomposed-kana probe](torture/findings/2026-10-17-general-ci-kana-marks.md)
 keeps combining voicing marks distinct from precomposed kana under
 `utf8mb4_general_ci`; the maintained corpus now matches at sizes 1–10.

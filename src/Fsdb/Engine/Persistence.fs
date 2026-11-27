@@ -51,7 +51,8 @@ let private fullTextCacheBudgetSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x56uy
 let private fullTextOrderHighWatermarkSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x57uy |] // "FSNW" (format 32)
 let private fullTextCacheSegmentEndsSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x58uy |] // "FSNX" (format 33)
 let private fullTextNgramGroupingSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x59uy |] // "FSNY" (format 34)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x5Auy |] // "FSNZ" (format 35)
+let private sharedFullTextRulesSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x5Auy |] // "FSNZ" (format 35)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x61uy |] // "FSNa" (format 36)
 
 type private SnapshotFormat =
     { GeneratedForeignKeyIndexes: bool
@@ -82,6 +83,7 @@ type private SnapshotFormat =
       FullTextOrderHighWatermark: bool
       FullTextCacheSegmentEnds: bool
       FullTextDocumentIndexing: bool
+      PinnedGeneralFullTextWeights: bool
       FullTextStopwordSources: bool
       TableStatistics: bool
       IndexCardinality: bool }
@@ -115,6 +117,7 @@ let private legacySnapshotFormat =
       FullTextOrderHighWatermark = false
       FullTextCacheSegmentEnds = false
       FullTextDocumentIndexing = false
+      PinnedGeneralFullTextWeights = false
       FullTextStopwordSources = false
       TableStatistics = false
       IndexCardinality = false }
@@ -203,16 +206,21 @@ let private fullTextOrderHighWatermarkSnapshotFormat =
 let private fullTextCacheSegmentEndsSnapshotFormat =
     { fullTextOrderHighWatermarkSnapshotFormat with FullTextCacheSegmentEnds = true }
 
-let private currentSnapshotFormat =
+let private sharedFullTextRulesSnapshotFormat =
     { fullTextCacheSegmentEndsSnapshotFormat with FullTextDocumentIndexing = true }
+
+let private currentSnapshotFormat =
+    { sharedFullTextRulesSnapshotFormat with PinnedGeneralFullTextWeights = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
 let private snapshotTrailerSize = 12
 
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
-    if header = snapshotMagic || header = fullTextNgramGroupingSnapshotMagic then
+    if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = sharedFullTextRulesSnapshotMagic || header = fullTextNgramGroupingSnapshotMagic then
+        Some sharedFullTextRulesSnapshotFormat
     elif header = fullTextCacheSegmentEndsSnapshotMagic then
         Some fullTextCacheSegmentEndsSnapshotFormat
     elif header = fullTextOrderHighWatermarkSnapshotMagic then
@@ -2398,6 +2406,7 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
                  index
                  |> FullText.restoreDeletedPostings deleted
                  |> FullText.restoreCache nextOrder through terms budget format.FullTextCacheSegmentEnds
+                 |> FullText.syncLegacyGeneralCache format.PinnedGeneralFullTextWeights
              | None -> FullText.flushPostings index)
             |> FullText.withStopwordSource (sources |> Map.tryFind name |> Option.flatten))
     reindexTableWithFullTextIndexes fullTextIndexes table

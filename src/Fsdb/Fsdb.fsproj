@@ -105,6 +105,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="Sql/GeneralFullTextWeights.bin" LogicalName="Fsdb.GeneralFullTextWeights.bin" />
     <EmbeddedResource Include="Sql/Zh0900Weights.bin.gz" LogicalName="Fsdb.Zh0900Weights.bin.gz" />
     <EmbeddedResource Include="Sql/AccentSensitive0900Weights.bin.gz" LogicalName="Fsdb.AccentSensitive0900Weights.bin.gz" />
     <EmbeddedResource Include="Sql/CaseSensitive0900Weights.bin.gz" LogicalName="Fsdb.CaseSensitive0900Weights.bin.gz" />

@@ -809,6 +809,12 @@ let internal onlyCacheSynced (before: Index<'id>) (after: Index<'id>) =
         && before.Rules = after.Rules && before.StopwordSource = after.StopwordSource
         && obj.ReferenceEquals(before.StopwordReload, after.StopwordReload))
 
+let internal syncLegacyGeneralCache usesPinnedWeights (index: Index<'id>) =
+    // A legacy tail can describe several newly distinct posting streams.
+    if not usesPinnedWeights && Collation.usesGeneralFullTextWeights index.Collation.Name then
+        syncCachedPostings index
+    else index
+
 let internal flushPostings index =
     let flushed = syncCachedPostings index
     if flushed.Deleted.Documents.IsEmpty then flushed
