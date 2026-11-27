@@ -11520,6 +11520,10 @@ type private UpsertBatchState =
       Visited: Map<TableAddress, Value[] list>
       Cascaded: Map<TableAddress, RowUpdate list> }
 
+let internal isViewCheckError = function
+    | ExpressionError(1369, _) -> true
+    | _ -> false
+
 /// Upserts through the collation-aware unique indexes. MySQL counts a changed
 /// match as two affected rows; an unchanged match counts as one only with
 /// CLIENT_FOUND_ROWS, otherwise zero.
@@ -11555,19 +11559,20 @@ and upsertRowsWithOrdinal
     (assignedColumns: Set<int> option)
     (foundRows: bool)
     : Result<InsertOutcome, StorageError> =
-    upsertRowsWithOrdinalChecked store dbName tableName columns rowsIn prepare applyUpdate None assignedColumns foundRows
+    upsertRowsWithOrdinalChecked store dbName tableName columns (List.map Ok rowsIn) prepare applyUpdate None assignedColumns foundRows false
 
 and internal upsertRowsWithOrdinalChecked
     (store: Store)
     (dbName: string)
     (tableName: string)
     (columns: string list option)
-    (rowsIn: Value list list)
+    (rowsIn: Result<Value list, StorageError> list)
     (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
     (applyUpdate: int -> Value[] -> Value[] -> Result<Value[], StorageError>)
     (checkChangedRow: (Value[] -> Value[] -> Result<Value[], StorageError>) option)
     (assignedColumns: Set<int> option)
     (foundRows: bool)
+    (ignoreViewCheck: bool)
     : Result<InsertOutcome, StorageError> =
         let key = normalizeTableName tableName
 
@@ -11592,12 +11597,13 @@ and internal upsertRowsWithOrdinalChecked
                 virtualWriteGuard store dbName tableName
                 |> Result.bind (fun () -> tryGetTable dbName db tableName)
                 |> Result.bind (fun table ->
-                    upsertRowsInTable store dbName catalog key table columns rowsIn prepare applyUpdate checkChangedRow assignedColumns foundRows)
+                    upsertRowsInTable store dbName catalog key table columns rowsIn prepare applyUpdate checkChangedRow assignedColumns foundRows ignoreViewCheck)
                 |> Result.map (fun (catalog', cascaded, summary) -> catalog', (summary, cascaded, catalog)))
 
         let result =
             captureIndexExpressionError (fun () ->
-                match tryInsertLockTargets store dbName tableName columns (rowsIn |> List.map (List.map Some)) with
+                let lockRows = rowsIn |> List.choose (Result.toOption >> Option.map (List.map Some))
+                match tryInsertLockTargets store dbName tableName columns lockRows with
                 | Some targets when not targets.Keys.IsEmpty ->
                     withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
                 | _ -> publish ())
@@ -11622,12 +11628,13 @@ and private upsertRowsInTable
     (key: string)
     (table: Table)
     (columns: string list option)
-    (rowsIn: Value list list)
+    (rowsIn: Result<Value list, StorageError> list)
     (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
     (applyUpdate: int -> Value[] -> Value[] -> Result<Value[], StorageError>)
     (checkChangedRow: (Value[] -> Value[] -> Result<Value[], StorageError>) option)
     (assignedColumns: Set<int> option)
     (foundRows: bool)
+    (ignoreViewCheck: bool)
     : Result<Catalog * Map<TableAddress, RowUpdate list> * UpsertSummary, StorageError> =
                 let checkFks = store.ForeignKeyChecks
 
@@ -11640,7 +11647,7 @@ and private upsertRowsInTable
                 |> Result.bind (fun idxs ->
                     let mode = temporalCoercionMode store
                     let generateAutoOnZero = not store.ExecutionSettings.SqlMode.NoAutoValueOnZero
-                    let reservationCount = generatedAutoValueCount mode generateAutoOnZero table idxs Set.empty rowsIn
+                    let reservationCount = generatedAutoValueCount mode generateAutoOnZero table idxs Set.empty (rowsIn |> List.choose Result.toOption)
                     let firstReserved, reservedAutoNext =
                         reserveAutoIncrementRange store dbName table.OriginalName table.NextAutoId reservationCount
                     let uniqueGroups = uniqueKeyGroups table
@@ -11657,10 +11664,11 @@ and private upsertRowsInTable
                             |> Option.bind (fun key -> Map.tryFind key (Map.find group.Name index))
                             |> Option.map (fun rowId -> rowId, rows.[rowId]))
 
-                    let step stateResult (ordinal, rowValues: Value list) =
+                    let step stateResult (ordinal, rowValues) =
                         stateResult
                         |> Result.bind (fun state ->
-                            alignInsertValues table.Columns idxs rowValues
+                            rowValues
+                            |> Result.bind (alignInsertValues table.Columns idxs)
                             |> Result.bind (fun rawRow ->
                                     processRow
                                         mode
@@ -11776,7 +11784,13 @@ and private upsertRowsInTable
                                                         InsertedRev = candidate :: state.InsertedRev
                                                         UniqueIndex = uniqueIndex
                                                         SecondaryIndex = secondaryIndex
-                                                        SecondaryOrder = secondaryOrder })))))
+                                                        SecondaryOrder = secondaryOrder }))))
+                            |> function
+                                | Error error when ignoreViewCheck && isViewCheckError error ->
+                                    let code, message = toMySqlError error
+                                    Diagnostics.warning code message
+                                    Ok state
+                                | result -> result)
 
                     rowsIn
                     |> List.indexed

@@ -4818,6 +4818,33 @@ let tests =
               | Ok(_, 3), Error(1054, _) -> ()
               | actual -> failtestf "VALUES must bind to an exposed target column at prepare time, got %A" actual
 
+          testCase "ignored duplicate writes skip failed view checks and retain the rest of the batch"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE item(id INT PRIMARY KEY,qty INT)"
+                    "INSERT INTO item VALUES(1,-1),(2,10),(3,10)"
+                    "CREATE VIEW visible AS SELECT id,qty FROM item WHERE qty>0"
+                    "CREATE VIEW guarded AS SELECT id,qty FROM visible WITH CASCADED CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+
+              let session, _ = Fsdb.QueryHandler.handle (Fsdb.Session.create 1 store) "USE fsdb"
+              let sql =
+                  "INSERT IGNORE INTO guarded VALUES(1,4),(2,0),(3,6),(4,8),(5,0),(6,9) "
+                  + "ON DUPLICATE KEY UPDATE qty=IF(id=1,-2,6)"
+              let after, result = Fsdb.QueryHandler.handle session sql
+              Expect.equal result (Affected 4UL) "one duplicate update and two insertions count"
+              let _, warnings = Fsdb.QueryHandler.handle after "SHOW WARNINGS"
+              match warnings with
+              | ResultSet(_, flags) ->
+                  Expect.equal (flags |> List.map (List.item 1)) (List.replicate 3 (Some "1369"))
+                      "the failed candidate and update checks are warnings"
+              | other -> failtestf "expected warnings, got %A" other
+              Expect.equal (rows store "SELECT id,qty FROM item ORDER BY id")
+                  [ [ Some "1"; Some "-1" ]; [ Some "2"; Some "10" ]; [ Some "3"; Some "6" ]
+                    [ Some "4"; Some "8" ]; [ Some "6"; Some "9" ] ]
+                  "ignored writes leave the original rows intact"
+
           testCase "writable views do not expose unprojected base columns"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

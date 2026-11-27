@@ -1346,6 +1346,10 @@ hidden conflict and check changed rows after coercion. REPLACE
 returns 3059 for a hidden conflict and rolls back the statement.
 Prepared duplicate-key assignments bind `VALUES(column)` to the
 view's exposed columns.
+[`INSERT IGNORE` through a checked view](torture/findings/2026-11-27-ignored-upsert-view-checks.md)
+skips failed candidate and duplicate-update checks with warning 1369
+in audited explicit-key batches. Generated ID reservations still
+differ when every candidate fails.
 [Windowed `NATURAL JOIN` read sources](torture/findings/2026-11-06-window-natural-joined-view.md)
 also leave the physical target writable with either source order or a CTE
 input; duplicate joined rows still update that target once.

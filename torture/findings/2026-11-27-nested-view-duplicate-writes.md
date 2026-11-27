@@ -30,7 +30,6 @@ and secondary keys, hidden rows, insertion and replacement forms,
 and candidate and assignment values. Error messages, affected-row
 counts, and the stored table after each case matched in both modes.
 
-The audited `INSERT IGNORE ... ON DUPLICATE KEY UPDATE` still returns
-error 1369 when a changed row fails CHECK OPTION. MySQL skips that
-row and emits warning 1369. Checked joined views also need a separate
-audit of duplicate updates that change the join partner.
+The [`INSERT IGNORE` follow-up](2026-11-27-ignored-upsert-view-checks.md)
+adds row skipping with warning 1369. Checked joined views still
+need an audit of duplicate updates that change the join partner.
