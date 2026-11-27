@@ -369,6 +369,29 @@ let tests =
                       closeTo 0.227644696831703 scores.[id] "matching postings share DF across cache and disk"
                       closeTo scores.[id] flat.[id] "flat and general evaluators agree"
 
+          testCase "case-sensitive prefix cursors stop at interleaved width variants"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_0900_as_cs" |> Option.get
+              let documents =
+                  [ 1, "a風"; 2, "ａ木"; 3, "a品"; 4, "ａ花"
+                    5, "a竹"; 6, "a字"; 7, "ａ苗"; 30, "雑音" ]
+              let build rows =
+                  rows |> List.map (fun (id, text) -> id, [ text ])
+                  |> buildIndexWithStopwords StopwordPolicy.Disabled (Ngrams 2) collation
+              let cache =
+                  (build [] |> flushPostings, documents)
+                  ||> List.fold (fun index (id, text) -> addDocument id text index)
+              let disk = build documents |> flushPostings
+              for index, query, expected, relevance in
+                  [ disk, "a*", [ 3; 6 ], 0.3624762296676636
+                    disk, "ａ*", [], 0.0
+                    cache, "a*", [ 3; 6 ], 0.3624762296676636
+                    cache, "ａ*", [ 2 ], 0.8155715465545654 ] do
+                  let scores = booleanScores index query
+                  Expect.equal (Map.keys scores |> Seq.toList) expected query
+                  for id in expected do
+                      closeTo relevance scores.[id] query
+
           testCase "accent-sensitive ngram cache inserts grams in MySQL collation order"
           <| fun _ ->
               let collation = tryFind "utf8mb4_0900_as_ci" |> Option.get

@@ -198,7 +198,7 @@ type Index<'id when 'id: comparison> =
           NextDocumentOrder: int64
           FlushedThrough: int64 option
           CachedTerms: FullTextCache.Terms
-          FlushedAccentTerms: FullTextCache.Terms
+          FlushedOrderedTerms: FullTextCache.Terms
           CacheBudget: FullTextCache.Budget
           CacheCycle: obj
           Deleted: DeletedPostings
@@ -236,7 +236,7 @@ type internal ReadView<'id when 'id: comparison> =
           VisibleDocumentIds: Set<'id> option
           FlushedThrough: int64 option
           CachedTerms: FullTextCache.Terms
-          FlushedAccentTerms: FullTextCache.Terms
+          FlushedOrderedTerms: FullTextCache.Terms
           CachedPostingTails: Map<string, FullTextCache.PostingTail>
           Deleted: DeletedPostings
           DocumentOrderFollowsIds: bool
@@ -257,7 +257,7 @@ let internal readView (index: Index<'id>) : ReadView<'id> =
       VisibleDocumentIds = None
       FlushedThrough = index.FlushedThrough |> Option.filter (fun through -> through < index.NextDocumentOrder - 1L)
       CachedTerms = index.CachedTerms
-      FlushedAccentTerms = index.FlushedAccentTerms
+      FlushedOrderedTerms = index.FlushedOrderedTerms
       CachedPostingTails = index.CacheBudget.Tails
       Deleted = index.Deleted
       DocumentOrderFollowsIds = index.DocumentOrderFollowsIds
@@ -421,16 +421,22 @@ let private cacheDocumentTerms (words: (string * Token[])[]) terms =
     (terms, Array.sortBy fst words)
     ||> Array.fold (fun terms (key, grams) -> FullTextCache.add key grams.[0].Text terms)
 
-let private usesAccentSensitivePrefixes (collation: Collation) = function
-    | Ngrams _ -> collation.Name = "utf8mb4_0900_as_ci"
-    | Words _ -> false
+let private usesOrderedPrefixes (collation: Collation) tokenizer =
+    match collation.Name, tokenizer with
+    | "utf8mb4_0900_as_cs", _
+    | "utf8mb4_0900_as_ci", Ngrams _ -> true
+    | _ -> false
+
+let private compareOrderedPrefix (collation: Collation) key =
+    if collation.Name = "utf8mb4_0900_as_cs" then Uca0900Weights.caseSensitivePrefixCompare key
+    else Uca0900Weights.accentSensitivePrefixCompare key
 
 let private addTermSpelling (collation: Collation) terms spelling =
     FullTextCache.add (collation.FullTextKeyOf spelling) spelling terms
 
-let private rebuildFlushedAccentTerms (index: Index<'id>) =
-    if not (usesAccentSensitivePrefixes index.Collation index.Rules.Tokenizer) then index
-    elif index.FlushedThrough = Some 0L then { index with FlushedAccentTerms = FullTextCache.empty }
+let private rebuildFlushedOrderedTerms (index: Index<'id>) =
+    if not (usesOrderedPrefixes index.Collation index.Rules.Tokenizer) then index
+    elif index.FlushedThrough = Some 0L then { index with FlushedOrderedTerms = FullTextCache.empty }
     else
         let through = defaultArg index.FlushedThrough Int64.MaxValue
         let spellings =
@@ -443,7 +449,7 @@ let private rebuildFlushedAccentTerms (index: Index<'id>) =
                     if order <= through then yield! words
             }
         { index with
-            FlushedAccentTerms =
+            FlushedOrderedTerms =
                 spellings
                 |> Seq.distinct
                 |> Seq.fold (addTermSpelling index.Collation) FullTextCache.empty }
@@ -489,8 +495,8 @@ let private prefixKeys (collation: Collation) (token: Token) =
     |> Array.distinct
 
 let private documentPrefixes (collation: Collation) tokenizer (words: (string * Token[])[]) =
-    // Accent-sensitive searches visit the ordered gram postings directly.
-    if usesAccentSensitivePrefixes collation tokenizer then [||]
+    // Ordered prefix searches visit the term postings directly.
+    if usesOrderedPrefixes collation tokenizer then [||]
     else
         // InnoDB keeps the first matching term's frequency but tallies every term's posting.
         let prefixes = Collections.Generic.Dictionary<string, int * int64>()
@@ -546,12 +552,9 @@ let private emptyIndexWith policy tokenizer (collation: Collation) : Index<'id> 
       StopwordSource = None
       StopwordReload = None
       NextDocumentOrder = 1L
-      FlushedThrough =
-          match tokenizer with
-          | Ngrams _ when collation.Name = "utf8mb4_0900_as_ci" -> Some 0L
-          | _ -> None
+      FlushedThrough = if usesOrderedPrefixes collation tokenizer then Some 0L else None
       CachedTerms = FullTextCache.empty
-      FlushedAccentTerms = FullTextCache.empty
+      FlushedOrderedTerms = FullTextCache.empty
       CacheBudget = FullTextCache.emptyBudget
       CacheCycle = obj ()
       Deleted = emptyDeletedPostings
@@ -772,7 +775,7 @@ let internal withDocumentOrderFrom (source: Index<'id>) (target: Index<'id>) =
         NextDocumentOrder = source.NextDocumentOrder
         FlushedThrough = source.FlushedThrough
         CachedTerms = source.CachedTerms
-        FlushedAccentTerms = source.FlushedAccentTerms
+        FlushedOrderedTerms = source.FlushedOrderedTerms
         CacheBudget = source.CacheBudget
         CacheCycle = source.CacheCycle
         Deleted = source.Deleted
@@ -786,11 +789,11 @@ let internal syncCachedPostings (index: Index<'id>) =
         { index with
             FlushedThrough = through
             CachedTerms = FullTextCache.empty
-            FlushedAccentTerms =
-                if usesAccentSensitivePrefixes index.Collation index.Rules.Tokenizer then
+            FlushedOrderedTerms =
+                if usesOrderedPrefixes index.Collation index.Rules.Tokenizer then
                     FullTextCache.inInsertionOrder index.CachedTerms
-                    |> List.fold (addTermSpelling index.Collation) index.FlushedAccentTerms
-                else index.FlushedAccentTerms
+                    |> List.fold (addTermSpelling index.Collation) index.FlushedOrderedTerms
+                else index.FlushedOrderedTerms
             CacheBudget = FullTextCache.emptyBudget
             CacheCycle = obj () }
 
@@ -809,7 +812,7 @@ let internal onlyCacheSynced (before: Index<'id>) (after: Index<'id>) =
 let internal flushPostings index =
     let flushed = syncCachedPostings index
     if flushed.Deleted.Documents.IsEmpty then flushed
-    else { flushed with Deleted = emptyDeletedPostings } |> rebuildFlushedAccentTerms
+    else { flushed with Deleted = emptyDeletedPostings } |> rebuildFlushedOrderedTerms
 
 let internal flushedThrough (index: Index<'id>) = index.FlushedThrough
 
@@ -862,7 +865,7 @@ let private cacheDocumentsAfter through (index: Index<'id>) initial =
         let words = indexedWords document.Content
         cacheDocumentTerms words terms, chargeDocument document.Content.Rules.Tokenizer index.Collation document.Order words budget) initial
 
-let private restoreAccentCacheTerms through (index: Index<'id>) =
+let private restoreOrderedCacheTerms through (index: Index<'id>) =
     // A checkpoint written with ICU keys can have a different insertion order.
     // Document order and retained deletes reproduce the cache using the pinned keys.
     let live =
@@ -886,18 +889,18 @@ let internal restoreCache nextOrder through saved savedBudget hasSegmentEnds (in
     let flushed =
         match through with
         | Some through -> Some(min through (next - 1L))
-        | None when usesAccentSensitivePrefixes index.Collation index.Rules.Tokenizer -> Some(next - 1L)
+        | None when usesOrderedPrefixes index.Collation index.Rules.Tokenizer -> Some(next - 1L)
         | None when tracksNgramPostingSources index -> None
         | None -> Some(next - 1L)
-    let index = { index with FlushedThrough = flushed; NextDocumentOrder = next } |> rebuildFlushedAccentTerms
+    let index = { index with FlushedThrough = flushed; NextDocumentOrder = next } |> rebuildFlushedOrderedTerms
     match index.FlushedThrough with
     | None -> index
     | Some through ->
         let rebuilt = lazy (cacheDocumentsAfter through index (FullTextCache.empty, FullTextCache.emptyBudget))
         let terms, mergedTerms =
             match saved with
-            | _ when usesAccentSensitivePrefixes index.Collation index.Rules.Tokenizer ->
-                restoreAccentCacheTerms through index, false
+            | _ when usesOrderedPrefixes index.Collation index.Rules.Tokenizer ->
+                restoreOrderedCacheTerms through index, false
             | Some spellings ->
                 ((FullTextCache.empty, false), spellings)
                 ||> List.fold (fun (terms, merged) spelling ->
@@ -1669,9 +1672,9 @@ let private restrictScores (candidateIds: Set<'id> option) (scores: Map<'id, 'va
         |> Seq.choose (fun id -> Map.tryFind id scores |> Option.map (fun score -> id, score))
         |> Map.ofSeq
 
-let private accentPrefixPosting diskOnly (term: Token) (view: ReadView<'id>) =
+let private orderedPrefixPosting diskOnly (term: Token) (view: ReadView<'id>) =
     let through = defaultArg view.FlushedThrough Int64.MaxValue
-    let comparePrefix = Uca0900Weights.accentSensitivePrefixCompare term.Key
+    let comparePrefix = compareOrderedPrefix view.Collation term.Key
     let readGram cache gram =
         let rows = view.Postings |> Map.tryFind gram |> Option.defaultValue Map.empty
         let deleted = view.Deleted.Words |> Map.tryFind gram |> Option.defaultValue Map.empty
@@ -1689,7 +1692,7 @@ let private accentPrefixPosting diskOnly (term: Token) (view: ReadView<'id>) =
             |> Seq.map (readGram true)
 
     let flushed =
-        if through = 0L || FullTextCache.isEmpty view.FlushedAccentTerms then Seq.empty
+        if through = 0L || FullTextCache.isEmpty view.FlushedOrderedTerms then Seq.empty
         else
             let hasPrimaryWeight = not (term.Key.StartsWith("0000", StringComparison.Ordinal))
             let firstPartitionEnd = "41"
@@ -1700,8 +1703,8 @@ let private accentPrefixPosting diskOnly (term: Token) (view: ReadView<'id>) =
                 && comparePrefix key = 0
 
             // The disk cursor seeks by the whole key and stops on the first
-            // posting outside the prefix on either collation level.
-            view.FlushedAccentTerms
+            // posting outside the prefix on any collation level.
+            view.FlushedOrderedTerms
             |> FullTextCache.startingAt term.Key
             |> Seq.choose (fun (key, _) ->
                 let rows, deleted = readGram false key
@@ -1752,8 +1755,8 @@ let private prefixRowsWithCacheOrder candidateIds key (view: ReadView<'id>) (row
     | _ -> rows
 
 let private weightedPrefixRows candidateIds (term: Token) (view: ReadView<'id>) =
-    if usesAccentSensitivePrefixes view.Collation view.Rules.Tokenizer then
-        let posting, retained, deleted = accentPrefixPosting false term view
+    if usesOrderedPrefixes view.Collation view.Rules.Tokenizer then
+        let posting, retained, deleted = orderedPrefixPosting false term view
         let frequency = float (posting.TermDocumentCount + retained - deleted)
         Some(posting.Rows, prefixIdf view.DocumentCount frequency)
     else
@@ -1967,7 +1970,7 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
                 | _ -> false))
 
         let weighted = hasRankAdjustments nodes
-        let accentSensitive = usesAccentSensitivePrefixes view.Collation view.Rules.Tokenizer
+        let orderedPrefixes = usesOrderedPrefixes view.Collation view.Rules.Tokenizer
         let repeated = not sharedKeys.IsEmpty || (frequencies |> Map.exists (fun _ count -> count > 1))
         let cacheSensitive =
             view.FlushedThrough.IsSome
@@ -1981,7 +1984,7 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
                 && (frequencies |> Map.exists (fun key _ ->
                     match key with
                     | ExactLookup word -> view.Deleted.Words.ContainsKey word
-                    | PrefixLookup prefix -> accentSensitive || view.Deleted.Prefixes.ContainsKey prefix))
+                    | PrefixLookup prefix -> orderedPrefixes || view.Deleted.Prefixes.ContainsKey prefix))
 
         if not wordGroups && not tracksPostingBounds && not repeated && not weighted
            && not cacheSensitive && not deletedSensitive then
@@ -2010,7 +2013,7 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
             let sharedRowFrequencies = Collections.Generic.Dictionary<string, Collections.Generic.Dictionary<'id, int>>()
             let exactSegments = Collections.Generic.Dictionary<string, Map<'id, int> * Map<'id, int>>()
             let diskPrefixes = Collections.Generic.Dictionary<string, PrefixPosting<'id> option>()
-            let accentPrefixes = Collections.Generic.Dictionary<struct (bool * string), PrefixPosting<'id> * int64>()
+            let orderedPostings = Collections.Generic.Dictionary<struct (bool * string), PrefixPosting<'id> * int64>()
             let scoringPrefixes = Collections.Generic.Dictionary<string, Map<'id, int>>()
             let contributionOrder = Collections.Generic.Dictionary<string, int>()
             let mutable postingBounds = None
@@ -2032,14 +2035,14 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
                         first
                 rows |> Map.iter (fun id frequency -> first.TryAdd(id, frequency) |> ignore)
 
-            let accentPrefix diskOnly (term: Token) =
+            let orderedPrefix diskOnly (term: Token) =
                 let key = struct (diskOnly, term.Text)
-                match accentPrefixes.TryGetValue key with
+                match orderedPostings.TryGetValue key with
                 | true, value -> value
                 | _ ->
-                    let posting, retained, _ = accentPrefixPosting diskOnly term view
+                    let posting, retained, _ = orderedPrefixPosting diskOnly term view
                     let value = posting, retained
-                    accentPrefixes.Add(key, value)
+                    orderedPostings.Add(key, value)
                     value
 
             let retainedPrefixFrequency diskOnly key =
@@ -2168,8 +2171,8 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
                 match term with
                 | BWord(word, true) ->
                     let matches =
-                        if accentSensitive then
-                            let compare = Uca0900Weights.accentSensitivePrefixCompare word.Key
+                        if orderedPrefixes then
+                            let compare = compareOrderedPrefix view.Collation word.Key
                             fun token -> compare token.Key = 0
                         else prefixKeys view.Collation >> Array.contains word.Key
                     indexedTokens view.Documents.[id].Content
@@ -2195,8 +2198,8 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
                             // Required prefixes use the cache even after visiting a phrase.
                             let diskOnly = inPhraseMode && not isRequired
                             let posting, retained =
-                                if accentSensitive then
-                                    let posting, retained = accentPrefix diskOnly word
+                                if orderedPrefixes then
+                                    let posting, retained = orderedPrefix diskOnly word
                                     Some posting, retained
                                 else
                                     prefixPosting diskOnly word.Key, retainedPrefixFrequency diskOnly word.Key
@@ -2205,9 +2208,9 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
                             match posting with
                             | None -> Map.empty
                             | Some posting ->
-                                if accentSensitive || sharedKeys.Contains word.Key then
+                                if orderedPrefixes || sharedKeys.Contains word.Key then
                                     let rows =
-                                        if accentSensitive then restrictScores scope posting.Rows
+                                        if orderedPrefixes then restrictScores scope posting.Rows
                                         else prefixRowsWithCacheOrder scope word.Key view posting.Rows
                                     rememberRowFrequencies word.Key rows
                                 posting.Rows |> restrictScores scope |> Map.map (fun _ _ -> 0.0)
@@ -2305,7 +2308,7 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
             let scoreTerm id key =
                 let frequency = float documentCounts.[key]
                 let occurrences, weight =
-                    if sharedKeys.Contains key || (accentSensitive && frequencies.ContainsKey(PrefixLookup key)) then
+                    if sharedKeys.Contains key || (orderedPrefixes && frequencies.ContainsKey(PrefixLookup key)) then
                         sharedRowFrequencies.[key].[id], prefixIdf view.DocumentCount frequency
                     elif frequencies.ContainsKey(PrefixLookup key) then
                         let rows =

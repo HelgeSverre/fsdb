@@ -87,6 +87,7 @@ let private scalarWeight (ranges: ImplicitRange[]) (scalars: Dictionary<int, Wei
 
 let private chineseTable = loadTable "Fsdb.Zh0900Weights.bin.gz" 0x31485A46u
 let private accentSensitiveTable = loadTable "Fsdb.AccentSensitive0900Weights.bin.gz" 0x31534146u
+let private caseSensitiveTable = loadTable "Fsdb.CaseSensitive0900Weights.bin.gz" 0x31534346u
 
 let private weightOf (ranges, scalars, contractions: IDictionary<char, (string * Weight)[]>) (value: string) =
     if value.Length = 0 then
@@ -149,20 +150,35 @@ let accentSensitiveKey value =
     let weight = weightOf accentSensitiveTable.Value value
     Convert.ToHexString(weight.Bytes, 0, weight.SecondaryEnd)
 
-let accentSensitivePrefixCompare (prefix: string) =
-    let primaryEnd (key: string) =
-        let mutable index = 0
-        while not (key.AsSpan(index, 4).SequenceEqual("0000".AsSpan())) do
+let caseSensitiveKey value =
+    Convert.ToHexString((weightOf caseSensitiveTable.Value value).Bytes)
+
+let private prefixCompare levels (prefix: string) =
+    let levelEnd (key: string) start =
+        let mutable index = start
+        while index < key.Length && not (key.AsSpan(index, 4).SequenceEqual("0000".AsSpan())) do
             index <- index + 4
         index
 
-    let prefixEnd = primaryEnd prefix
-    let compareLevel start length (key: string) keyStart keyLength =
-        let result = String.CompareOrdinal(prefix, start, key, keyStart, min length keyLength)
-        if result = 0 && length > keyLength then 1 else result
+    let mutable start = 0
+    let prefixLevels =
+        Array.init levels (fun _ ->
+            let finish = levelEnd prefix start
+            let bounds = struct (start, finish - start)
+            start <- finish + 4
+            bounds)
 
     fun (key: string) ->
-        let keyEnd = primaryEnd key
-        let primary = compareLevel 0 prefixEnd key 0 keyEnd
-        if primary <> 0 then primary
-        else compareLevel (prefixEnd + 4) (prefix.Length - prefixEnd - 4) key (keyEnd + 4) (key.Length - keyEnd - 4)
+        let rec compareLevel level keyStart =
+            let struct (prefixStart, length) = prefixLevels.[level]
+            let finish = levelEnd key keyStart
+            let keyLength = finish - keyStart
+            let result = String.CompareOrdinal(prefix, prefixStart, key, keyStart, min length keyLength)
+            if result <> 0 then result
+            elif length > keyLength then 1
+            elif level + 1 = levels then 0
+            else compareLevel (level + 1) (finish + 4)
+        compareLevel 0 0
+
+let accentSensitivePrefixCompare prefix = prefixCompare 2 prefix
+let caseSensitivePrefixCompare prefix = prefixCompare 3 prefix

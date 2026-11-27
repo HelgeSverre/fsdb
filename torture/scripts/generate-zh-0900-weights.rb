@@ -1,9 +1,18 @@
 # Generate SQL, run it on the pinned MySQL oracle with mysql -NB, then pack its output.
 require "zlib"
 
-accent_sensitive = ARGV.first == "--accent-sensitive"
-ARGV.shift if accent_sensitive
-collation = accent_sensitive ? "utf8mb4_0900_as_ci" : "utf8mb4_zh_0900_as_cs"
+collation, signature = case ARGV.first
+                       when "--accent-sensitive"
+                         ARGV.shift
+                         ["utf8mb4_0900_as_ci", "FAS1"]
+                       when "--case-sensitive"
+                         ARGV.shift
+                         ["utf8mb4_0900_as_cs", "FCS1"]
+                       else
+                         ["utf8mb4_zh_0900_as_cs", "FZH1"]
+                       end
+accent_sensitive = signature == "FAS1"
+chinese = signature == "FZH1"
 
 case ARGV.shift
 when "queries"
@@ -14,7 +23,7 @@ when "queries"
     SELECT cp,HEX(WEIGHT_STRING(CONVERT(CHAR(cp USING utf32) USING utf8mb4) COLLATE #{collation}))
     FROM points WHERE cp NOT BETWEEN 55296 AND 57343 ORDER BY cp;
   SQL
-  exit if accent_sensitive
+  exit unless chinese
 
   sequences = %w[重庆 沈阳 藏文]
   ["E", "e"].each do |letter|
@@ -82,11 +91,11 @@ when "pack"
     end
   end
   flush_range.call
-  abort "Incomplete oracle dump" unless expected_scalar == 0x110000 && sequences.length == (accent_sensitive ? 0 : 19)
+  abort "Incomplete oracle dump" unless expected_scalar == 0x110000 && sequences.length == (chinese ? 19 : 0)
 
   Zlib::GzipWriter.open(destination, Zlib::BEST_COMPRESSION) do |output|
     output.mtime = 0
-    output.write(accent_sensitive ? "FAS1" : "FZH1")
+    output.write(signature)
     output.write([ranges.length, explicit.length, sequences.length].pack("V*"))
     ranges.each { |range| output.write(range.pack("V*")) }
     explicit.each { |cp, key| output.write([cp, key.bytesize].pack("Vv") + key) }

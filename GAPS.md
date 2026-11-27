@@ -1622,8 +1622,10 @@ Soft wildcard terms only adjust rows already selected within their
 group. [Parenthesized word queries](torture/findings/2026-11-27-fulltext-bulk-spelling.md#parenthesized-word-queries)
 respect the default parser's visitation order, including required
 terms and exclusions before a group and posting bounds that carry between
-groups. Short wildcard comparisons under `utf8mb4_0900_as_cs` and other
-legacy collation keys remain open.
+groups. [Case-sensitive Unicode 9.0 wildcards](torture/findings/2026-11-27-fulltext-bulk-spelling.md#case-sensitive-unicode-90-prefixes)
+use MySQL's three weight levels in the cache and flushed cursors for
+both parsers, including audited mixed-width postings. Broader collation
+and index-history cases remain open.
 
 [Exact legacy `WEIGHT_STRING` bytes](torture/findings/2026-11-04-extension-a-exact-weights.md#implicit-ideograph-encoder-follow-up)
 now match all 137,910 adjacent-pair oracle cases across Extension A and the

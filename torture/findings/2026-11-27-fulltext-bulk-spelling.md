@@ -103,7 +103,7 @@ and mixed results also reproduce from WAL and checkpoints written
 before and after the fix.
 
 The 22,320-query matrix gained 204 matches with no regressions.
-The remaining 56 cases all use `utf8mb4_0900_as_cs` and involve
+The 56 cases left at that stage all use `utf8mb4_0900_as_cs` and involve
 Boolean wildcard matching of width variants.
 
 A separate 126-query compound search probe gained 45 matches after
@@ -168,3 +168,26 @@ MySQL. The three probes gained 92, 290, and 90 matches respectively
 with no regressions. Another 96 queries match with SQL candidate
 filters. All 26 recovery queries match from WAL and checkpoints
 written before and after the fix.
+
+### Case-sensitive Unicode 9.0 prefixes
+
+Both parsers use the pinned MySQL `utf8mb4_0900_as_cs` weights for
+full-text keys. The prefix comparator checks the primary, secondary, and
+tertiary levels independently. The cache starts from its first tree hit
+and walks contiguous matching terms. The flushed cursor seeks the full
+key and stops at the first nonmatching posting.
+[MySQL UCA prefix comparison](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/strings/ctype-uca.cc#L1667-L1722)
+
+The table was generated from `WEIGHT_STRING` for every Unicode scalar
+on MySQL 8.4.11. The [generator](../scripts/generate-zh-0900-weights.rb)
+reproduces the embedded resource with the `--case-sensitive` option.
+All 22,320 queries in the bulk spelling matrix now match MySQL,
+including the 56 width differences. A 4,284-query probe of accents,
+Kana, Hangul, compatibility forms, and Han also matches in full, up by
+224 matches. Both 270-query width probes and all 16 recovery queries
+match. The recovery probes include both parsers and load WAL and
+checkpoints written before and after the fix.
+The same character probe matches all 2,142 ngram queries at each of
+startup token sizes 1 and 3. Size 3 gained 156 matches. A separate
+1,568-query compound word probe retains full agreement under this
+collation.

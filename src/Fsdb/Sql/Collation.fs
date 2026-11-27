@@ -2051,6 +2051,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                 Convert.ToHexString(Uca0900Weights.chineseWeight s)
             elif name = "utf8mb4_0900_as_ci" then
                 Uca0900Weights.accentSensitiveKey s
+            elif name = "utf8mb4_0900_as_cs" then
+                Uca0900Weights.caseSensitiveKey s
             else
                 match legacyFullTextCase name with
                 | Some ranges ->
