@@ -1018,7 +1018,9 @@ let tests =
                       (index, List.take 3 documents)
                       ||> List.fold (fun index (id, body) -> addDocument id body index)
 
-              for index, firstScore in [ bulk, 0.083329938352108; cached, 0.1249949038028717 ] do
+              for index, firstScore, repeatedScore, softScore in
+                  [ bulk, 0.083329938352108, 0.018783101812005043, 1.5300445556640625
+                    cached, 0.1249949038028717, 0.02817465178668499, 1.5717095136642456 ] do
                   let expected = [ 1, firstScore; 2, 0.1249949038028717; 3, 0.041664969176054 ]
                   let scores = booleanScores index "京ap*"
                   Expect.equal (scores |> Map.keys |> Seq.toList) [ 1; 2; 3 ] "prefix membership"
@@ -1032,9 +1034,6 @@ let tests =
                       closeTo scores.[id] windowed.[id] "a filter preserves corpus frequency"
                       closeTo scores.[id] fastPath.[id] "posting and general paths agree"
 
-              for index, repeatedScore, softScore in
-                  [ bulk, 0.018783101812005043, 1.5300445556640625
-                    cached, 0.02817465178668499, 1.5717095136642456 ] do
                   let repeated = [ 1, repeatedScore; 2, 0.02817465178668499; 3, 0.009391550906002522 ]
                   for query, expected in
                       [ "京ap* 京ap*", repeated
@@ -1057,6 +1056,23 @@ let tests =
                           for id, score in expected do
                               closeTo score fastPath.[id] query
                       | None -> ()
+
+                  for query, expected in
+                      [ "+京ap* (noise)", expected @ [ 4, 0.8155715465545654 ]
+                        "(noise) +京ap*", expected
+                        "-京ap* (京apple)", [ 1, 2.4467146396636963 ]
+                        "(京apple) -京ap*", []
+                        "-京apple (京apple) noise", [ 1, 2.4467146396636963; 4, 0.8155715465545654 ]
+                        "-京apple noise (京apple)", [ 1, 1.0874286890029907; 4, 0.8155715465545654 ]
+                        "京apple (>京apple)", [ 1, 1.0874286890029907 ]
+                        "(>京apple) 京apple", [ 1, 2.087428569793701 ]
+                        "+京apple +(>京apple)", [ 1, 2.087428569793701 ]
+                        "+京apple* +(+京apple* +京app*) <(+noise 京apex)",
+                            [ 1, 1.6317768096923828; 4, -0.18442845344543457 ] ] do
+                      let scores = booleanScores index query
+                      Expect.equal (scores |> Map.keys |> Seq.toList) (List.map fst expected) query
+                      for id, score in expected do
+                          closeTo score scores.[id] query
 
           testCase "ngram prefixes use per-word document frequency and the first matching word"
           <| fun _ ->

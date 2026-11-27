@@ -120,6 +120,12 @@ internal `LIKE` cursor for flushed postings.
 [Cache comparator](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/handler/ha_innodb.cc#L7460-L7475)
 [Flushed posting cursor](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0opt.cc#L448-L499)
 
+The flushed cursor is sensitive to where the first width variant falls
+in index order. In a corpus with postings ordered as `a品`, `a字`, `ａ木`,
+and `a竹`, MySQL returns the first two postings for `a*`. In single-width
+corpora it returns every posting of the requested width. For mixed
+widths the cached prefix can return a different contiguous range.
+
 ### Repeated and soft wildcard terms
 
 Word-parser wildcard queries now share the posting visitor used for
@@ -133,17 +139,32 @@ unmodified `京apple` rank, while `京apple ~京ap*` adjusts it.
 
 All 234 queries in the focused compound probes match MySQL after this
 change, up from 99. A separate 766-query stress probe gained 319 matches
-with no regressions. The 92 remaining differences in that probe involve
+with no regressions. The 92 differences left in that probe involved
 the visitation or ranking of nested groups. The 22,320-query bulk spelling
 matrix retains its previous results. All 28 recovery checks match MySQL
 from WAL and checkpoints written before and after this change.
 
-The default parser can complete a run of operator terms before it
+### Parenthesized word queries
+
+The default parser completes a run of operator terms before it
 merges a following parenthesized group. With the example corpus,
 `+京ap* (noise)` returns rows 1–4 in MySQL. Moving the group before
-the prefix, as in `(noise) +京ap*`, returns rows 1–3. Fsdb returns
-rows 1–3 for both.
+the prefix, as in `(noise) +京ap*`, returns rows 1–3. Fsdb now
+returns the same rows in both cases.
 The MySQL grammar wraps preceding expressions in a list when it
 appends a group, giving required and excluded terms an earlier
 visit in the first query.
 [InnoDB group grammar](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0pars.y#L88-L127)
+
+The posting visitor carries the required-term state through those
+preceding lists and starts with fresh required-term state inside a
+parenthesized subexpression. An exclusion skips lookup when the
+current set is empty. Required words reset or constrain the posting
+bounds used by later required phrases.
+
+All 766 queries in the original stress probe, all 1,568 in the deeper
+nesting probe, and all 117 in the focused group probe now match
+MySQL. The three probes gained 92, 290, and 90 matches respectively
+with no regressions. Another 96 queries match with SQL candidate
+filters. All 26 recovery queries match from WAL and checkpoints
+written before and after the fix.

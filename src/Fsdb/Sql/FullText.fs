@@ -1913,6 +1913,8 @@ type private RankedBooleanMatch =
       Adjustment: int }
 
 let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
+    let hasGroups = nodes |> List.exists (function _, BGroup _ -> true | _ -> false)
+
     let rec leaves nodes =
         nodes
         |> Seq.collect (function
@@ -1920,12 +1922,13 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
             | leaf -> Seq.singleton leaf)
 
     match view.Rules.Tokenizer with
-    | Words _ when not (leaves nodes |> Seq.exists (function _, BWord(_, true) -> true | _ -> false)) -> None
+    | Words _ when not hasGroups && not (leaves nodes |> Seq.exists (function _, BWord(_, true) -> true | _ -> false)) -> None
     | tokenizer ->
         let isNgram =
             match tokenizer with
             | Ngrams _ -> true
             | Words _ -> false
+        let wordGroups = not isNgram && hasGroups
 
         let keys = function
             | BWord(word, true) -> [| PrefixLookup word.Key |]
@@ -1956,10 +1959,12 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
 
         let tracksPostingBounds =
             let canVisitBoundedPhrase =
-                (nodes |> List.exists (function _, BGroup _ -> true | _ -> false))
+                hasGroups
                 || (view.FlushedThrough.IsSome && (nodes |> List.exists (fun (op, term) -> op = Must && isPhrase term)))
             view.HasDocumentOrder && canVisitBoundedPhrase
-            && (leaves nodes |> Seq.exists (function Must, BWord(_, true) -> true | _ -> false))
+            && (leaves nodes |> Seq.exists (function
+                | Must, BWord(_, prefix) -> prefix || wordGroups
+                | _ -> false))
 
         let weighted = hasRankAdjustments nodes
         let accentSensitive = usesAccentSensitivePrefixes view.Collation view.Rules.Tokenizer
@@ -1978,15 +1983,19 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
                     | ExactLookup word -> view.Deleted.Words.ContainsKey word
                     | PrefixLookup prefix -> accentSensitive || view.Deleted.Prefixes.ContainsKey prefix))
 
-        if not tracksPostingBounds && not repeated && not weighted && not cacheSensitive && not deletedSensitive then
+        if not wordGroups && not tracksPostingBounds && not repeated && not weighted
+           && not cacheSensitive && not deletedSensitive then
             None
         else
-            // A wildcard exclusion visits postings only if its group has matches.
+            // An exclusion can skip its postings when the group has no matches.
             // When its key recurs, that decision uses the full index result.
             let fullScope =
                 leaves nodes
                 |> Seq.exists (function
                     | MustNot, BWord(word, true) -> sharedKeys.Contains word.Key || frequencies.[PrefixLookup word.Key] > 1
+                    | MustNot, BWord(word, false) when wordGroups ->
+                        sharedKeys.Contains word.Key
+                        || (Map.tryFind (ExactLookup word.Key) frequencies |> Option.exists (fun count -> count > 1))
                     | _ -> false)
 
             // In a weighted query, a repeated term can get its first position
@@ -2220,6 +2229,19 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
                     matches |> Map.map (fun _ _ -> { Terms = terms; Adjustment = 0 })
 
             and matchNodes nodes =
+                let initial = Map.empty, false
+                let rec matchLists state preceding = function
+                    | [] -> matchPasses state (List.rev preceding) |> fst
+                    | ((_, BGroup _) as group) :: rest when not preceding.IsEmpty ->
+                        // The word grammar wraps the preceding list when it adds a group.
+                        let state = matchPasses state (List.rev preceding)
+                        matchLists state [ group ] rest
+                    | term :: rest -> matchLists state (term :: preceding) rest
+
+                if wordGroups then matchLists initial [] nodes
+                else matchPasses initial nodes |> fst
+
+            and matchPasses (selected, hasRequired) nodes =
                 // Ordinary terms seed the group before required terms and exclusions.
                 let optional, filters = nodes |> List.partition (fun (op, _) -> op <> Must && op <> MustNot)
                 let required, excluded = filters |> List.partition (fun (op, _) -> op = Must)
@@ -2247,10 +2269,10 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
                     let contributes id = first || Map.containsKey id matches
                     let requiredMatches =
                         match term with
-                        | BWord(_, true) when tracksPostingBounds ->
+                        | BWord(_, prefix) when tracksPostingBounds && (prefix || wordGroups) ->
                             if not first && Map.isEmpty matches then Map.empty
                             else
-                                // Required prefixes set query-wide posting bounds.
+                                // Required terms set query-wide posting bounds.
                                 // Leaving a group preserves those bounds for later phrases.
                                 postingBounds <- if first then None else Some(documentBounds matches)
                                 matchTerm true (Some contributes) term
@@ -2267,17 +2289,18 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
                         | None when first -> Map.add id incoming narrowed
                         | None -> narrowed) Map.empty
 
-                let included = List.fold union Map.empty optional
-                let filtered =
-                    match required with
-                    | first :: rest -> List.fold (intersect false) (intersect true included first) rest
-                    | [] -> included
+                let included = List.fold union selected optional
+                let filtered, hasRequired =
+                    ((included, hasRequired), required)
+                    ||> List.fold (fun (matches, seenRequired) term -> intersect (not seenRequired) matches term, true)
 
-                (filtered, excluded)
-                ||> List.fold (fun matches (_, term) ->
-                    match term with
-                    | BWord(_, true) when matches.IsEmpty -> matches
-                    | _ -> matchTerm false None term |> Map.fold (fun matches id _ -> Map.remove id matches) matches)
+                let remaining =
+                    (filtered, excluded)
+                    ||> List.fold (fun matches (_, term) ->
+                        match term with
+                        | BWord(_, prefix) when matches.IsEmpty && (prefix || wordGroups) -> matches
+                        | _ -> matchTerm false None term |> Map.fold (fun matches id _ -> Map.remove id matches) matches)
+                remaining, hasRequired
 
             let scoreTerm id key =
                 let frequency = float documentCounts.[key]
@@ -2467,8 +2490,13 @@ let internal tryFlatBooleanScoresDictionaryInView
     let nodes = parseBooleanQuery view.Rules view.Collation query
     let flat = flatTerms [] nodes
     let onlyExclusions = nodes |> List.forall (fun (operator, _) -> operator = MustNot)
+    let requiresGeneralScoring =
+        match view.Rules.Tokenizer with
+        | Words _ -> flat.IsNone
+        | Ngrams _ -> false
 
-    if onlyExclusions || (candidateIds |> Option.exists Set.isEmpty) then
+    if requiresGeneralScoring then None
+    elif onlyExclusions || (candidateIds |> Option.exists Set.isEmpty) then
         flat |> Option.map (fun _ -> Collections.Generic.Dictionary<'id, float>())
     else
         match tryPostingRanking candidateIds view nodes
