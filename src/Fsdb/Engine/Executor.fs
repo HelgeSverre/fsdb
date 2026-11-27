@@ -1069,6 +1069,17 @@ let private routineVariables = System.Threading.AsyncLocal<Map<string, RoutineVa
 // Trigger statements execute synchronously inside the owning QueryHandler call.
 let private triggerSessionExecutor = new System.Threading.ThreadLocal<(TriggerSessionExecution -> TriggerSessionStatement -> QueryResult) option>()
 let private foundRowsOutputSlice = System.Threading.AsyncLocal<(int option * int option) option>()
+type private FoundRowsOffset = { Expression: Expr; mutable Consumed: int }
+let private foundRowsOffset = new System.Threading.ThreadLocal<FoundRowsOffset option>()
+
+let private recordConsumedOffset (expression: Expr option) count =
+    match expression with
+    | Some expr when not metadataProbe.Value ->
+        match foundRowsOffset.Value with
+        // Nested query blocks cannot contribute to the statement's count.
+        | Some offset when obj.ReferenceEquals(expr, offset.Expression) -> offset.Consumed <- count
+        | _ -> ()
+    | _ -> ()
 let private suppressVariableAssignments = System.Threading.AsyncLocal<bool>()
 let private joinHintDiagnostics = System.Threading.AsyncLocal<OptimizerHintResolution.ExecutionDiagnostics>()
 // An unset scope keeps direct Executor callers' explicit schema. A scoped None
@@ -6097,6 +6108,7 @@ let private boundedTopN (capacity: int) (cmp: 'b -> 'b -> int) (f: 'a -> Result<
 /// DISTINCT rows count only after deduplication.
 let private streamLimited
     (distinct: bool)
+    (offsetExpr: Expr option)
     (offset: int)
     (limit: int option)
     (f: 'a -> Result<('key * 'b) option, 'e>)
@@ -6129,7 +6141,9 @@ let private streamLimited
 
     match error with
     | Some e -> Error e
-    | None -> Ok(List.ofSeq acc)
+    | None ->
+        recordConsumedOffset offsetExpr skipped
+        Ok(List.ofSeq acc)
 
 let private hashBuckets
     (collations: Collation.Collation list)
@@ -21236,15 +21250,20 @@ and private zeroLimitWithoutOffset limit offset =
     (limit |> Option.exists (fun expression -> rowCount expression = 0))
     && (offset |> Option.forall (fun expression -> rowCount expression = 0))
 
-and private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a list) : 'a list =
+and private applyTrackedLimitOffset offsetExpr (limit: int option) (offset: int option) (rows: 'a list) : 'a list =
     let afterOffset =
         match offset with
-        | Some o -> rows |> List.skip (min o (List.length rows))
+        | Some o ->
+            let skipped = min o (List.length rows)
+            recordConsumedOffset offsetExpr skipped
+            rows |> List.skip skipped
         | None -> rows
 
     match limit with
     | Some l -> afterOffset |> List.truncate (max 0 l)
     | None -> afterOffset
+
+and private applyLimitOffset limit offset rows = applyTrackedLimitOffset None limit offset rows
 
 /// The one comparator every `ORDER BY` sort site (plain
 /// `SELECT`, grouped, windowed, `UNION`) shares, instead of each carrying
@@ -21886,7 +21905,7 @@ and private runUnionStmtWithOuter
             match sortedResult with
             | Error(code, message) -> Err(code, message), [], []
             | Ok sortedPaired ->
-                let limitedPaired = sortedPaired |> applyLimitOffset limit offset
+                let limitedPaired = sortedPaired |> applyTrackedLimitOffset offsetExpr limit offset
                 ResultSet(cols, limitedPaired |> List.map fst), reconciled, limitedPaired |> List.map snd
 
 /// One projection's `(column name, value)` pairs — a list because `SELECT
@@ -23510,7 +23529,7 @@ and private runGroupedSelect
             |> Option.exists (fun value -> truthy value <> Some true)
         let skipRuntime =
             impossibleHaving
-            || (not select.CalculateFoundRows && (select.Limit |> Option.exists (fun limit -> rowCount limit = 0)))
+            || (not select.CalculateFoundRows && zeroLimitWithoutOffset select.Limit select.Offset)
         let inputRows = if skipRuntime then Seq.empty else rows
         match inputRows |> traverseSeq collect with
         | Error(code, message) -> Err(code, message), [], []
@@ -23612,7 +23631,7 @@ and private runGroupedSelect
                     if skipRuntime then Some 0L
                     elif select.Rollup && not select.CalculateFoundRows
                          && select.OrderBy.IsEmpty && not select.Distinct then
-                        limit |> Option.map (fun count -> if count = 0 then 0L else int64 count + int64 offset)
+                        limit |> Option.map (fun count -> int64 count + int64 offset)
                     else None
                 let mutable emitted = 0L
                 let pending = groups |> Seq.takeWhile (fun _ -> stopAfter |> Option.forall (fun count -> emitted < count))
@@ -23650,7 +23669,7 @@ and private runGroupedSelect
                         |> applyWireOverrides groupWireOverrides
                     let limited =
                         dedupedPaired
-                        |> applyLimitOffset (Option.map rowCount select.Limit) (Option.map rowCount select.Offset)
+                        |> applyTrackedLimitOffset select.Offset limit (Option.map rowCount select.Offset)
                     let returnedAssignments =
                         if groupExprs.IsEmpty then []
                         else
@@ -26068,6 +26087,18 @@ and private runSelect
     let pairOf (outputCols: (string * Value) list) : string option list * Value[] =
         renderOutputCols outputFormats outputCols, outputCols |> List.map snd |> Array.ofList
 
+    // DISTINCT uses comparison keys for text while preserving the first row's spelling.
+    let distinctKeyOf (row: Value[]) (outputCols: (string * Value) list) : string option list =
+        if not select.Distinct then []
+        else
+            let ctx = ctxFor row
+            outputCols
+            |> List.filter (fun (name, _) -> not (name.StartsWith(insertSelectSourceAliasPrefix, System.StringComparison.Ordinal)))
+            |> List.map (fun (name, v) ->
+                match v with
+                | VString text -> Some((keyCollation ctx (Col name)).KeyOf text)
+                | _ -> Value.toText v)
+
     let probe = probeRow columns
 
     match
@@ -26082,17 +26113,33 @@ and private runSelect
         // `LIMIT 0` still resolves row-dependent result metadata. Those
         // probes must not expose conversion diagnostics or assignments.
         let colNames = probeProjection |> List.map fst
+        let distinctOffsetKeys =
+            if select.Distinct && (offset |> Option.exists (fun count -> count > 0)) then Some(HashSet<string option list>())
+            else None
 
         match
             withSourceMetadataProbe (fun () ->
                 rows
                 |> traverseSeq (fun row ->
                     matches row
-                    |> Result.bind (fun keep -> if keep then projectRow row |> Result.map Some else Ok None)))
+                    |> Result.bind (fun keep ->
+                        if keep then
+                            projectRow row |> Result.map (fun projected ->
+                                match distinctOffsetKeys with
+                                | Some keys -> keys.Add(distinctKeyOf row projected) |> ignore
+                                | None -> ()
+                                Some projected)
+                        else Ok None)))
         with
         | Error(code, message) -> Err(code, message), [], []
         | Ok allProjected ->
-            ResultSet(colNames, []), applyWireOverrides outputWireOverrides (columnMetadataOf (List.length colNames) allProjected), []
+            match offset with
+            | Some count when count > 0 ->
+                let eligible = match distinctOffsetKeys with Some keys -> keys.Count | None -> allProjected.Length
+                recordConsumedOffset select.Offset (min count eligible)
+            | _ -> ()
+            let types = columnMetadataOf (List.length colNames) allProjected
+            ResultSet(colNames, []), applyWireOverrides outputWireOverrides types, []
     | Ok probeProjection ->
         projectedRowNumber <- 0
         let colNames = probeProjection |> List.map fst
@@ -26108,23 +26155,6 @@ and private runSelect
         // The direct-column bounded path below can retain source rows and
         // postpone their projection until top-N has selected the survivors.
         // Both paths short-circuit on a `WHERE` miss.
-        // A DISTINCT query's collation-aware key folds string output columns
-        // to their canonical form, so åge/age dedupe under ai_ci while the
-        // emitted text stays the first row's original value. Non-DISTINCT
-        // paths skip the key entirely.
-        let distinctKeyOf (row: Value[]) (outputCols: (string * Value) list) : string option list =
-            if not select.Distinct then
-                []
-            else
-                let ctx = ctxFor row
-
-                outputCols
-                |> List.filter (fun (name, _) -> not (name.StartsWith(insertSelectSourceAliasPrefix, System.StringComparison.Ordinal)))
-                |> List.map (fun (name, v) ->
-                    match v with
-                    | VString text -> Some((keyCollation ctx (Col name)).KeyOf text)
-                    | _ -> Value.toText v)
-
         let evalKeyed (row: Value[]) : Result<((Value * Collation.Collation option) list * (string option list * Value[]) * (string option list)) option, EvalError> =
             matches row
             |> Result.bind (fun keep ->
@@ -26162,7 +26192,7 @@ and private runSelect
                     else
                         Ok None)
 
-            match rows |> streamLimited select.Distinct (Option.defaultValue 0 offset) limit evalPaired with
+            match rows |> streamLimited select.Distinct select.Offset (Option.defaultValue 0 offset) limit evalPaired with
             | Error(code, message) -> Err(code, message), [], []
             | Ok limited -> ResultSet(colNames, limited |> List.map (snd >> fst)), typesOf (limited |> List.map (snd >> snd)), limited |> List.map (snd >> snd)
 
@@ -26186,7 +26216,7 @@ and private runSelect
                 match rows |> boundedTopN capacity (fun (ka, _) (kb, _) -> compareByOrderKeys dirs ka kb) (evalDirectOrderKeys orderExpressions) with
                 | Error(code, message) -> Err(code, message), [], []
                 | Ok top ->
-                    let selected = top |> List.map snd |> applyLimitOffset limit offset
+                    let selected = top |> List.map snd |> applyTrackedLimitOffset select.Offset limit offset
 
                     match selected |> traverse projectRow with
                     | Error(code, message) -> Err(code, message), [], []
@@ -26197,7 +26227,7 @@ and private runSelect
                 match rows |> boundedTopN capacity (fun (ka, _, _) (kb, _, _) -> compareByOrderKeys dirs ka kb) evalKeyed with
                 | Error(code, message) -> Err(code, message), [], []
                 | Ok top ->
-                    let limited = top |> List.map (fun (_, pair, _) -> pair) |> applyLimitOffset limit offset
+                    let limited = top |> List.map (fun (_, pair, _) -> pair) |> applyTrackedLimitOffset select.Offset limit offset
                     ResultSet(colNames, limited |> List.map fst), typesOf (limited |> List.map snd), limited |> List.map snd
 
         elif not select.Distinct && not orderBy.IsEmpty && directOrderExpressions.IsSome then
@@ -26210,7 +26240,7 @@ and private runSelect
                     keyed
                     |> List.sortWith (fun (left, _) (right, _) -> compareByOrderKeys directions left right)
                     |> List.map snd
-                    |> applyLimitOffset limit offset
+                    |> applyTrackedLimitOffset select.Offset limit offset
                 match sorted |> traverse projectRow with
                 | Error(code, message) -> Err(code, message), [], []
                 | Ok projected ->
@@ -26243,7 +26273,7 @@ and private runSelect
                 // agree on the columns actually selected.
                 let paired = sorted |> List.map (fun (_, p, d) -> p, d)
                 let dedupedPaired = if select.Distinct then paired |> List.distinctBy snd else paired
-                let limited = dedupedPaired |> applyLimitOffset limit offset
+                let limited = dedupedPaired |> applyTrackedLimitOffset select.Offset limit offset
                 ResultSet(colNames, limited |> List.map (fst >> fst)), typesOf (limited |> List.map (fst >> snd)), limited |> List.map (fst >> snd)
 
 // Bound parameters retain RuntimeExpression wrappers for descriptor inference;
@@ -26454,7 +26484,7 @@ let private selectMutationTargets
 
     if orderBy.IsEmpty then
         rows
-        |> streamLimited false 0 limit (fun ((_, row) as positioned) ->
+        |> streamLimited false None 0 limit (fun ((_, row) as positioned) ->
             matches row
             |> Result.map (fun matched ->
                 if matched then Some((), positioned) else None))
@@ -29634,6 +29664,16 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
     | Explain(nestedFormat, inner) -> explainStatement nestedFormat store registry account dbName inner
     | _ -> Err(1064, "EXPLAIN is not supported for this statement")
 
+let private trackFoundRowsOffset offset =
+    offset |> Option.bind (fun expression ->
+        if rowCount expression > 0 then Some { Expression = expression; Consumed = 0 }
+        else None)
+
+let private foundRowsWithOffset offset result =
+    match offset, result with
+    | Some skipped, ResultSet(_, rows) -> Some(uint64 skipped.Consumed + uint64 rows.Length)
+    | _ -> None
+
 /// A top-level `SELECT`'s resultset plus its per-column MySQL wire types.
 /// `outer` is always `None` for a top-level statement, so this needs no
 /// `EvalContext` in its own signature. SQL_CALC_FOUND_ROWS executes the
@@ -29669,8 +29709,12 @@ let runTopLevelSelect
             ResultSet(columns, applyLimitOffset limit offset rows), types, Some(uint64 values.Length), limitedValues
         | error -> error, types, None, []
     else
-        let result, types, values = runSelectStmt store registry dbName executable None
-        result, types, None, values
+        let offset = trackFoundRowsOffset executable.Offset
+        let result, types, values =
+            match offset with
+            | Some _ -> DynamicScope.withThreadValue foundRowsOffset offset (fun () -> runSelectStmt store registry dbName executable None)
+            | None -> runSelectStmt store registry dbName executable None
+        result, types, foundRowsWithOffset offset result, values
 
 let runTopLevelUnion
     (store: Store)
@@ -29709,8 +29753,14 @@ let runTopLevelUnion
             ResultSet(columns, applyLimitOffset limit offset rows), types, Some(uint64 values.Length), limitedValues
         | error -> error, types, None, []
     else
-        let result, types, values = runUnionStmtWithOuter store registry dbName executable rest orderBy limit offset None
-        result, types, None, values
+        let consumed = trackFoundRowsOffset offset
+        let result, types, values =
+            match consumed with
+            | Some _ ->
+                DynamicScope.withThreadValue foundRowsOffset consumed (fun () ->
+                    runUnionStmtWithOuter store registry dbName executable rest orderBy limit offset None)
+            | None -> runUnionStmtWithOuter store registry dbName executable rest orderBy limit offset None
+        result, types, foundRowsWithOffset consumed result, values
 
 /// Describes a stored view without reading rows or invoking extension functions.
 let viewColumns (store: Store) (registry: Registry) (schema: string) (name: string) : ColumnDef list option =
@@ -36126,7 +36176,8 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
                     index.Visible && index.Kind = BTree && not (equalsIgnoreCase "PRIMARY" index.Name)))
 
             let canStopAtLimit limit =
-                literalRowCounts && not select.Distinct && not select.CalculateFoundRows && rowCount limit > 0
+                literalRowCounts && not select.Distinct && not select.CalculateFoundRows
+                && (rowCount limit > 0 || (select.Offset |> Option.exists (fun offset -> rowCount offset > 0)))
 
             let scanThroughLimit limit direction =
                 let offset = select.Offset |> Option.map rowCount |> Option.defaultValue 0

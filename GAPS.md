@@ -952,6 +952,9 @@ and preserve the gaps at the records they visit successfully.
 [Locking reads with `LIMIT 0` and no offset](torture/findings/2026-11-27-missing-primary-write-gaps.md#locking-reads-with-limit-0)
 validate the statement and retain table metadata without claiming rows,
 including when the locking read is inside a subquery, CTE, or UNION.
+[Offset accounting](torture/findings/2026-11-27-missing-primary-write-gaps.md#found_rows-and-offset)
+counts consumed rows in `FOUND_ROWS()`. An ordered primary-key locking
+scan also honors a positive offset when its limit is zero.
 
 [Unique secondary-key moves](torture/findings/2026-11-27-unique-secondary-key-moves.md)
 now hold the destination key through commit or rollback, including in a

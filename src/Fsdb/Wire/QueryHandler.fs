@@ -3719,6 +3719,7 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
                 | Select select ->
                     let result, types, calculatedFoundRows, rows =
                         withExecutionLimits (fun () ->
+                            let mutable consumedOffset = 0
                             let readStore, readSelect =
                                 match session.Tx with
                                 | Some transaction when
@@ -3750,14 +3751,19 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
                                                     | Storage.ReadPrimary readStore -> readStore, orderedSelect
                                                     | Storage.SkippedPrimaryPoint readStore ->
                                                         readStore, { orderedSelect with Where = Some(Lit(VInt 0L)) }
-                                                    | Storage.ReadSelectedPrimaryKeys(readStore, rows) ->
+                                                    | Storage.ReadSelectedPrimaryKeys(readStore, rows, consumed) ->
+                                                        consumedOffset <- consumed
                                                         let qualifier = source.Alias |> Option.defaultValue source.Table
                                                         readStore, Executor.selectLockedPrimaryKeys qualifier keys rows orderedSelect)
                                                 |> Option.defaultValue (planningStore, select)
                                         | _ -> store, select)
                                     |> Option.defaultWith (fun () -> consistentReadStore (), select)
                                 | _ -> consistentReadStore (), select
-                            Executor.runTopLevelSelect readStore registry dbName readSelect)
+                            let result, types, count, values = Executor.runTopLevelSelect readStore registry dbName readSelect
+                            match result with
+                            | ResultSet(_, rows) when consumedOffset > 0 ->
+                                result, types, Some(uint64 consumedOffset + uint64 rows.Length), values
+                            | _ -> result, types, count, values)
 
                     let result, types = consumeSelectDestination select result types rows
                     let result = formatResultForProtocol types rows result

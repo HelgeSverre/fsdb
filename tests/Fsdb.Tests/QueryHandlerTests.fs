@@ -14501,6 +14501,39 @@ let tests =
                   | other -> failtestf "expected affected-row accounting, got %A" other
               | _, other -> failtestf "expected result-row accounting, got %A" other
 
+          testCase "FOUND_ROWS counts consumed offsets without returning skipped rows"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE counts(id INT PRIMARY KEY,n INT)"
+              let session, _ = handle session "INSERT INTO counts VALUES (1,1),(2,1),(3,2),(4,2)"
+              for sql, rows, found in
+                  [ "SELECT id FROM counts WHERE id>1 LIMIT 1 OFFSET 1", [ "3" ], "2"
+                    "SELECT id FROM counts ORDER BY id LIMIT 1 OFFSET 2", [ "3" ], "3"
+                    "SELECT id FROM counts ORDER BY id LIMIT 0 OFFSET 9", [], "4"
+                    "SELECT DISTINCT n FROM counts ORDER BY n LIMIT 0 OFFSET 9", [], "2"
+                    "SELECT n FROM counts GROUP BY n ORDER BY n LIMIT 0 OFFSET 9", [], "2"
+                    "SELECT ROW_NUMBER() OVER (ORDER BY id) AS pos FROM counts ORDER BY pos LIMIT 1 OFFSET 2", [ "3" ], "3"
+                    "(SELECT id FROM counts LIMIT 1 OFFSET 2) UNION ALL (SELECT 9) ORDER BY id LIMIT 1 OFFSET 1", [ "9" ], "2"
+                    "SELECT id FROM (SELECT id FROM counts LIMIT 1 OFFSET 2) d LIMIT 1", [ "3" ], "1"
+                    "SELECT SQL_CALC_FOUND_ROWS id FROM counts LIMIT 1 OFFSET 2", [ "3" ], "4" ] do
+                  let next, result = handle session sql
+                  match result, handle next "SELECT FOUND_ROWS()" |> snd with
+                  | ResultSet(_, actual), ResultSet(_, count) ->
+                      Expect.equal actual (rows |> List.map (Some >> List.singleton)) sql
+                      Expect.equal count [ [ Some found ] ] sql
+                  | other -> failtestf "%s: expected a result set and count, got %A" sql other
+              let holder, _ = handle (create 2 session.Store) "START TRANSACTION"
+              let holder, _ = handle holder "UPDATE counts SET n=3 WHERE id=2"
+              let session, _ = handle session "START TRANSACTION"
+              let session, skipped = handle session "SELECT id FROM counts WHERE id>0 ORDER BY id LIMIT 0 OFFSET 2 FOR UPDATE SKIP LOCKED"
+              let session, count = handle session "SELECT FOUND_ROWS()"
+              let _, untouched = handle (create 3 session.Store) "SELECT id FROM counts WHERE id=4 FOR UPDATE NOWAIT"
+              handle holder "ROLLBACK" |> ignore
+              handle session "ROLLBACK" |> ignore
+              Expect.equal skipped (ResultSet([ "id" ], [])) "a zero limit returns no rows"
+              Expect.equal count (ResultSet([ "FOUND_ROWS()" ], [ [ Some "2" ] ])) "only unlocked offsets count"
+              Expect.equal untouched (ResultSet([ "id" ], [ [ Some "4" ] ])) "the locking scan stops at the offset"
+
           testCase "LAST_INSERT_ID() stays 0 for an explicit AUTO_INCREMENT id, unlike the OK packet's last_insert_id"
           <| fun _ ->
               // Real MySQL 8.4: PDO::lastInsertId()/the OK packet reports an

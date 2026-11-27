@@ -201,7 +201,24 @@ wait mode, explicit transactions, autocommit, and validation errors.
 
 `SQL_CALC_FOUND_ROWS` and a positive `OFFSET` can still scan and lock
 records with `LIMIT 0`. The no-offset shortcut excludes those cases.
-Zero-limit positive offsets still differ in how many rows they visit.
-MySQL also includes consumed offsets in `FOUND_ROWS()` without
-`SQL_CALC_FOUND_ROWS`. With four matching rows, `LIMIT 1 OFFSET 2`
-returns one row and reports three in MySQL, while fsdb reports one.
+
+## FOUND_ROWS and OFFSET
+
+With four matching rows, `LIMIT 1 OFFSET 2` returns one row and reports
+three in `FOUND_ROWS()`. `LIMIT 0 OFFSET 9` reports four, the number of
+rows it could consume. A nested query's offset contributes only to that
+query block. `SQL_CALC_FOUND_ROWS` still counts the unbounded result.
+
+An ordered integer primary-key locking read with `LIMIT 0 OFFSET n`
+visits only the offset prefix when its plan can stop in index order.
+`NOWAIT` can report a conflict in that prefix. `SKIP LOCKED` counts only
+unlocked rows toward the offset and `FOUND_ROWS()`. At READ COMMITTED
+and READ UNCOMMITTED it checks those records without retaining the locks.
+
+The offset counts matched MySQL 8.4.11 across 411 schedules in memory and
+with WAL enabled. These covered streaming and ordered reads, DISTINCT,
+grouping, windows, prepared statements, nested queries, set operations,
+and locking reads. The existing session-variable assignment divergence
+in ordered projections was also reproduced. With `SELECT @n:=@n+1 ...
+ORDER BY id LIMIT 1 OFFSET 2`, MySQL evaluates the assignment for the
+returned row. Fsdb still evaluates it on the rows entering the sort.

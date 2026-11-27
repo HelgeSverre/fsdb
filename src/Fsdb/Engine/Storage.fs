@@ -6779,7 +6779,7 @@ type internal PrimaryReadPlan =
 type internal PrimaryReadOutcome =
     | ReadPrimary of Store
     | SkippedPrimaryPoint of Store
-    | ReadSelectedPrimaryKeys of Store * Value list list
+    | ReadSelectedPrimaryKeys of Store * Value list list * consumedOffset: int
 
 let internal compareIntegerPrimaryValues = compareIndexedValues None
 
@@ -7494,23 +7494,24 @@ let private lockPrimarySkipRange (live: Store) refresh strength (plan: PrimaryRe
                     acquireTransactionReadTargets TimeSpan.Zero snapshot database tableName strength SkipLocked [ rowId ]
                     |> List.isEmpty |> not
 
-            let selected =
+            let selected, consumedOffset =
                 match entries with
                 | None ->
                     upperGap ()
-                    []
+                    [], 0
                 | Some entries ->
                     let start, finish = primaryRangeBounds entries lower upper
                     let forward = direction = ForwardScan
                     if not forward then upperGap ()
                     let step = if forward then 1 else -1
+                    let complete offset selected = List.rev selected, plan.ReadOffset - offset
                     let rec visit index offset remaining selected =
                         Limits.checkQueryInterruption queryCancellation.Value
-                        if remaining = 0 then List.rev selected
+                        if remaining = 0 then complete offset selected
                         elif forward && plan.ReadGaps && index >= finish then
                             upperGap ()
-                            List.rev selected
-                        elif index < 0 || index >= entries.Count then List.rev selected
+                            complete offset selected
+                        elif index < 0 || index >= entries.Count then complete offset selected
                         else
                             let entry = entries.[index]
                             let matches = index >= start && index < finish
@@ -7518,17 +7519,17 @@ let private lockPrimarySkipRange (live: Store) refresh strength (plan: PrimaryRe
                             if not matches && not forward && isEqualityPrefix lower upper then
                                 // A reverse prefix seek protects the predecessor's gap without locking its row.
                                 recordGap entry.Values
-                                List.rev selected
+                                complete offset selected
                             elif not (claim entry.RowId probe) then visit (index + step) offset remaining selected
                             else
                                 recordGap entry.Values
-                                if not matches then List.rev selected
+                                if not matches then complete offset selected
                                 elif offset > 0 then visit (index + step) (offset - 1) (remaining - 1) selected
                                 else visit (index + step) 0 (remaining - 1) (entry.Values :: selected)
                     let first = if forward then start else finish - 1
                     visit first plan.ReadOffset count []
 
-            ReadSelectedPrimaryKeys(snapshot, selected)))
+            ReadSelectedPrimaryKeys(snapshot, selected, consumedOffset)))
 
 let internal lockPrimaryRead timeout live refresh strength (plan: PrimaryReadPlan) =
     match plan.ReadAccess with
