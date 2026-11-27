@@ -5750,6 +5750,54 @@ let tests =
                     "DELETE t FROM target t JOIN filtered r ON t.id=r.id WHERE t.id=2" ] do
                   Expect.equal (run sql) (Affected 1UL) sql
 
+          testCase "joined deletes reject target reads retained by merged views"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE target(id INT PRIMARY KEY,n INT)"
+                        "CREATE TABLE labels(id INT PRIMARY KEY,m INT)"
+                        "INSERT INTO target VALUES(1,10),(2,20)"
+                        "INSERT INTO labels VALUES(1,100),(2,200)"
+                        "CREATE VIEW ranked AS SELECT l.*, (SELECT MAX(n) FROM target) AS score FROM labels l"
+                        "CREATE VIEW ordered AS SELECT l.* FROM labels l ORDER BY (SELECT MAX(n) FROM target)"
+                        "CREATE VIEW retained AS SELECT l.* FROM labels l WHERE EXISTS (SELECT 1 FROM target t WHERE t.id=l.id HAVING 1)"
+                        "CREATE VIEW disjunction AS SELECT l.* FROM labels l WHERE 1 OR EXISTS (SELECT 1 FROM target)"
+                        "CREATE VIEW empty_filter AS SELECT l.* FROM labels l WHERE EXISTS (SELECT 1 FROM target WHERE 0)"
+                        "CREATE VIEW filtered AS SELECT l.* FROM labels l WHERE l.m>0 AND EXISTS (SELECT 1 FROM target t WHERE t.id=l.id GROUP BY t.id)"
+                        "CREATE VIEW dependent AS SELECT l.*, (SELECT MAX(n) FROM target t WHERE t.id=l.id) AS score FROM labels l"
+                        "CREATE VIEW membership AS SELECT l.* FROM labels l WHERE l.id NOT IN (SELECT t.id FROM target t)"
+                        "CREATE VIEW nullable_membership AS SELECT l.* FROM labels l WHERE l.m NOT IN (SELECT t.n FROM target t)"
+                        "CREATE VIEW nested AS SELECT * FROM ranked"
+                        "CREATE VIEW nested_derived AS SELECT * FROM (SELECT * FROM ranked) d"
+                        "CREATE VIEW self_filter AS SELECT t.* FROM target t WHERE EXISTS(SELECT 1 FROM target p WHERE p.id=t.id HAVING 1)"
+                        "CREATE VIEW semijoin_ranked AS SELECT l.* FROM labels l WHERE EXISTS(SELECT 1 FROM ranked)"
+                        "CREATE VIEW semijoin_cte AS SELECT l.* FROM labels l WHERE EXISTS(WITH q AS (SELECT * FROM ranked) SELECT 1 FROM q)"
+                        "CREATE VIEW semijoin_filtered AS SELECT l.* FROM labels l WHERE EXISTS(SELECT 1 FROM filtered)"
+                        "CREATE ALGORITHM=TEMPTABLE VIEW copied AS SELECT * FROM ranked" ]
+
+              let duplicate = Err(1443, "The definition of table 'r' prevents operation DELETE on table 't'.")
+              for view in [ "ranked"; "ordered"; "retained"; "disjunction"; "empty_filter"; "nullable_membership"; "nested"; "nested_derived"; "semijoin_ranked"; "semijoin_cte" ] do
+                  let sql = $"DELETE t FROM target t JOIN {view} r ON r.id=t.id WHERE 0"
+                  Expect.equal (run sql) duplicate sql
+
+              Expect.equal (run "DELETE t FROM ranked r JOIN target t ON t.id=r.id") duplicate "the written alias is reported even when a view leads"
+              Expect.equal (run "EXPLAIN DELETE t FROM target t JOIN ranked r ON t.id=r.id") duplicate "EXPLAIN validates the same writes"
+              Expect.equal (run "DELETE t FROM self_filter t JOIN labels l ON l.id=t.id")
+                  (Err(1288, "The target table t of the DELETE is not updatable")) "a target view that owns the conflicting read is not updatable"
+              let nestedDuplicate = Err(1443, "The definition of table 'v' prevents operation DELETE on table 't'.")
+              Expect.equal (run "DELETE t FROM target t JOIN (SELECT * FROM ranked v) d ON d.id=t.id")
+                  nestedDuplicate "a merged derived source reports its inner view alias"
+              Expect.equal (run "DELETE t FROM target t JOIN labels l ON l.id=t.id WHERE EXISTS(SELECT 1 FROM filtered v WHERE v.id=l.id)")
+                  nestedDuplicate "semijoin reads inside a mutation subquery stay outside the mutation's join"
+              Expect.equal (run "SELECT id FROM target ORDER BY id")
+                  (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ])) "rejected deletes leave both rows intact"
+
+              for view, count in [ "filtered", 2UL; "dependent", 2UL; "copied", 2UL; "membership", 0UL; "semijoin_filtered", 2UL ] do
+                  Expect.equal (run "START TRANSACTION") (Affected 0UL) "start an isolated delete"
+                  let sql = $"DELETE t FROM target t JOIN {view} r ON r.id=t.id"
+                  Expect.equal (run sql) (Affected count) sql
+                  Expect.equal (run "ROLLBACK") (Affected 0UL) "restore rows for the next delete"
+
           testCase "saved joined view writes preserve correlated qualifiers when a source is renamed"
           <| fun _ ->
               let run =

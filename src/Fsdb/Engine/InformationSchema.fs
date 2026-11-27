@@ -2117,65 +2117,66 @@ let private viewPredicateExpressions (select: SelectStmt) =
 
 /// Reads owned by a saved view's expressions. The metadata check sees all
 /// opened sources; write resolution can stop at materialization boundaries.
-let internal viewExpressionReadTables catalog schema canMerge includeProjection (select: SelectStmt) =
+let internal viewExpressionReadTablesWithSemijoins catalog schema canMerge includeProjection semijoinSubqueries (select: SelectStmt) =
     let views = lazy (viewCatalogEntries catalog |> List.map (fun view -> (view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()), view) |> Map.ofList)
-    let crosses body = canMerge |> Option.forall (fun decide -> decide body)
+    let crosses schema algorithm body = canMerge |> Option.forall (fun decide -> decide schema algorithm body)
     let rec extend seen schema scope (definitions: CommonTableExpr list) =
         (scope, definitions)
         ||> List.fold (fun previous cte ->
             let name = cte.CteName.ToLowerInvariant()
-            let visible = if cte.Recursive then Map.add name (lazy Set.empty) previous else previous
-            let reads = lazy (if crosses cte.Body then query seen schema visible cte.Body else Set.empty)
-            Map.add name reads previous)
-    and query seen schema scope = function
-        | PlainSelect select -> block seen schema (extend seen schema scope select.Ctes) select
+            let visible = if cte.Recursive then Map.add name (lazy Set.empty, lazy Set.empty) previous else previous
+            let reads merged = if crosses schema None cte.Body then query seen schema visible merged cte.Body else Set.empty
+            Map.add name (lazy (reads false), lazy (reads true)) previous)
+    and query seen schema scope merged = function
+        | PlainSelect select -> block seen schema (extend seen schema scope select.Ctes) merged select
         | UnionSelect(first, rest, orderBy, limit, offset) ->
             let scope = extend seen schema scope first.Ctes
             let reads =
-                [ yield block seen schema scope first
+                [ yield block seen schema scope merged first
                   for _, branch in rest do
-                      yield block seen schema (extend seen schema scope branch.Ctes) branch
-                  yield expressions seen schema scope (List.map fst orderBy @ Option.toList limit @ Option.toList offset) ]
+                      yield block seen schema (extend seen schema scope branch.Ctes) merged branch
+                  yield expressions seen schema scope (fun _ -> false) (List.map fst orderBy @ Option.toList limit @ Option.toList offset) ]
             Set.unionMany reads
-    and block seen schema scope (select: SelectStmt) =
+    and block seen schema scope merged (select: SelectStmt) =
+        let semijoin = if merged then semijoinSubqueries schema select else fun _ -> false
         let values =
             viewPredicateExpressions select @ (select.Projections |> List.map _.Expression)
             @ select.GroupBy @ Option.toList select.Having @ Option.toList select.Limit @ Option.toList select.Offset
             @ (select.Windows |> List.collect (snd >> OverSpec >> Expression.overExpressions))
         let sources = Option.toList select.From @ (select.Joins |> List.map _.Table)
-        Set.union (expressions seen schema scope values) (sources |> List.map (source seen schema scope) |> Set.unionMany)
-    and expressions seen schema scope values =
+        Set.union (expressions seen schema scope semijoin values) (sources |> List.map (source seen schema scope merged) |> Set.unionMany)
+    and expressions seen schema scope semijoin values =
         values
         |> List.collect Expression.collectSubqueries
-        |> List.map (PlainSelect >> query seen schema scope)
+        |> List.map (fun select -> query seen schema scope (semijoin select) (PlainSelect select))
         |> Set.unionMany
-    and source seen schema scope = function
+    and source seen schema scope merged = function
         | FromTable table ->
             let local = if table.Database.IsNone then Map.tryFind (table.Table.ToLowerInvariant()) scope else None
             match local with
-            | Some reads -> reads.Value
+            | Some(normal, nested) -> if merged then nested.Value else normal.Value
             | None when table.Database.IsNone && eqI "DUAL" table.Table -> Set.empty
             | None ->
                 let key = viewTableKey schema table
                 match Map.tryFind key views.Value with
-                | None -> Set.singleton key
+                | None -> if merged then Set.empty else Set.singleton key
                 | Some _ when Set.contains key seen || Set.count seen >= Limits.maxViewMetadataNesting -> Set.empty
                 | Some entry when canMerge.IsSome && eqI entry.Algorithm "TEMPTABLE" -> Set.empty
                 | Some entry ->
                     let reads = if canMerge.IsNone then Set.singleton key else Set.empty
                     match (Parser.parseSavedViewDefinition entry.Definition |> Result.map _.Statement) with
-                    | Ok(Select definition) when crosses (PlainSelect definition) ->
-                        Set.union reads (query (Set.add key seen) entry.Schema Map.empty (PlainSelect definition))
+                    | Ok(Select definition) when crosses entry.Schema (Some entry.Algorithm) (PlainSelect definition) ->
+                        Set.union reads (query (Set.add key seen) entry.Schema Map.empty merged (PlainSelect definition))
                     | Ok(Union(first, rest, orderBy, limit, offset)) when canMerge.IsNone ->
-                        Set.union reads (query (Set.add key seen) entry.Schema Map.empty (UnionSelect(first, rest, orderBy, limit, offset)))
+                        Set.union reads (query (Set.add key seen) entry.Schema Map.empty merged (UnionSelect(first, rest, orderBy, limit, offset)))
                     | _ -> reads
         | FromJoinGroup(first, joins) ->
             (first :: (joins |> List.map (fun (join: Join) -> join.Table)))
-            |> List.map (source seen schema scope)
+            |> List.map (source seen schema scope merged)
             |> Set.unionMany
-        | FromLateral(body, alias) when alias = SelectStmt.setExpressionAlias -> query seen schema scope body
-        | FromLateral(body, _) | FromSubquery(body, _) when crosses body -> query seen schema scope body
-        | FromJsonTable(value, _, _, _) -> expressions seen schema scope [ value ]
+        | FromLateral(body, alias) when alias = SelectStmt.setExpressionAlias -> query seen schema scope merged body
+        | FromLateral(body, _) | FromSubquery(body, _) when crosses schema None body -> query seen schema scope merged body
+        | FromJsonTable(value, _, _, _) -> expressions seen schema scope (fun _ -> false) [ value ]
         | _ -> Set.empty
 
     let sources = Option.toList select.From @ (select.Joins |> List.map _.Table) |> List.collect FromItem.leaves
@@ -2183,7 +2184,11 @@ let internal viewExpressionReadTables catalog schema canMerge includeProjection 
     let values = viewPredicateExpressions select @ tableFunctions
     let values = if includeProjection then values @ (select.Projections |> List.map _.Expression) else values
     let scope = extend Set.empty schema Map.empty select.Ctes
-    expressions Set.empty schema scope values
+    expressions Set.empty schema scope (semijoinSubqueries schema select) values
+
+let internal viewExpressionReadTables catalog schema canMerge includeProjection select =
+    let canMerge = canMerge |> Option.map (fun decide _ _ body -> decide body)
+    viewExpressionReadTablesWithSemijoins catalog schema canMerge includeProjection (fun _ _ _ -> false) select
 
 let private viewDefinitionReadsOwnTable catalog schema (select: SelectStmt) =
     match select.From, select.Joins with

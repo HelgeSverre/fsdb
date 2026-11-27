@@ -30002,6 +30002,91 @@ let private validateBindings store registry schema functionDatabase statement =
     let validateFunction = validateFunctionName registry functionDatabase
     validateBindingsWith (describeQueryColumnsCheckingFunctions functionDatabase) validateFunction store registry schema statement
 
+type private MutationViewReadScope = UpdateRoot | DeleteRoot | DeleteSubquery
+
+let private mutationExpressionIsVolatile (registry: Registry) = function
+    | FuncCall(name, _) ->
+        match name.ToUpperInvariant() with
+        | "RAND" | "RANDOM_BYTES" | "UUID" -> true
+        | key -> Map.tryFind key registry.Extensions |> Option.exists (fun extension -> not extension.Deterministic)
+    | _ -> false
+
+let private joinedDeleteViewReads store registry canMerge schema select =
+    let sources (block: SelectStmt) =
+        Option.toList block.From @ List.map (fun (join: Join) -> join.Table) block.Joins
+        |> List.collect FromItem.leaves
+    let columns schema block =
+        sources block |> List.choose (fun source ->
+            FromItem.tryQualifier source
+            |> Option.map (fun alias -> alias, selectSourceColumns store schema source |> List.choose id))
+    let rec nonNullable (block: SelectStmt) columns expression =
+        let column scope name =
+            let nullable = nullableJoinQualifiers block
+            columns |> List.collect (fun (alias: string, definitions: ColumnDef list) ->
+                if scope |> Option.forall (equalsIgnoreCase alias) then
+                    definitions |> List.choose (fun definition ->
+                        if equalsIgnoreCase name definition.Name then
+                            Some((definition.PrimaryKey || not definition.Nullable) && not (Set.contains (alias.ToLowerInvariant()) nullable))
+                        else None)
+                else [])
+            |> List.tryExactlyOne
+            |> Option.defaultValue false
+        match expression with
+        | Col name -> column None name
+        | QualifiedCol(alias, name) -> column (Some alias) name
+        | Row items -> List.forall (nonNullable block columns) items
+        | LiteralValue value -> value <> VNull
+        | _ -> false
+
+    let hasSource block =
+        sources block |> List.exists (function
+            | FromTable table -> table.Database.IsSome || not (equalsIgnoreCase "DUAL" table.Table)
+            | _ -> true)
+
+    let semijoins schema (outer: SelectStmt) =
+        let flattened = HashSet<SelectStmt>(HashIdentity.Reference)
+        let constantContext = lazy (contextFactory store registry schema Map.empty Map.empty None [||])
+        let canBeTrue value = possibleConditionTruths constantContext.Value value |> Set.contains (Some true)
+        let outerColumns = lazy (columns schema outer)
+        let correlated query =
+            sourceReferencesPreceding store schema outerColumns.Value (FromSubquery(PlainSelect query, ""))
+        let eligible (query: SelectStmt) =
+            match SelectStmt.expressionQuery query with
+            | UnionSelect _ -> false
+            | PlainSelect _ ->
+                hasSource query && not query.StraightJoin && not query.Rollup
+                && query.Having.IsNone && query.Windows.IsEmpty && query.Limit.IsNone && query.Offset.IsNone
+                && (query.Where |> Option.forall canBeTrue)
+                && (selectJoinExpressions query |> List.forall (fun value ->
+                    not (containsAggregate registry value) && (collectWindowFuncs value).IsEmpty))
+        let admit query =
+            flattened.Add query |> ignore
+        let admitsMembership value query =
+            not (Expression.exists (mutationExpressionIsVolatile registry) value)
+            && eligible query
+        let inspectPredicate = function
+            | Exists query when eligible query -> admit query
+            | Not(Exists query) when eligible query && correlated query -> admit query
+            | InSubquery(value, query) | QuantifiedComparison(value, Eq, Any, query)
+                when admitsMembership value query ->
+                admit query
+            | Not(InSubquery(value, query))
+                when admitsMembership value query
+                     && (not (isLiteralConstantExpression registry value) || correlated query)
+                     && nonNullable outer outerColumns.Value value ->
+                let innerColumns = columns schema query
+                if query.Projections |> List.forall (fun projection -> nonNullable query innerColumns projection.Expression) then
+                    admit query
+            | _ -> ()
+        if hasSource outer && not outer.StraightJoin then
+            for condition in Option.toList outer.Where @ List.collect Join.conditions outer.Joins do
+                if canBeTrue condition then conjuncts condition |> List.iter inspectPredicate
+        flattened.Contains
+
+    // MySQL has already resolved semijoins inside a merged view when DELETE
+    // checks for target reads. Only their FROM sources move into the outer join.
+    InformationSchema.viewExpressionReadTablesWithSemijoins store.Catalog schema (Some canMerge) true semijoins select
+
 let private mutationSubqueryTargetError store registry schema statement =
     let rec mutation = function
         | Explain(_, inner) -> mutation inner
@@ -30029,7 +30114,7 @@ let private mutationSubqueryTargetError store registry schema statement =
         let queries =
             expressions @ List.collect Join.conditions joins @ tableFunctionInputs rootSources
             |> List.collect Expression.collectSubqueries
-        if queries.IsEmpty && (operation <> "UPDATE" || joins.IsEmpty) then None
+        if queries.IsEmpty && joins.IsEmpty then None
         else
             let rootCtes = Set.union (cteNames ctes) (currentCteScope () |> Map.keys |> Set.ofSeq)
             let pending = DynamicScope.valueOrDefault OptimizerHintResolution.emptyExecution joinHintDiagnostics
@@ -30081,6 +30166,97 @@ let private mutationSubqueryTargetError store registry schema statement =
                         Some key, tables
                     | None -> None, [ database, name ]
 
+            let inputs =
+                rootSources |> List.choose (function FromTable table when not (isCte rootCtes table) -> Some table | _ -> None)
+            let hasUncacheableProjection viewSchema (select: SelectStmt) =
+                let outerColumns =
+                    lazy (
+                        sourceTables (Option.toList select.From) select.Joins
+                        |> List.choose (fun source ->
+                            FromItem.tryQualifier source |> Option.map (fun alias ->
+                                alias, selectSourceColumns viewStore.Value viewSchema source |> List.choose id)))
+                let uncacheable = mutationExpressionIsVolatile registry
+                select.Projections |> List.exists (fun projection ->
+                    match Expression.collectSubqueries projection.Expression with
+                    | [] -> false
+                    | subqueries ->
+                        Expression.exists (function Col _ | QualifiedCol _ -> true | expression -> uncacheable expression) projection.Expression
+                        || (subqueries |> List.exists (fun query ->
+                            Expression.statementExists uncacheable (Select query)
+                            || sourceReferencesPreceding viewStore.Value viewSchema outerColumns.Value
+                                (FromSubquery(PlainSelect query, "")))))
+            let derivedCanMerge viewSchema hint select =
+                selectHasMergeableShape registry select
+                && (match hint with
+                    | Some OptimizerHintResolution.MaterializeSource -> false
+                    | Some OptimizerHintResolution.MergeSource -> true
+                    | None -> not assignsVariable.Value && not (hasUncacheableProjection viewSchema select))
+
+            let deleteBodyCanMerge viewSchema algorithm = function
+                | PlainSelect select when algorithm = Some "MERGE" -> selectHasMergeableShape registry select
+                | PlainSelect select -> derivedCanMerge viewSchema None select
+                | UnionSelect _ -> false
+
+            let expressionReads scope viewSchema select =
+                match scope with
+                | DeleteRoot -> joinedDeleteViewReads viewStore.Value registry deleteBodyCanMerge viewSchema select
+                | DeleteSubquery ->
+                    InformationSchema.viewExpressionReadTablesWithSemijoins viewStore.Value.Catalog viewSchema
+                        (Some deleteBodyCanMerge) true (fun _ _ _ -> false) select
+                | UpdateRoot ->
+                    InformationSchema.viewExpressionReadTables viewStore.Value.Catalog viewSchema
+                        (Some(queryBodyCanMerge registry)) true select
+
+            let rec mergedViewReadKeys scope seen readStore database name hint =
+                let key = database, name
+                if Set.contains key seen || Set.count seen >= Limits.maxViewMetadataNesting
+                   || (tableSnapshot readStore database name |> Result.isOk) then
+                    Set.empty
+                else
+                    match tryStoredView readStore database name with
+                    | Some view when not (materializes hint view) ->
+                        match parseStoredViewStatement view with
+                        | Ok(Select select)
+                            when selectHasMergeableShape registry select
+                                 && (view.Algorithm = "MERGE" || hint = Some OptimizerHintResolution.MergeSource
+                                     || not (hasUncacheableProjection view.Schema select)) ->
+                            let own = expressionReads scope view.Schema select
+                            // UPDATE checks the expressions owned by the directly merged view.
+                            if scope = UpdateRoot then own
+                            else Set.union own (nestedReadKeys scope (Set.add key seen) view.Schema Set.empty select)
+                        | _ -> Set.empty
+                    | _ -> Set.empty
+
+            and nestedReadKeys scope seen viewSchema names (select: SelectStmt) =
+                let names = Set.union names (cteNames select.Ctes)
+                sourceTables (Option.toList select.From) select.Joins
+                |> List.map (function
+                    | FromTable table when not (isCte names table) ->
+                        let database, name = tableKey viewSchema table
+                        mergedViewReadKeys scope seen viewStore.Value database name None
+                    | FromSubquery(PlainSelect derived, _) when derivedCanMerge viewSchema None derived ->
+                        Set.union (expressionReads scope viewSchema derived) (nestedReadKeys scope seen viewSchema names derived)
+                    | _ -> Set.empty)
+                |> Set.unionMany
+
+            let rec joinedReads scope names strategyFor sources =
+                sources |> List.collect (function
+                    | FromTable table when not (isCte names table) ->
+                        let database, name = tableKey schema table
+                        let alias = qualifier table
+                        let reads = mergedViewReadKeys scope Set.empty store database name (strategyFor alias)
+                        reads |> Set.toList |> List.map (fun key ->
+                            key, Some(database, name), alias, (if scope = UpdateRoot then Some table else None))
+                    | FromSubquery(PlainSelect derived, alias) when scope = DeleteRoot && derivedCanMerge schema (strategyFor alias) derived ->
+                        let direct = expressionReads scope schema derived |> Set.toList |> List.map (fun key -> key, None, alias, None)
+                        direct @ joinedReads scope (Set.union names (cteNames derived.Ctes)) (strategy derived)
+                            (sourceTables (Option.toList derived.From) derived.Joins)
+                    | _ -> [])
+
+            let joinedViewReads =
+                if joins.IsEmpty then []
+                else joinedReads (if operation = "UPDATE" then UpdateRoot else DeleteRoot) rootCtes rootStrategy rootSources
+
             let rec subqueryReads names (select: SelectStmt) =
                 let names = Set.union names (cteNames select.Ctes)
                 let sources = sourceTables (Option.toList select.From) select.Joins
@@ -30088,8 +30264,14 @@ let private mutationSubqueryTargetError store registry schema statement =
                     sources |> List.collect (function
                         | FromTable table when not (isCte names table) ->
                             let alias = qualifier table
-                            let view, tables = resolveRead store Set.empty schema (strategy select alias) table
-                            tables |> List.map (fun key -> key, view, alias)
+                            let hint = strategy select alias
+                            let view, tables = resolveRead store Set.empty schema hint table
+                            let expressionReads =
+                                match operation, view with
+                                | "DELETE", Some(database, name) ->
+                                    mergedViewReadKeys DeleteSubquery Set.empty store database name hint |> Set.toList
+                                | _ -> []
+                            (tables @ expressionReads) |> List.map (fun key -> key, view, alias)
                         | FromLateral(UnionSelect(first, rest, orderBy, limit, offset), alias)
                             when alias = SelectStmt.setExpressionAlias ->
                             // This lateral wrapper represents a set expression, not a SQL FROM item.
@@ -30112,55 +30294,6 @@ let private mutationSubqueryTargetError store registry schema statement =
                     @ tableFunctionInputs sources
                 inputs @ (expressions |> List.collect Expression.collectSubqueries |> List.collect (subqueryReads names))
 
-            let inputs =
-                rootSources |> List.choose (function FromTable table when not (isCte rootCtes table) -> Some table | _ -> None)
-            let hasUncacheableProjection viewSchema (select: SelectStmt) =
-                let outerColumns =
-                    lazy (
-                        sourceTables (Option.toList select.From) select.Joins
-                        |> List.choose (fun source ->
-                            FromItem.tryQualifier source |> Option.map (fun alias ->
-                                alias, selectSourceColumns viewStore.Value viewSchema source |> List.choose id)))
-                let uncacheable = function
-                    | FuncCall(name, _) ->
-                        match name.ToUpperInvariant() with
-                        | "RAND" | "RANDOM_BYTES" | "UUID" -> true
-                        | key -> Map.tryFind key registry.Extensions |> Option.exists (fun extension -> not extension.Deterministic)
-                    | _ -> false
-                select.Projections |> List.exists (fun projection ->
-                    match Expression.collectSubqueries projection.Expression with
-                    | [] -> false
-                    | subqueries ->
-                        Expression.exists (function Col _ | QualifiedCol _ -> true | expression -> uncacheable expression) projection.Expression
-                        || (subqueries |> List.exists (fun query ->
-                            Expression.statementExists uncacheable (Select query)
-                            || sourceReferencesPreceding viewStore.Value viewSchema outerColumns.Value
-                                (FromSubquery(PlainSelect query, "")))))
-            let joinedViewReads =
-                if operation <> "UPDATE" || joins.IsEmpty then []
-                else
-                    inputs |> List.collect (fun table ->
-                        let database, name = tableKey schema table
-                        match tableSnapshot store database name with
-                        | Ok _ -> []
-                        | Error _ ->
-                            let alias = qualifier table
-                            let hint = rootStrategy alias
-                            match tryStoredView store database name with
-                            | Some view when not (materializes hint view) ->
-                                match parseStoredViewStatement view with
-                                | Ok(Select select)
-                                    when selectHasMergeableShape registry select
-                                         && (view.Algorithm = "MERGE" || hint = Some OptimizerHintResolution.MergeSource
-                                             || not (hasUncacheableProjection view.Schema select)) ->
-                                    // The outer UPDATE sees reads owned by this directly merged view's
-                                    // expressions. A saved view used inside it has its own query block.
-                                    InformationSchema.viewExpressionReadTables viewStore.Value.Catalog view.Schema
-                                        (Some(queryBodyCanMerge registry)) true select
-                                    |> Set.toList
-                                    |> List.map (fun key -> key, Some(database, name), alias, Some table)
-                                | _ -> []
-                            | _ -> [])
             let reads =
                 joinedViewReads
                 @ (queries |> List.collect (subqueryReads rootCtes)
@@ -30212,11 +30345,7 @@ let private mutationSubqueryTargetError store registry schema statement =
                     match first with
                     | FromJoinGroup(first, joins) -> leadingLeaf strategyForSource first joins
                     | FromSubquery(PlainSelect select, alias)
-                        when selectHasMergeableShape registry select
-                             && (match strategyForSource alias with
-                                 | Some OptimizerHintResolution.MaterializeSource -> false
-                                 | Some OptimizerHintResolution.MergeSource -> true
-                                 | None -> not assignsVariable.Value && not (hasUncacheableProjection schema select)) ->
+                        when derivedCanMerge schema (strategyForSource alias) select ->
                         match select.From with
                         | Some inner -> leadingLeaf (strategy select) inner select.Joins
                         | None -> first
@@ -30246,6 +30375,8 @@ let private mutationSubqueryTargetError store registry schema statement =
                         | _ -> Some target, qualifier target, targetView
                     match targetView, readView with
                     | _ when joinedViewSource |> Option.exists (fun view -> first |> Option.exists (fun leaf -> obj.ReferenceEquals(view, leaf))) ->
+                        nonUpdatableTarget operation name
+                    | Some left, Some right when operation = "DELETE" && left = right && equalsIgnoreCase name readAlias ->
                         nonUpdatableTarget operation name
                     | left, right when left = right ->
                         1093, sprintf "You can't specify target table '%s' for update in FROM clause" name

@@ -85,15 +85,44 @@ session held the target row locked, and the stored value stayed
 unchanged. The prepared and locked-row probes also agreed after
 loading a checkpoint containing the view definitions.
 
-Joined DELETE still has differences for scalar subqueries and for
-predicates that MySQL keeps as subqueries during view resolution.
-MySQL returns 1443 in the audited cases where a read-side view reads the
-target in an uncorrelated scalar projection, a scalar ORDER BY, an EXISTS
-with an always-false inner predicate or a HAVING clause, or an EXISTS
-under `1 OR …`. Fsdb currently accepts those statements. Both engines
-allow the direct correlated EXISTS control with default settings.
-MySQL rejects the same control with 1443 when
-`optimizer_switch='semijoin=off'`.
+## Joined deletes through merged read-side views
+
+A view can read the DELETE target in a subquery that survives semijoin
+resolution. Fsdb now rejects the audited retained reads, including
+scalar projections and ordering, nullable NOT IN, EXISTS with HAVING,
+and EXISTS under a disjunction. The diagnostic names the view alias
+and the written alias, including when the view leads the join. A target
+view that owns the conflicting read returns 1288.
+[MySQL duplicate-target check](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_delete.cc#L784-L802)
+
+```sql
+CREATE TABLE items (id INT PRIMARY KEY, n INT);
+CREATE TABLE labels (id INT PRIMARY KEY);
+CREATE VIEW scored AS
+  SELECT l.id, (SELECT MAX(n) FROM items) AS score FROM labels l;
+
+DELETE i FROM scored r JOIN items i ON i.id = r.id;
+-- 1443: The definition of table 'r' prevents operation DELETE on table 'i'.
+```
+
+When a saved predicate becomes a semijoin in the mutation's join block,
+its ordinary row sources no longer count as subquery reads. A scalar
+subquery inside one of those sources can still conflict. A semijoin
+inside a mutation subquery stays below the mutation's join and still
+counts as a read. Materialization provides a separate read in the
+audited cases.
+[MySQL semijoin requirements](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/item_subselect.cc#L1397-L1491)
+
+Both engines allow the direct correlated EXISTS control with default
+settings. MySQL rejects the same control with 1443 when
+`optimizer_switch='semijoin=off'`, which Fsdb does not support.
+
+The main DELETE matrix improved from 16 to 39 matches across affected
+rows and exact error diagnostics in both storage modes. Additional
+alias and semijoin probes also matched. Binary PREPARE and prepared
+EXPLAIN returned the same diagnostics after a durable restart.
+A conflicting delete was rejected while a second session held the
+target row locked, and the target rows stayed intact.
 
 ## Query bounds on saved EXISTS predicates
 
