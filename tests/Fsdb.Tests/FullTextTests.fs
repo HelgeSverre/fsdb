@@ -272,6 +272,23 @@ let tests =
                       let ids = booleanScores view term |> Map.keys |> Seq.toList
                       Expect.equal ids expected term
 
+          testCase "accent-sensitive cached ngram prefixes stop at a nonmatching neighbor"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_0900_as_ci" |> Option.get
+              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.Disabled }
+              let cache texts =
+                  texts
+                  |> List.mapi (fun i text -> i + 1, rules, [ text ])
+                  |> buildIndexWithDocumentSettings rules collation
+              let ids index term = booleanScores index term |> Map.keys |> Seq.toList
+
+              Expect.equal (ids (cache [ "e中"; "é中"; "é中" ]) "é*") [ 2 ] "the plain posting separates the two accented spellings"
+              Expect.equal (ids (cache [ "é中"; "é中" ]) "é*") [ 1; 2 ] "both spellings match without the intervening posting"
+              Expect.equal (ids (cache [ "㌐中" ]) "ギ*") [ 1 ] "a voiced compatibility prefix can match in the cache"
+              Expect.equal (ids (cache [ "ā中"; "Å中"; "Å中" ]) "Å*") [ 2; 3 ] "the search compares the neighbor's complete accent"
+              let rows = tryFlatBooleanScoresDictionary (cache [ "e中"; "é中"; "é中" ]) "é*" |> Option.get
+              Expect.equal (rows.Keys |> Seq.toList) [ 2 ] "the flat posting lookup uses the same boundary"
+
           testCase "Unicode 5.2 ngrams share padded space keys but retain Mongolian separator weight"
           <| fun _ ->
               let collation = tryFind "utf8mb4_unicode_520_ci" |> Option.get

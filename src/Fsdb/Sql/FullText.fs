@@ -398,14 +398,14 @@ let private chargeDocument tokenizer collation order (words: (string * Token[])[
             key, byteCount spelling 0 spelling.Length, bytes)
     FullTextCache.addDocument order postings budget
 
-let private prefixKeys (collation: Collation) (token: Token) =
+let private prefixKeysFor forCache (collation: Collation) (token: Token) =
     let mutable length = 0
     [| for rune in token.Text.EnumerateRunes() do
            let start = length
            length <- length + rune.Utf16SequenceLength
            yield collation.FullTextKeyOf(token.Text.Substring(0, length))
            if rune.Value > 0x7F then
-               match Collation.fullTextPrefixExpansion collation.Name rune with
+               match Collation.fullTextPrefixExpansion forCache collation.Name rune with
                | Some expansion ->
                    let leading = token.Text.Substring(0, start)
                    let mutable offset = 0
@@ -415,6 +415,8 @@ let private prefixKeys (collation: Collation) (token: Token) =
                            yield collation.FullTextKeyOf(leading + expansion.Substring(0, offset))
                | None -> () |]
     |> Array.distinct
+
+let private prefixKeys collation token = prefixKeysFor false collation token
 
 let private ngramDocumentPrefixes collation (words: (string * Token[])[]) =
     // InnoDB keeps the first matching gram's TF but tallies every gram's posting.
@@ -480,7 +482,10 @@ let private emptyIndexWith policy tokenizer (collation: Collation) : Index<'id> 
       StopwordSource = None
       StopwordReload = None
       NextDocumentOrder = 1L
-      FlushedThrough = None
+      FlushedThrough =
+          match tokenizer with
+          | Ngrams _ when collation.Name = "utf8mb4_0900_as_ci" -> Some 0L
+          | _ -> None
       CachedTerms = FullTextCache.empty
       CacheBudget = FullTextCache.emptyBudget
       CacheCycle = obj ()
@@ -1541,6 +1546,49 @@ let private restrictScores (candidateIds: Set<'id> option) (scores: Map<'id, 'va
         |> Seq.choose (fun id -> Map.tryFind id scores |> Option.map (fun score -> id, score))
         |> Map.ofSeq
 
+let private usesAccentSensitiveCachePrefixes (view: ReadView<'id>) =
+    view.Collation.Name = "utf8mb4_0900_as_ci" && view.FlushedThrough = Some 0L
+
+let private cachePrefixPosting (key: string) (view: ReadView<'id>) =
+    // Hex-encoded ICU sort keys delimit primary and secondary weights with 01.
+    let primaryLength (key: string) =
+        let mutable endOfPrimary = 0
+        while endOfPrimary + 1 < key.Length
+              && (key.[endOfPrimary] <> '0' || key.[endOfPrimary + 1] <> '1') do
+            endOfPrimary <- endOfPrimary + 2
+        endOfPrimary
+    let primary = key.Substring(0, primaryLength key)
+    let comparePrefix gram spelling =
+        let prefixes = prefixKeysFor true view.Collation { Key = gram; Text = spelling; ByteOffset = 0L }
+        if Array.contains key prefixes then 0
+        else
+            prefixes
+            |> Array.fold (fun matching candidate ->
+                if primaryLength candidate = primary.Length
+                   && candidate.StartsWith(primary, StringComparison.Ordinal)
+                   && (matching |> Option.forall (fun previous -> String.CompareOrdinal(candidate, previous) > 0)) then
+                    Some candidate
+                else matching) None
+            |> Option.defaultValue gram
+            |> fun prefix -> String.CompareOrdinal(key, prefix)
+
+    let mutable rows = Map.empty
+    let mutable total = 0L
+    let mutable deleted = Map.empty
+    for gram in FullTextCache.contiguousPrefixOrder comparePrefix view.CachedTerms do
+        match Map.tryFind gram view.Postings with
+        | Some postings ->
+            total <- total + int64 postings.Count
+            rows <- postings |> Map.fold (fun found id frequency ->
+                if Map.containsKey id found then found else Map.add id frequency found) rows
+        | None -> ()
+        match Map.tryFind gram view.Deleted.Words with
+        | Some postings ->
+            deleted <- postings |> Map.fold (fun found order grams ->
+                found |> Map.change order (fun count -> Some(grams + Option.defaultValue 0L count))) deleted
+        | None -> ()
+    { Rows = rows; GramDocumentCount = total }, (deleted |> Map.values |> Seq.sum), int64 deleted.Count
+
 let private prefixRowsWithCacheOrder candidateIds key (view: ReadView<'id>) (rows: Map<'id, int>) =
     match view.FlushedThrough with
     | Some through when not rows.IsEmpty ->
@@ -1571,6 +1619,15 @@ let private prefixRowsWithCacheOrder candidateIds key (view: ReadView<'id>) (row
                 | _ -> frequency)
         | _ -> rows
     | _ -> rows
+
+let private weightedPrefixRows candidateIds key (view: ReadView<'id>) =
+    if usesAccentSensitiveCachePrefixes view then
+        let posting, retained, deleted = cachePrefixPosting key view
+        let frequency = float (posting.GramDocumentCount + retained - deleted)
+        Some(posting.Rows, ngramPrefixWeight view.DocumentCount frequency)
+    else
+        Map.tryFind key view.PrefixPostings
+        |> Option.map (fun posting -> prefixRowsWithCacheOrder candidateIds key view posting.Rows, prefixWeight view key posting)
 
 let private booleanCandidates (results: (BoolOp * Map<'id, float>) list) : seq<'id> =
     let required =
@@ -1617,13 +1674,11 @@ let rec private evalTerm
             |> Map.map (fun _ frequency -> float frequency * weight * weight)
     | BWord(term, true) ->
         // Prefix wildcards bypass stopword and minimum-length rules.
-        match Map.tryFind term.Key view.PrefixPostings with
+        match weightedPrefixRows candidateIds term.Key view with
         | None -> Map.empty
-        | Some posting ->
-            let weight = prefixWeight view term.Key posting
-            posting.Rows
+        | Some(rows, weight) ->
+            rows
             |> restrictScores candidateIds
-            |> prefixRowsWithCacheOrder None term.Key view
             |> Map.map (fun _ frequency -> float frequency * weight * weight)
     | BPhrase(words, proximity) ->
         let candidates =
@@ -1808,6 +1863,7 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
             let sharedRowFrequencies = Collections.Generic.Dictionary<string, Collections.Generic.Dictionary<'id, int>>()
             let exactSegments = Collections.Generic.Dictionary<string, Map<'id, int> * Map<'id, int>>()
             let diskPrefixes = Collections.Generic.Dictionary<string, PrefixPosting<'id> option>()
+            let cachePrefixes = Collections.Generic.Dictionary<string, PrefixPosting<'id> * int64>()
             let scoringPrefixes = Collections.Generic.Dictionary<string, Map<'id, int>>()
             let contributionOrder = Collections.Generic.Dictionary<string, int>()
             let mutable postingBounds = None
@@ -1828,6 +1884,15 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                         sharedRowFrequencies.Add(key, first)
                         first
                 rows |> Map.iter (fun id frequency -> first.TryAdd(id, frequency) |> ignore)
+
+            let cachePrefix key =
+                match cachePrefixes.TryGetValue key with
+                | true, value -> value
+                | _ ->
+                    let posting, retained, _ = cachePrefixPosting key view
+                    let value = posting, retained
+                    cachePrefixes.Add(key, value)
+                    value
 
             let retainedPrefixFrequency diskOnly key =
                 match Map.tryFind key view.Deleted.Prefixes with
@@ -1861,6 +1926,7 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                                 { Rows = rows; GramDocumentCount = frequency })
                         diskPrefixes.Add(key, posting)
                         posting
+                | _ when usesAccentSensitiveCachePrefixes view -> Some(fst (cachePrefix key))
                 | _ -> all
 
             let documentBounds rows =
@@ -1955,7 +2021,7 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                 match term with
                 | BWord(word, true) ->
                     indexedTokens view.Documents.[id].Content
-                    |> Seq.filter (prefixKeys view.Collation >> Array.contains word.Key)
+                    |> Seq.filter (prefixKeysFor (usesAccentSensitiveCachePrefixes view) view.Collation >> Array.contains word.Key)
                     |> Seq.distinctBy _.Key
                     |> Seq.truncate 2
                     |> Seq.length
@@ -1978,12 +2044,20 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                             let diskOnly = inPhraseMode && not isRequired
                             let posting = prefixPosting diskOnly word.Key
                             let frequency = posting |> Option.map _.GramDocumentCount |> Option.defaultValue 0L
-                            countDocuments word.Key (frequency + retainedPrefixFrequency diskOnly word.Key)
+                            let cacheOnly = usesAccentSensitiveCachePrefixes view
+                            let retained =
+                                if cacheOnly then
+                                    if diskOnly then 0L else snd (cachePrefix word.Key)
+                                else retainedPrefixFrequency diskOnly word.Key
+                            countDocuments word.Key (frequency + retained)
                             match posting with
                             | None -> Map.empty
                             | Some posting ->
                                 if sharedKeys.Contains word.Key then
-                                    rememberRowFrequencies word.Key (prefixRowsWithCacheOrder scope word.Key view posting.Rows)
+                                    let rows =
+                                        if cacheOnly then restrictScores scope posting.Rows
+                                        else prefixRowsWithCacheOrder scope word.Key view posting.Rows
+                                    rememberRowFrequencies word.Key rows
                                 posting.Rows |> restrictScores scope |> Map.map (fun _ _ -> 0.0)
                         | _ ->
                             let bounds = if isRequired then postingBounds else None
@@ -2072,7 +2146,9 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
                             match scoringPrefixes.TryGetValue key with
                             | true, rows -> rows
                             | _ ->
-                                let rows = prefixRowsWithCacheOrder candidateIds key view view.PrefixPostings.[key].Rows
+                                let rows =
+                                    if usesAccentSensitiveCachePrefixes view then (fst (cachePrefix key)).Rows
+                                    else prefixRowsWithCacheOrder candidateIds key view view.PrefixPostings.[key].Rows
                                 scoringPrefixes.Add(key, rows)
                                 rows
                         rows.[id], ngramPrefixWeight view.DocumentCount frequency
@@ -2125,10 +2201,7 @@ let internal tryFlatBooleanScoresDictionaryInView
     let scoreTerms terms =
         let postingFor (term: Token, prefix) =
             if prefix then
-                Map.tryFind term.Key view.PrefixPostings
-                |> Option.map (fun posting ->
-                    let rows = prefixRowsWithCacheOrder candidateIds term.Key view posting.Rows
-                    rows, prefixWeight view term.Key posting)
+                weightedPrefixRows candidateIds term.Key view
             elif isExactLookup view.Rules term then
                 booleanPostingRows view term |> Option.map (fun rows -> rows, idf view rows.Count)
             else None

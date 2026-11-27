@@ -114,7 +114,7 @@ let boundedSegments lower upper earlierEnds (orders: int64 seq) =
             struct (min first start, max last finish, total + count)
         else struct (first, last, total))
 
-let prefixOrder comparePrefix terms =
+let private prefixPivot comparePrefix terms =
     let rec pivot = function
         | Empty -> None
         | Node(_, left, key, text, right) ->
@@ -123,6 +123,9 @@ let prefixOrder comparePrefix terms =
             elif comparison > 0 then pivot right
             else Some key
 
+    pivot terms.Tree
+
+let prefixOrder comparePrefix terms =
     let rec matching = function
         | Empty -> Seq.empty
         | Node(_, left, key, text, right) ->
@@ -131,10 +134,35 @@ let prefixOrder comparePrefix terms =
             elif comparison > 0 then matching right
             else seq { yield! matching left; yield key; yield! matching right }
 
-    match pivot terms.Tree with
+    match prefixPivot comparePrefix terms with
     | None -> []
     | Some first ->
         let before, after =
             matching terms.Tree |> Seq.filter ((<>) first) |> Seq.toList
             |> List.partition (fun key -> String.CompareOrdinal(key, first) < 0)
         first :: (List.rev before @ after)
+
+/// The cache cursor walks from its first hit in both directions and stops
+/// at the first nonmatching neighbor on each side.
+let contiguousPrefixOrder comparePrefix terms =
+    let rec neighbors direction first = function
+        | Empty -> Seq.empty
+        | Node(_, left, key, text, right) ->
+            let near, far = if direction < 0 then right, left else left, right
+            if direction * String.CompareOrdinal(key, first) <= 0 then
+                neighbors direction first far
+            else
+                seq {
+                    yield! neighbors direction first near
+                    yield key, text
+                    yield! neighbors direction first far
+                }
+    match prefixPivot comparePrefix terms with
+    | None -> []
+    | Some first ->
+        let side direction =
+            neighbors direction first terms.Tree
+            |> Seq.takeWhile (fun (key, text) -> comparePrefix key text = 0)
+            |> Seq.map fst
+            |> Seq.toList
+        first :: (side -1 @ side 1)
