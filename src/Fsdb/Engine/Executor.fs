@@ -1111,6 +1111,7 @@ let private emptyPhysicalPlanningProbe = System.Threading.AsyncLocal<bool>()
 let private accessPlanningMemo = System.Threading.AsyncLocal<AccessPlanningMemo option>()
 let private directOnlyRestriction = System.Threading.AsyncLocal<string option>()
 let private triggerRowScope = System.Threading.AsyncLocal<TriggerRowScope option>()
+let private observedTriggerWrites = System.Threading.AsyncLocal<(Value[] * HashSet<int>) option>()
 let private viewCheckScope = System.Threading.AsyncLocal<ViewCheckScope option>()
 let private lockingReadRows = System.Threading.AsyncLocal<Map<string, Set<RowId>>>()
 let private committedFullTextStore = System.Threading.AsyncLocal<Store option>()
@@ -26484,6 +26485,7 @@ let private withCallerViewScope callerSubqueries projectionStore : EvalContext -
 /// corruption once a SET expression can fail per row.
 let private applyAssignments
     (contextFor: Value[] -> EvalContext)
+    (prepareValue: ColumnDef -> Value -> Result<Value, StorageError>)
     (qualifier: string)
     (columns: ColumnDef list)
     (assignments: (int * Expr) list)
@@ -26498,6 +26500,7 @@ let private applyAssignments
                 else
                     evalExpr (contextFor current) expr
                     |> Result.mapError ExpressionError
+                    |> Result.bind (prepareValue columns.[idx])
                     |> Result.map (fun v ->
                         let newRow = Array.copy current
                         newRow.[idx] <- v
@@ -26566,7 +26569,8 @@ let private validateCheckRow
                         Ok()))
         |> Result.map (fun _ -> row)
 
-let private computeGeneratedRow
+let private computeGeneratedWithValidation
+    validate
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -26575,9 +26579,10 @@ let private computeGeneratedRow
     (row: Value[])
     : Result<Value[], StorageError> =
     let generated = columns |> List.choose (fun c -> c.Generated |> Option.map (fun (e, _) -> c, e))
+    let finish = if validate then validateCheckRow store registry dbName table columns else Ok
 
     if generated.IsEmpty then
-        validateCheckRow store registry dbName table columns row
+        finish row
     else
         // Eval-time DIRECTONLY backstop — see `shadowDirectOnly`'s doc.
         let registry = shadowDirectOnly "generated column" registry
@@ -26600,7 +26605,9 @@ let private computeGeneratedRow
                     match resolveColumn columns col.Name with
                     | Ok idx -> row'.[idx] <- v'
                     | Error _ -> ()))
-        |> Result.bind (fun _ -> validateCheckRow store registry dbName table columns row')
+        |> Result.bind (fun _ -> finish row')
+
+let private computeGeneratedRow = computeGeneratedWithValidation true
 
 /// Backfills generated columns after ALTER adds or changes one. Ordinary
 /// writes prepare only their candidate rows through `computeGeneratedRow`;
@@ -31336,6 +31343,9 @@ let rec private executeAsWithViewSources
                                                 | Error error -> storageErr error
                                                 | Ok value ->
                                                     row.[index] <- value
+                                                    match observedTriggerWrites.Value with
+                                                    | Some(observed, writes) when obj.ReferenceEquals(row, observed) -> writes.Add index |> ignore
+                                                    | _ -> ()
                                                     Affected 0UL
                                         | _ -> Err(1362, "Updating of NEW row is not allowed in after trigger")
                                     | _ ->
@@ -31736,13 +31746,52 @@ let rec private executeAsWithViewSources
         not callsCustomFunction && List.isEmpty beforeTriggers && List.isEmpty afterTriggers
         && Storage.canBatchIgnoredUpdates runStore db table
 
+    let prepareUpdateAssignment ignoreErrors store beforeTriggers =
+        if ignoreErrors then Storage.coerceIgnoredUpdateAssignment (temporalCoercionMode store) (not (List.isEmpty beforeTriggers))
+        else fun _ value -> Ok value
+
+    let prepareUpdateAfterTriggers ignoreErrors store db table columns assignedColumns beforeTriggers original candidate =
+        let fire () =
+            fireTriggers store db table Before TriggerUpdate beforeTriggers [ Some original, Some candidate ]
+            |> triggerStorageResult
+
+        if not ignoreErrors then fire () |> Result.map (fun () -> Some candidate)
+        else
+            let normalize () =
+                Storage.finalizeIgnoredUpdateRow (temporalCoercionMode store) columns (Some assignedColumns) original candidate
+                |> Result.map Some
+
+            if beforeTriggers.IsEmpty then normalize ()
+            else
+                let writes = HashSet<int>()
+                DynamicScope.withValue observedTriggerWrites (Some(candidate, writes)) fire
+                |> Result.bind (fun () ->
+                    // A NULL left by SET NEW rejects the row. A deferred NULL
+                    // from the UPDATE's own SET list takes the implicit value.
+                    let rejected =
+                        columns
+                        |> List.indexed
+                        |> List.tryPick (fun (index, column) ->
+                            if writes.Contains index && candidate.[index] = VNull && (not column.Nullable || column.PrimaryKey) then
+                                Some column
+                            else None)
+                    match rejected with
+                    | Some column ->
+                        let message = sprintf "Column '%s' cannot be null" column.Name
+                        match column.Type with
+                        | TGeometry _ -> Error(ExpressionError(3673, message))
+                        | _ ->
+                            Diagnostics.warning 1048 message
+                            Ok None
+                    | None -> normalize ())
+
     let applyUpdateRows (statement: UpdateStmt) (runStore: Store) db table candidates predicate assignedColumns updater
         (triggerRows: ResizeArray<Value[] option * Value[] option>) beforeTriggers afterTriggers =
         let ignoreErrors = statement.Ignore
         let callsCustomFunction = updateCallsCustomFunction registry statement
         let write candidates predicate updater =
             Storage.withPermissiveIndexExpressions ignoreErrors (fun () ->
-                updateRowsWithAssignmentsById runStore db table candidates predicate assignedColumns updater)
+                updateRowsWithAssignmentsById runStore db table candidates predicate assignedColumns ignoreErrors updater)
         let fireAfter changed =
             triggerStorageResult (fireTriggers runStore db table After TriggerUpdate afterTriggers (List.ofSeq triggerRows))
             |> Result.map (fun () -> changed)
@@ -31765,6 +31814,7 @@ let rec private executeAsWithViewSources
                 match candidates with
                 | Some rows -> Ok rows
                 | None -> tableSnapshot runStore db table |> Result.map (fun current -> List.ofSeq current.RowsArray.Indexed)
+            let mutable nextRowNumber = Diagnostics.currentRowNumber ()
             selected
             |> Result.bind (traverse (fun (rowId, _) ->
                 tableSnapshot runStore db table
@@ -31774,7 +31824,12 @@ let rec private executeAsWithViewSources
                     | Some row ->
                         predicate rowId row
                         |> Result.bind (fun selected ->
-                            if selected then updateOneRow rowId row else Ok 0))))
+                            if not selected then Ok 0
+                            elif ignoreErrors then
+                                let rowNumber = nextRowNumber
+                                nextRowNumber <- nextRowNumber + 1
+                                Diagnostics.withRowNumber rowNumber (fun () -> updateOneRow rowId row)
+                            else updateOneRow rowId row))))
             |> Result.map List.sum
 
     let deleteIgnoredRows (runStore: Store) db table candidates predicate initialRestriction selectedImages =
@@ -35022,20 +35077,22 @@ let rec private executeAsWithViewSources
                                 else Some index)
                             |> Set.ofList
 
+                        let prepareValue = prepareUpdateAssignment updateStmt.Ignore targetStore beforeTriggers
                         let updater row =
                             let updated =
-                                applyAssignments ctxFor tableAlias columns indexedAssignments row
+                                applyAssignments ctxFor prepareValue tableAlias columns indexedAssignments row
                                 |> Result.map (applyOnUpdateTimestamps (temporalCoercionMode targetStore) columns assignedIdxs row)
-                                |> Result.bind (computeGeneratedRow targetStore registry db table columns)
+                                |> Result.bind (computeGeneratedWithValidation (not updateStmt.Ignore) targetStore registry db table columns)
 
                             match updated with
                             | Error(ExpressionError(3819, message)) when updateStmt.Ignore ->
                                 Diagnostics.warning 3819 message
                                 Ok row
                             | Ok candidate ->
-                                match triggerStorageResult (fireTriggers targetStore db table Before TriggerUpdate beforeTriggers [ Some row, Some candidate ]) with
+                                match prepareUpdateAfterTriggers updateStmt.Ignore targetStore db table columns coercedAssignments beforeTriggers row candidate with
                                 | Error error -> Error error
-                                | Ok () ->
+                                | Ok None -> Ok row
+                                | Ok(Some candidate) ->
                                     let validated =
                                         computeGeneratedRow targetStore registry db table columns candidate
                                         |> Result.bind (validateViewCandidate targetStore db table columns (Some row))
@@ -35285,24 +35342,28 @@ let rec private executeAsWithViewSources
 
                                                 if rows.Length = pending.[i].Count then Some rows else None)
 
+                                        let columns = physicalColumns.[i]
+                                        let prepareValue = prepareUpdateAssignment updateStmt.Ignore snapshot beforeTriggers
                                         let updater row =
                                             let updated =
                                                 match pending.[i].TryGetValue row with
                                                 | true, vals ->
                                                     let newRow = Array.copy row
 
-                                                    for colIdx, v in vals do
-                                                        newRow.[colIdx] <- v
-
-                                                    Ok(
+                                                    vals
+                                                    |> Seq.fold (fun state (colIdx, value) ->
+                                                        state |> Result.bind (fun () ->
+                                                            prepareValue columns.[colIdx] value
+                                                            |> Result.map (fun value -> newRow.[colIdx] <- value))) (Ok())
+                                                    |> Result.map (fun () ->
                                                         applyOnUpdateTimestamps
                                                             (temporalCoercionMode snapshot)
-                                                            physicalColumns.[i]
+                                                            columns
                                                             assignedIndicesByGroup.[i]
                                                             row
                                                             newRow
                                                     )
-                                                    |> Result.bind (computeGeneratedRow snapshot registry tdb tname physicalColumns.[i])
+                                                    |> Result.bind (computeGeneratedWithValidation (not updateStmt.Ignore) snapshot registry tdb tname columns)
                                                 | false, _ -> Ok row
 
                                             match updated with
@@ -35314,19 +35375,12 @@ let rec private executeAsWithViewSources
                                                 Ok row
                                             | Error error -> Error error
                                             | Ok candidate ->
-                                                triggerStorageResult (
-                                                    fireTriggers
-                                                        snapshot
-                                                        tdb
-                                                        tname
-                                                        Before
-                                                        TriggerUpdate
-                                                        beforeTriggers
-                                                        [ Some row, Some candidate ]
-                                                )
-                                                |> Result.bind (fun () ->
+                                                match prepareUpdateAfterTriggers updateStmt.Ignore snapshot tdb tname columns coercedAssignmentsByGroup.[i] beforeTriggers row candidate with
+                                                | Error error -> Error error
+                                                | Ok None -> Ok row
+                                                | Ok(Some candidate) ->
                                                     let validated =
-                                                        computeGeneratedRow snapshot registry tdb tname physicalColumns.[i] candidate
+                                                        computeGeneratedRow snapshot registry tdb tname columns candidate
                                                         |> Result.bind (validateViewCandidate snapshot tdb tname physicalColumns.[i] (Some row))
 
                                                     match validated with
@@ -35339,7 +35393,7 @@ let rec private executeAsWithViewSources
                                                     | Error error -> Error error
                                                     | Ok candidate ->
                                                         changedRows.Add(Some(Array.copy row), Some candidate)
-                                                        Ok candidate)
+                                                        Ok candidate
 
                                         applyUpdateRows updateStmt snapshot tdb tname candidates predicate coercedAssignmentsByGroup.[i] updater changedRows beforeTriggers afterTriggers)
                                 |> Array.toList

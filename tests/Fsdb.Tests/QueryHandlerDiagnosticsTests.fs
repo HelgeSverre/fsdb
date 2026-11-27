@@ -2165,6 +2165,52 @@ let tests =
                   Expect.equal message "Row 2 was cut by GROUP_CONCAT()" "MySQL warning text"
               | other -> failtestf "expected one GROUP_CONCAT warning, got %A" other
 
+          testCase "UPDATE IGNORE coerces assignments and reports warnings in row order"
+          <| fun _ ->
+              let mutable session = create 1 (Fsdb.Storage.create ())
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+
+              Expect.equal
+                  (run "CREATE TABLE converted(id INT PRIMARY KEY,n TINYINT NOT NULL DEFAULT 12,seen VARCHAR(3) NOT NULL DEFAULT 'old')")
+                  (Affected 0UL) "create table"
+              Expect.equal (run "INSERT INTO converted VALUES(1,5,'old'),(2,6,'old'),(3,7,'old')") (Affected 3UL) "seed rows"
+              Expect.equal
+                  (run "UPDATE IGNORE converted SET n=CASE id WHEN 3 THEN 'bad' ELSE '999' END,seen=n WHERE id>=2 ORDER BY id DESC")
+                  (Affected 2UL) "the next assignment observes the stored value"
+              let warning code message = [ Some "Warning"; Some code; Some message ]
+              match run "SHOW WARNINGS" with
+              | ResultSet(_, warnings) ->
+                  Expect.equal warnings
+                      [ warning "1366" "Incorrect integer value: 'bad' for column 'n' at row 1"
+                        warning "1264" "Out of range value for column 'n' at row 2" ]
+                      "warnings identify the attempted rows"
+              | other -> failtestf "expected warnings, got %A" other
+              match run "SELECT id,n,seen FROM converted ORDER BY id" with
+              | ResultSet(_, actual) ->
+                  Expect.equal actual
+                      [ [ Some "1"; Some "5"; Some "old" ]; [ Some "2"; Some "127"; Some "127" ]; [ Some "3"; Some "0"; Some "0" ] ]
+                      "integer coercion happens before the next assignment"
+              | other -> failtestf "expected rows, got %A" other
+              Expect.equal
+                  (run "UPDATE IGNORE converted SET n=NULL,seen=CONCAT(n,'long') WHERE id=1")
+                  (Affected 1UL) "an assignment after NULL observes the implicit integer value"
+              match run "SHOW WARNINGS" with
+              | ResultSet(_, warnings) ->
+                  Expect.equal warnings
+                      [ warning "1048" "Column 'n' cannot be null"
+                        warning "1265" "Data truncated for column 'seen' at row 1" ]
+                      "the NULL warning precedes the later assignment warning"
+              | other -> failtestf "expected warnings, got %A" other
+              match run "SELECT n,seen FROM converted WHERE id=1" with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "0"; Some "0lo" ] ] "substitute zero before evaluating CONCAT"
+              | other -> failtestf "expected updated row, got %A" other
+              match run "UPDATE converted SET n='bad' WHERE id=1" with
+              | Err(1366, _) -> ()
+              | other -> failtestf "expected strict coercion failure, got %A" other
+
           testCase "UPDATE IGNORE records a skipped CHECK violation"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

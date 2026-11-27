@@ -2005,10 +2005,10 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
         if strict then
             fail ()
         else
-            kind
-            |> Option.iter (fun kind ->
-                warning 1366 (sprintf "Incorrect %s value: '%s' for column '%s'" kind (v |> toText |> Option.defaultValue "NULL") col.Name))
-
+            match kind with
+            | Some kind ->
+                warning 1366 (sprintf "Incorrect %s value: '%s' for column '%s'" kind (v |> toText |> Option.defaultValue "NULL") col.Name)
+            | None -> truncationWarning ()
             Ok(zero ())
 
     let temporalFallback () =
@@ -2880,7 +2880,7 @@ let private coerceRow (mode: TemporalCoercionMode) (columns: ColumnDef list) (ro
     |> Result.map Array.ofList
 
 let private coerceUpdatedRow
-    (mode: TemporalCoercionMode)
+    coerce
     (columns: ColumnDef list)
     (assignedColumns: Set<int>)
     (before: Value[])
@@ -2890,13 +2890,13 @@ let private coerceUpdatedRow
     |> List.mapi (fun index column ->
         let value = candidate.[index]
         if not (Set.contains index assignedColumns) && value = before.[index] then Ok value
-        else coerceAndCheck mode column value)
+        else coerce column value)
     |> traverse id
     |> Result.map List.toArray
 
 let private coerceMutationRow mode columns assignedColumns before candidate =
     match assignedColumns with
-    | Some assigned -> coerceUpdatedRow mode columns assigned before candidate
+    | Some assigned -> coerceUpdatedRow (coerceAndCheck mode) columns assigned before candidate
     | None -> coerceRow mode columns candidate
 
 /// The key projection shared by unique checks and equality buckets.
@@ -9225,6 +9225,43 @@ let private implicitZeroSeed (col: ColumnDef) : Result<Value, StorageError> =
         |> Option.defaultWith (fun () -> Error(ZeroTemporalForColumn("datetime", "0000-00-00 00:00:00", col.Name)))
     | _ -> Ok(VInt 0L)
 
+let private substituteIgnoredUpdateNull mode (column: ColumnDef) =
+    let message = sprintf "Column '%s' cannot be null" column.Name
+    match column.Type with
+    | TGeometry _ -> Error(ExpressionError(3673, message))
+    | TJson ->
+        Diagnostics.warning 1048 message
+        Ok(VJson "null")
+    | _ ->
+        Diagnostics.warning 1048 message
+        implicitZeroSeed column
+        |> Result.bind (fun seed -> Diagnostics.suppress (fun () -> coerceStoredValueWithMode mode column seed))
+
+let internal coerceIgnoredUpdateAssignment mode deferNull (column: ColumnDef) value =
+    let mode = { mode with Strict = false }
+    if value <> VNull then coerceStoredValueWithMode mode column value
+    elif not deferNull && (not column.Nullable || column.PrimaryKey) then substituteIgnoredUpdateNull mode column
+    else Ok value
+
+let internal finalizeIgnoredUpdateRow mode columns assignedColumns before candidate =
+    let mode = { mode with Strict = false }
+    let coerce (column: ColumnDef) value =
+        match value, column.Type with
+        | VNull, _ when not column.Nullable || column.PrimaryKey ->
+            substituteIgnoredUpdateNull mode column
+        // These values already went through assignment coercion.
+        | VString "", TEnum _
+        | VZeroDate _, TDate
+        | VZeroDateTime _, (TDateTime _ | TTimestamp _) -> Ok value
+        | _ -> coerceAndCheck mode column value
+
+    match assignedColumns with
+    | Some assigned -> coerceUpdatedRow coerce columns assigned before candidate
+    | None ->
+        List.zip columns (Array.toList candidate)
+        |> traverse (fun (column, value) -> coerce column value)
+        |> Result.map Array.ofList
+
 /// The value an added column gets filled in with for every row that already
 /// exists — its `DEFAULT` if it has one, `NULL` for a nullable column with
 /// none, and otherwise (`NOT NULL`, no `DEFAULT`) the type's own implicit
@@ -13463,6 +13500,7 @@ let internal canBatchIgnoredUpdates (store: Store) database table =
 // Candidate IDs are refreshed under publication locks; fatal failures discard the builder.
 let private updateRowsCore
     (constraintPolicy: UpdateConstraintPolicy)
+    (ignoreCoercion: bool)
     (assignedColumns: Set<int> option)
     (store: Store)
     (dbName: string)
@@ -13490,6 +13528,17 @@ let private updateRowsCore
             let uniqueGroups = uniqueKeyGroups table
             let secondaryGroups = secondaryKeyGroups table
             let checkFks = store.ForeignKeyChecks
+            let mode = temporalCoercionMode store
+            let coerceRow =
+                if ignoreCoercion then finalizeIgnoredUpdateRow mode table.Columns assignedColumns
+                else coerceMutationRow mode table.Columns assignedColumns
+            let mutable nextRowNumber = Diagnostics.currentRowNumber ()
+            let withUpdateRow action =
+                if ignoreCoercion then
+                    let rowNumber = nextRowNumber
+                    nextRowNumber <- nextRowNumber + 1
+                    Diagnostics.withRowNumber rowNumber action
+                else action ()
             let warningPositions =
                 if constraintPolicy = SkipConstraintViolation && not uniqueGroups.IsEmpty then
                     Some(Dictionary<RowId, int>())
@@ -13525,8 +13574,7 @@ let private updateRowsCore
                                     if not keep then
                                         Ok(changesRev, index, secondaryIndex, secondaryOrder, cascadeCatalog, visited, cascaded)
                                     else
-                                        updater row
-                                        |> Result.bind (coerceMutationRow (temporalCoercionMode store) table.Columns assignedColumns row)
+                                        withUpdateRow (fun () -> updater row |> Result.bind (coerceRow row))
                                         |> Result.bind (fun newRow ->
                                             validateUpdatedUniqueKeys table uniqueGroups index rowId newRow
                                             |> Result.bind (fun newRow ->
@@ -13629,23 +13677,23 @@ let private updateRowsCore
 
 /// Updates matching rows atomically, failing the statement on a constraint violation.
 let updateRows store database table candidates predicate updater =
-    updateRowsCore RejectConstraintViolation None store database table candidates (fun _ row -> predicate row) updater
+    updateRowsCore RejectConstraintViolation false None store database table candidates (fun _ row -> predicate row) updater
 
 let internal updateRowsWithAssignments store database table candidates predicate assignedColumns updater =
-    updateRowsCore RejectConstraintViolation (Some assignedColumns) store database table candidates (fun _ row -> predicate row) updater
+    updateRowsCore RejectConstraintViolation false (Some assignedColumns) store database table candidates (fun _ row -> predicate row) updater
 
-let internal updateRowsWithAssignmentsById store database table candidates predicate assignedColumns updater =
-    updateRowsCore RejectConstraintViolation (Some assignedColumns) store database table candidates predicate updater
+let internal updateRowsWithAssignmentsById store database table candidates predicate assignedColumns ignoreCoercion updater =
+    updateRowsCore RejectConstraintViolation ignoreCoercion (Some assignedColumns) store database table candidates predicate updater
 
 /// Skips ignorable constraint failures while retaining accepted rows in one publication.
 let internal updateRowsIgnoringConstraints store database table candidates predicate updater =
-    updateRowsCore SkipConstraintViolation None store database table candidates (fun _ row -> predicate row) updater
+    updateRowsCore SkipConstraintViolation true None store database table candidates (fun _ row -> predicate row) updater
 
 let internal updateRowsIgnoringConstraintsWithAssignments store database table candidates predicate assignedColumns updater =
-    updateRowsCore SkipConstraintViolation (Some assignedColumns) store database table candidates (fun _ row -> predicate row) updater
+    updateRowsCore SkipConstraintViolation true (Some assignedColumns) store database table candidates (fun _ row -> predicate row) updater
 
 let internal updateRowsIgnoringConstraintsWithAssignmentsById store database table candidates predicate assignedColumns updater =
-    updateRowsCore SkipConstraintViolation (Some assignedColumns) store database table candidates predicate updater
+    updateRowsCore SkipConstraintViolation true (Some assignedColumns) store database table candidates predicate updater
 
 /// Per-snapshot memo of `RowsArray` as a `Value[] list`, keyed by the
 /// `Table` instance itself: `Executor`'s row pipeline is list-based and

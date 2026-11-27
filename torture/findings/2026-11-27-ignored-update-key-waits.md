@@ -71,6 +71,5 @@ The variant with `qty=CASE id WHEN 1 THEN 1/0 ELSE qty+1 END`
 also verified that the division warning stays ahead of the first
 late duplicate.
 
-A separate coercion gap remains even without contention. Assigning
-`'bad'` to an INT column under UPDATE IGNORE stores zero with warning
-1366 in MySQL. Fsdb returns error 1366 and leaves the old value.
+The [assignment coercion follow-up](2026-11-27-ignored-update-coercions.md)
+covers invalid SET values and warning order without contention.

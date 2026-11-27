@@ -938,6 +938,9 @@ now do the same for audited joins, CTEs and correlated filters.
 also refresh permanent keys after a wait, including when a temporary
 table shadows a permanent source. [Batched warning retention](torture/findings/2026-11-27-ignored-update-key-waits.md#warning-order-and-retention)
 now combines duplicates from before and after a wait in row order.
+[`UPDATE IGNORE` assignment coercion](torture/findings/2026-11-27-ignored-update-coercions.md)
+now matches MySQL for the audited invalid values, warning order, and
+NULL handling before and after BEFORE triggers.
 
 A [current write-path control](benchmarks/results/2026-10-14-write-path-control.md)
 measures keyless inserts at one, four, and eight writers with WAL-backed and
