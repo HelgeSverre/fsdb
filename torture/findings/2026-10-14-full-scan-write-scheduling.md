@@ -28,3 +28,43 @@ Expecto coverage is in `TransactionTests.fs`: the explicit and autocommit
 full-scan UPDATE waits, the two DELETE outcomes, and the current-read
 transaction UPDATE. This does not prove next-key/gap locking or scheduling
 for CTE and multi-table writes.
+
+## Insertion gaps and pending inserts
+
+MySQL 8.4.11 protected the insertion gaps for unindexed single-table
+`UPDATE` and `DELETE` under REPEATABLE READ and SERIALIZABLE, even if
+the filter matched no rows. An empty table retained its final gap. A
+constant false filter and an unknown target or predicate column left the
+gaps open. The audited write retained its gaps after rollback to a
+savepoint. [InnoDB statement locks](https://dev.mysql.com/doc/refman/8.4/en/innodb-locks-set.html) [MySQL savepoints](https://dev.mysql.com/doc/refman/8.4/en/savepoint.html)
+
+With a pending insert, the higher-isolation writer waited and rechecked
+the row after the insert committed or rolled back. At READ COMMITTED,
+the audited `UPDATE` skipped the pending insert and the `DELETE` waited
+and rechecked it. The same lower-isolation distinction held in the
+audited keyless READ UNCOMMITTED cases.
+
+Fsdb uses its primary-index locking cursor for the audited integer-key
+tables. Tables without an explicit primary key coordinate inserts
+with full write scans. Independent inserts can still proceed together.
+The audited `INSERT`, `INSERT IGNORE`, `INSERT SELECT`, duplicate-key
+insert, and `REPLACE` forms respect the scan gaps.
+
+The 112 wire scenarios matched the digest-pinned MySQL 8.4.11 image
+in both in-memory and WAL-backed Fsdb. The controls include temporary
+tables that shadow permanent tables and commits to an independent table
+during an autocommit SERIALIZABLE scan. Keyless cursor lock order,
+additional primary-key types, and limited and joined scan shapes remain
+open.
+
+The insert-throughput control alternated native in-memory Debug builds
+of `1be869e4` and the updated engine on the same host after the test
+suite completed. Each worker sent 1,200 individual autocommit inserts
+over loopback, with one warm-up and five measured runs per build.
+
+| Table | Workers | Before rows/s | After rows/s |
+| --- | ---: | ---: | ---: |
+| Keyless | 1 | 6,535 | 6,403 |
+| Keyless | 4 | 14,788 | 14,447 |
+| Integer primary key | 1 | 5,845 | 5,824 |
+| Integer primary key | 4 | 12,562 | 12,662 |

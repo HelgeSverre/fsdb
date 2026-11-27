@@ -2466,6 +2466,161 @@ let tests =
               | ResultSet(_, [ [ Some "2" ] ]) -> ()
               | result -> failtestf "expected the two increments to serialize, got %A" result
 
+          testCase "unindexed writes protect scanned primary gaps at repeatable read and serializable"
+          <| fun _ ->
+              let run session statement expected =
+                  let session, result = handle session statement
+                  Expect.equal result (Affected expected) statement
+                  session
+
+              for isolation, sql, id, changed, shouldWait in
+                  [ "REPEATABLE READ", "UPDATE gap_scan SET n=n+1 WHERE selector=1", 5, 1UL, true
+                    "REPEATABLE READ", "UPDATE gap_scan SET n=n+1 WHERE selector=99", 15, 0UL, true
+                    "SERIALIZABLE", "DELETE FROM gap_scan WHERE selector=1", 25, 1UL, true
+                    "SERIALIZABLE", "DELETE FROM gap_scan WHERE selector=99", 35, 0UL, true
+                    "READ COMMITTED", "UPDATE gap_scan SET n=n+1 WHERE selector=1", 15, 1UL, false
+                    "READ COMMITTED", "DELETE FROM gap_scan WHERE selector=99", 35, 0UL, false ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = run (create 1 store) "CREATE TABLE gap_scan(id INT PRIMARY KEY,selector INT,n INT)" 0UL
+                  run setup "INSERT INTO gap_scan VALUES (10,0,0),(20,1,0),(30,0,0)" 3UL |> ignore
+                  let writer = run (create 2 store) ("SET SESSION TRANSACTION ISOLATION LEVEL " + isolation) 0UL
+                  let writer = run writer "BEGIN" 0UL
+                  let writer = run writer sql changed
+                  let peer = run (create 3 store) "SET SESSION innodb_lock_wait_timeout=3" 0UL
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let insert =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle peer (sprintf "INSERT INTO gap_scan VALUES (%d,2,0)" id) |> snd)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "the competing insert starts"
+                  let completed = insert.Wait(TimeSpan.FromMilliseconds 150.0)
+                  run writer "ROLLBACK" 0UL |> ignore
+                  Expect.isTrue (insert.Wait(TimeSpan.FromSeconds 3.0)) "the insert completes after the writer releases its locks"
+                  Expect.equal completed (not shouldWait) (isolation + " insert beside " + sql)
+                  Expect.equal insert.Result (Affected 1UL) "the insert succeeds"
+
+          testCase "unindexed writes protect the empty index scan but skip an impossible predicate"
+          <| fun _ ->
+              for key in [ ""; " PRIMARY KEY" ] do
+                  for condition, shouldWait in [ "selector=17", true; "1=0", false ] do
+                      let store = Fsdb.Storage.create ()
+                      let setup = create 1 store
+                      let createSql = sprintf "CREATE TABLE empty_scan(id INT%s,selector INT,n INT)" key
+                      Expect.equal (handle setup createSql |> snd) (Affected 0UL) createSql
+                      let writer, _ = handle (create 2 store) "BEGIN"
+                      let sql = "UPDATE empty_scan SET n=1 WHERE " + condition
+                      let writer, updated = handle writer sql
+                      Expect.equal updated (Affected 0UL) sql
+                      let peer, _ = handle (create 3 store) "SET SESSION innodb_lock_wait_timeout=1"
+                      let result = handle peer "INSERT INTO empty_scan VALUES (15,1,0)" |> snd
+                      Expect.equal (handle writer "ROLLBACK" |> snd) (Affected 0UL) "the scan releases its locks"
+                      if shouldWait then
+                          TestSupport.Sql.expectError 1205 result "the empty scan protects its final gap"
+                      else
+                          Expect.equal result (Affected 1UL) "an impossible filter avoids the scan"
+
+          testCase "unindexed writes recheck a pending insert at the current scan position"
+          <| fun _ ->
+              let run session statement expected =
+                  let session, result = handle session statement
+                  Expect.equal result (Affected expected) statement
+                  session
+
+              for isolation, verb, finish, shouldWait, changed, rows in
+                  [ "REPEATABLE READ", "UPDATE", "COMMIT", true, 2UL, [ "10", "0"; "15", "1"; "20", "1"; "30", "0" ]
+                    "SERIALIZABLE", "DELETE", "ROLLBACK", true, 1UL, [ "10", "0"; "30", "0" ]
+                    "READ COMMITTED", "UPDATE", "COMMIT", false, 1UL, [ "10", "0"; "15", "0"; "20", "1"; "30", "0" ]
+                    "READ COMMITTED", "DELETE", "COMMIT", true, 2UL, [ "10", "0"; "30", "0" ] ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = run (create 1 store) "CREATE TABLE pending_scan(id INT PRIMARY KEY,selector INT,n INT)" 0UL
+                  run setup "INSERT INTO pending_scan VALUES (10,0,0),(20,1,0),(30,0,0)" 3UL |> ignore
+                  let owner = run (create 2 store) "BEGIN" 0UL
+                  let owner = run owner "INSERT INTO pending_scan VALUES (15,1,0)" 1UL
+                  let writer = run (create 3 store) ("SET SESSION TRANSACTION ISOLATION LEVEL " + isolation) 0UL
+                  let writer = run writer "SET SESSION innodb_lock_wait_timeout=3" 0UL
+                  let sql =
+                      if verb = "UPDATE" then "UPDATE pending_scan SET n=n+1 WHERE selector=1"
+                      else "DELETE FROM pending_scan WHERE selector=1"
+                  use started = new Threading.ManualResetEventSlim(false)
+                  let write =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle writer sql |> snd)
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "the full-scan writer starts"
+                  let completed = write.Wait(TimeSpan.FromMilliseconds 150.0)
+                  run owner finish 0UL |> ignore
+                  Expect.isTrue (write.Wait(TimeSpan.FromSeconds 3.0)) "the write completes after the insert finishes"
+                  Expect.equal completed (not shouldWait) (isolation + " " + verb)
+                  Expect.equal write.Result (Affected changed) "the write applies its predicate to the current rows"
+                  let expected = rows |> List.map (fun (id, n) -> [ Some id; Some n ])
+                  Expect.equal (handle setup "SELECT id,n FROM pending_scan ORDER BY id" |> snd)
+                      (ResultSet([ "id"; "n" ], expected)) "committed row values match the scan schedule"
+
+          testCase "unindexed write gaps survive rollback to a savepoint"
+          <| fun _ ->
+              for key in [ ""; " PRIMARY KEY" ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  let ddl = sprintf "CREATE TABLE savepoint_scan(id INT%s,selector INT,n INT)" key
+                  Expect.equal (handle setup ddl |> snd) (Affected 0UL) ddl
+                  Expect.equal (handle setup "INSERT INTO savepoint_scan VALUES (10,0,0)" |> snd) (Affected 1UL) "seed the scan"
+                  let writer, _ = handle (create 2 store) "BEGIN"
+                  let writer, _ = handle writer "SELECT * FROM savepoint_scan"
+                  let writer, _ = handle writer "SAVEPOINT touched"
+                  let writer, updated = handle writer "UPDATE savepoint_scan SET n=1 WHERE selector=99"
+                  Expect.equal updated (Affected 0UL) "the full scan finds no matching row"
+                  let writer, rolledBack = handle writer "ROLLBACK TO SAVEPOINT touched"
+                  Expect.equal rolledBack (Affected 0UL) "restore the savepoint"
+                  let peer, _ = handle (create 3 store) "SET SESSION innodb_lock_wait_timeout=1"
+                  let result = handle peer "REPLACE INTO savepoint_scan VALUES (35,9,0)" |> snd
+                  Expect.equal (handle writer "ROLLBACK" |> snd) (Affected 0UL) "release the transaction's scan claims"
+                  TestSupport.Sql.expectError 1205 result "the retained gap blocks replacement insertion"
+
+          testCase "unindexed writes with unknown columns leave insertion gaps open"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              Expect.equal (handle setup "CREATE TABLE invalid_scan(id INT PRIMARY KEY,selector INT,n INT)" |> snd)
+                  (Affected 0UL) "create the scan target"
+              Expect.equal (handle setup "INSERT INTO invalid_scan VALUES (10,0,0)" |> snd)
+                  (Affected 1UL) "seed the scan target"
+              for id, sql in
+                  [ 15, "UPDATE invalid_scan SET missing=1 WHERE selector=9"
+                    16, "UPDATE invalid_scan SET n=1 WHERE missing=9"
+                    17, "DELETE FROM invalid_scan WHERE missing=9" ] do
+                  let writer, _ = handle (create 2 store) "BEGIN"
+                  let writer, failed = handle writer sql
+                  TestSupport.Sql.expectError 1054 failed sql
+                  let peer, _ = handle (create 3 store) "SET SESSION innodb_lock_wait_timeout=1"
+                  let inserted = handle peer (sprintf "INSERT INTO invalid_scan VALUES (%d,0,0)" id) |> snd
+                  Expect.equal (handle writer "ROLLBACK" |> snd) (Affected 0UL) "end the writer's transaction"
+                  Expect.equal inserted (Affected 1UL) "binding failed before the scan could protect its gaps"
+
+          testCase "an autocommit serializable scan tolerates commits to an independent table"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              for sql, count in
+                  [ "CREATE TABLE isolated_scan(id INT PRIMARY KEY,selector INT,n INT)", 0UL
+                    "CREATE TABLE independent_scan(id INT PRIMARY KEY)", 0UL
+                    "INSERT INTO isolated_scan VALUES (1,1,0),(2,1,0),(3,1,0),(4,1,0)", 4UL ] do
+                  Expect.equal (handle setup sql |> snd) (Affected count) sql
+              let writer, _ = handle (create 2 store) "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE"
+              use started = new Threading.ManualResetEventSlim(false)
+              let scan =
+                  Threading.Tasks.Task.Run(fun () ->
+                      started.Set()
+                      handle writer "UPDATE isolated_scan SET n=n+1+SLEEP(0.1) WHERE selector=1" |> snd)
+              Expect.isTrue (started.Wait(TimeSpan.FromSeconds 1.0)) "the writer starts"
+              for id in 1 .. 10 do
+                  Threading.Thread.Sleep 30
+                  let inserted = handle setup (sprintf "INSERT INTO independent_scan VALUES (%d)" id) |> snd
+                  Expect.equal inserted (Affected 1UL) "the unrelated insert commits"
+              Expect.isTrue (scan.Wait(TimeSpan.FromSeconds 3.0)) "the protected scan completes"
+              Expect.equal scan.Result (Affected 4UL) "independent commits do not invalidate the scan"
+              Expect.equal (handle setup "SELECT SUM(n) AS total FROM isolated_scan" |> snd)
+                  (ResultSet([ "total" ], [ [ Some "4" ] ])) "all four rows are committed"
+
           testCase "joined single-target updates rebase after a competing transaction commits"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

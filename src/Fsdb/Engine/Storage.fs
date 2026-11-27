@@ -536,6 +536,7 @@ type KeyLockCache =
     { SyncRoot: obj
       Entries: ConcurrentDictionary<string, WeakReference<RowLockStripe>>
       Gaps: ResizeArray<WeakReference<RowLockStripe>>
+      KeylessWrites: Lazy<RowLockStripe * RowLockStripe>
       Activity: KeyLockActivity
       mutable Insertions: int64 }
 
@@ -948,10 +949,15 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       NgramTokenSize = store.NgramTokenSize
       FullTextStopwordsEnabled = store.FullTextStopwordsEnabled
       FullTextStopwordSettings = store.FullTextStopwordSettings
-      // QueryHandler derives the transaction's effective mode before use.
       ExecutionSettings =
-        { store.ExecutionSettings with
-            SqlMode = { store.ExecutionSettings.SqlMode with Strict = true } }
+        let settings = store.ExecutionSettings
+        // Keep the text and effective mode in sync so QueryHandler can
+        // restore a session's non-strict mode before executing a statement.
+        if settings.SqlMode.Strict then settings
+        else
+            { settings with
+                SqlModeText = SqlMode.withMode "STRICT_TRANS_TABLES" true settings.SqlModeText
+                SqlMode = { settings.SqlMode with Strict = true } }
       TableShadows = store.TableShadows
       VirtualTables = store.VirtualTables
       OnCommit = ResizeArray()
@@ -1127,14 +1133,14 @@ let internal transactionGapLocks (store: Store) =
         lock context.HeldStripes (fun () ->
             context.HeldStripes |> Seq.filter (fun stripe -> stripe.Gap.IsSome) |> List.ofSeq)
 
-let private writePointGapPrefix = "write-point:"
+let private writeGapPrefix = "write:"
 
 let internal releaseLaterGapLocks (store: Store) (retained: RowLockStripe list) =
     store.TransactionLocks |> Option.iter (fun context ->
         transactionGapLocks store
         // A write's gap survives rollback to an already active engine savepoint.
         |> List.filter (fun stripe ->
-            stripe.Gap |> Option.forall (fun (name, _) -> not (name.StartsWith(writePointGapPrefix, StringComparison.Ordinal))))
+            stripe.Gap |> Option.forall (fun (name, _) -> not (name.StartsWith(writeGapPrefix, StringComparison.Ordinal))))
         |> List.filter (fun stripe -> not (retained |> List.exists (fun saved -> obj.ReferenceEquals(saved, stripe))))
         |> releaseLockStripes context)
 
@@ -4521,9 +4527,12 @@ let private keyLockCache (store: Store) tableKey =
     store.KeyLocks.GetOrAdd(
         tableKey,
         (fun _ ->
-            { SyncRoot = obj ()
+            let syncRoot = obj ()
+            let cohort () = { createRowLockStripe () with SyncRoot = syncRoot }
+            { SyncRoot = syncRoot
               Entries = ConcurrentDictionary<string, WeakReference<RowLockStripe>>(StringComparer.Ordinal)
               Gaps = ResizeArray()
+              KeylessWrites = lazy (cohort (), cohort ())
               Activity = { Owners = 0L }
               Insertions = 0L }))
 
@@ -4718,8 +4727,53 @@ let private fullScanRowIds store dbName tableName =
 let private withFullScanRowLocks store dbName tableName body =
     withRowLocks store dbName tableName (fullScanRowIds store dbName tableName) body
 
-let private withInsertLocks store dbName tableName rowIds keys body =
-    withWriteLocksFor (Fsdb.Limits.statementLockWaitTimeout ()) store dbName tableName rowIds keys body
+let private acquireKeylessWriteCohort (store: Store) deadline database context owner blockers =
+    let otherOwners () =
+        blockers.SharedOwners |> Seq.filter ((<>) context.Owner) |> Seq.toList
+
+    acquireStripeWithBlockers deadline store.LockWaits database context SharedStripe WaitUntilAvailable owner otherOwners
+    |> snd
+
+let private withInsertLocks (store: Store) (dbName: string) tableName rowIds keys body =
+    let timeout = Fsdb.Limits.statementLockWaitTimeout ()
+    let keyless =
+        if List.exists primaryLockKey keys
+           || Map.containsKey (dbName.ToLowerInvariant(), normalizeTableName tableName) store.TableShadows then false
+        else
+            tableSnapshot store dbName tableName
+            |> Result.toOption
+            |> Option.exists (primaryKeyColumns >> List.isEmpty)
+
+    if not keyless then
+        withWriteLocksFor timeout store dbName tableName rowIds keys body
+    else
+        // Inserting transactions share one cohort. A scan waits for those
+        // inserts and can keep the opposing cohort until transaction end.
+        let context, release =
+            match store.TransactionLocks with
+            | Some context -> context, false
+            | None -> createTransactionLockContext (store.NextLockOwnerId()), true
+        let cache = keyLockCache store (lockNamespaceKey dbName tableName)
+        let scans, inserts = cache.KeylessWrites.Value
+        let held = acquireKeylessWriteCohort store (DateTime.UtcNow + timeout) dbName context inserts scans
+        try
+            try withWriteLocksForContext (Some context) timeout true store dbName tableName rowIds keys body
+            with _ ->
+                if held then releaseLockStripes context [ inserts ]
+                reraise ()
+        finally
+            if release then releaseAllLockStripes context
+
+let internal lockKeylessWriteScan timeout (store: Store) database tableName protectGaps refresh =
+    match store.TransactionLocks with
+    | None -> invalidArg (nameof store) "write scan claims require a transaction snapshot"
+    | Some context ->
+        let cache = keyLockCache store (lockNamespaceKey database tableName)
+        let scans, inserts = cache.KeylessWrites.Value
+        let held = acquireKeylessWriteCohort store (DateTime.UtcNow + timeout) database context scans inserts
+        try refresh ()
+        finally
+            if held && not protectGaps then releaseLockStripes context [ scans ]
 
 let acquireTransactionWriteTargets
     (timeout: TimeSpan)
@@ -6869,6 +6923,7 @@ let internal tryLockingPrimaryPoint store (table: Table) values =
 type private PrimaryGapScan =
     | OrdinaryGap
     | WritePointGap
+    | WriteRangeGap
     | ReadPointGap of LockingReadWait
     | SkippedPointGap
     | LimitedGap of direction: PrimaryScanDirection * stoppedAtRecord: bool
@@ -7071,7 +7126,7 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
                 | Some table when installsGaps && (skippedPoint || (needsGap table && needsGap observed)) ->
                     let gapIdentity =
                         if skippedPoint then "skipped:" + probe
-                        elif scan = WritePointGap then writePointGapPrefix + probe
+                        elif scan = WritePointGap || scan = WriteRangeGap then writeGapPrefix + probe
                         else probe
                     let mutable alreadyHeld = false
                     visitLivePrimaryGaps cache (fun stripe ->
@@ -7337,7 +7392,7 @@ let private lockPrimaryPoint timeout (live: Store) (refresh: unit -> Store) stre
     | Some selected -> withTransactionLockCheckpoint initial (fun () -> acquire initial selected)
     | None -> ReadPrimary initial
 
-let private lockPrimaryRange timeout (live: Store) (refresh: unit -> Store) strength (plan: PrimaryReadPlan) lower upper =
+let private lockPrimaryRange timeout (live: Store) (refresh: unit -> Store) strength gapScope (plan: PrimaryReadPlan) lower upper =
     let deadline = DateTime.UtcNow + timeout
     let database, tableName = plan.ReadDatabase, plan.ReadTableName
     let remaining () =
@@ -7493,7 +7548,7 @@ let private lockPrimaryRange timeout (live: Store) (refresh: unit -> Store) stre
 
     let rec acquire canRetain snapshot selection =
         let savedGaps = transactionGapLocks snapshot
-        let scan = if plan.ReadGaps then OrdinaryGap else ProbeLimitedRange ForwardScan
+        let scan = if plan.ReadGaps then gapScope else ProbeLimitedRange ForwardScan
         let acquired =
             match acquirePrimaryGap (remaining ()) live snapshot database tableName scan (canRetain || plan.ReadWait = NoWait) plan.ReadAccess with
             | GapHasPendingKey pending -> lockBeforePending snapshot savedGaps ForwardScan lower upper pending
@@ -7639,7 +7694,19 @@ let internal lockPrimaryRead timeout live refresh strength (plan: PrimaryReadPla
     | PrimaryRange(lower, upper) when plan.ReadWait = SkipLocked ->
         let direction, count = plan.ReadRangeLimit |> Option.defaultValue (ForwardScan, Int32.MaxValue)
         lockPrimarySkipRange live refresh strength plan lower upper direction count
-    | PrimaryRange(lower, upper) -> ReadPrimary(lockPrimaryRange timeout live refresh strength plan lower upper)
+    | PrimaryRange(lower, upper) -> ReadPrimary(lockPrimaryRange timeout live refresh strength OrdinaryGap plan lower upper)
+
+let internal lockUnindexedPrimaryWrite timeout live refresh database (table: Table) protectGaps =
+    let plan =
+        { ReadDatabase = database
+          ReadTableName = table.OriginalName
+          ReadSchemaRevision = table.SchemaRevision
+          ReadAccess = PrimaryRange(None, None)
+          ReadGaps = protectGaps
+          ReadWait = WaitForLocks
+          ReadOffset = 0
+          ReadRangeLimit = None }
+    lockPrimaryRange timeout live refresh UpdateLock WriteRangeGap plan None None
 
 /// Read either side of an indexed NULL test after any exact bound leading key
 /// parts. The NULL slice is contiguous in both ascending and descending keys.
@@ -11917,7 +11984,7 @@ let private insertRowsPreparedCore
     let insert () =
         captureIndexExpressionError (fun () ->
             match tryInsertLockTargets store dbName tableName columns (rowsIn |> List.map (List.map Some)) with
-            | Some targets when not targets.Keys.IsEmpty ->
+            | Some targets when not rowsIn.IsEmpty ->
                 withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
             | _ -> publish ())
 
@@ -11957,7 +12024,7 @@ let internal insertRowsPreparedWithOrdinal
 
 /// Publishes a candidate returned by `prepareInsertCandidate` without
 /// repeating defaults, generated expressions, or BEFORE triggers.
-let internal insertPreparedCandidate
+let private insertPreparedCandidateCore
     (store: Store)
     (dbName: string)
     (tableName: string)
@@ -12024,6 +12091,10 @@ let internal insertPreparedCandidate
           Affected = 1
           InsertedRows = [ candidate ]
           IgnoredErrors = [] })
+
+let internal insertPreparedCandidate store dbName tableName prepared =
+    withInsertLocks store dbName tableName [] [] (fun () ->
+        insertPreparedCandidateCore store dbName tableName prepared)
 
 let internal insertPreparedRowsWithOrdinal
     (ignoreErrors: bool)
@@ -12473,7 +12544,7 @@ and internal upsertRowsWithOrdinalChecked
             captureIndexExpressionError (fun () ->
                 let lockRows = rowsIn |> List.choose (Result.toOption >> Option.map (List.map Some))
                 match tryInsertLockTargets store dbName tableName columns lockRows with
-                | Some targets when not targets.Keys.IsEmpty ->
+                | Some targets when not lockRows.IsEmpty ->
                     withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
                 | _ -> publish ())
 
@@ -12983,7 +13054,7 @@ let private replaceRowsCore
     let key = normalizeTableName tableName
     let address = tableAddress dbName key
 
-    let result =
+    let publish () =
         withReferentialCatalogPublishing store dbName SharedAccess snd (fun initialCatalog initialDb ->
             virtualWriteGuard store dbName tableName
             |> Result.bind (fun () -> tryGetTable dbName initialDb tableName)
@@ -13178,6 +13249,14 @@ let private replaceRowsCore
                               IgnoredErrors = [] }
 
                         catalog, (outcome, events)))))
+
+    let result =
+        match rowsIn with
+        | [] -> publish ()
+        | _ ->
+            match tryInsertLockTargets store dbName tableName columns (rowsIn |> List.map (List.map Some)) with
+            | Some targets -> withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
+            | None -> publish ()
 
     match result with
     | Ok(outcome, _) -> Ok outcome

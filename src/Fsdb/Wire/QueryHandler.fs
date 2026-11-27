@@ -2578,14 +2578,14 @@ let private rebaseReadUncommittedSnapshot (session: Session) (tx: Transaction) =
 
 /// Publishes a supplied transaction so local COMMIT and detached XA completion
 /// share one merge, durability, and lock-release path.
-let private publishTransaction (publishFlat: bool) (session: Session) (tx: Transaction) =
+let private publishTransaction (publishFlat: bool) validateSerializable (session: Session) (tx: Transaction) =
     if not tx.Seeded then
         Storage.releaseTransactionLocks tx.Snapshot
     else
         let timeout = lockWaitTimeout session
 
         match tx.Isolation with
-        | Serializable ->
+        | Serializable when validateSerializable ->
             Storage.commitSerializableCatalogIntoWithTimeout timeout publishFlat session.Store tx.BaseCatalog tx.Snapshot
         | _ -> Storage.commitCatalogIntoWithTimeout timeout publishFlat session.Store tx.BaseCatalog tx.Snapshot
 
@@ -2595,14 +2595,16 @@ let private publishTransaction (publishFlat: bool) (session: Session) (tx: Trans
 /// isolation levels merge disjoint row changes; SERIALIZABLE validates the
 /// transaction's read snapshot before publication. No open transaction is a
 /// no-op, matching MySQL.
-let private commitSessionWith (publishFlat: bool) (session: Session) : Session =
+let private commitSessionWithValidation (publishFlat: bool) validateSerializable (session: Session) : Session =
     match session.Tx with
     | Some tx ->
-        publishTransaction publishFlat session tx
+        publishTransaction publishFlat validateSerializable session tx
         TableLocks.releaseTransactionAccess session.Store session.ConnectionId
         removeTransactionView session
         Session.endTransactionTracking { session with Tx = None; Cursors = Map.empty }
     | None -> { session with Cursors = Map.empty }
+
+let private commitSessionWith publishFlat session = commitSessionWithValidation publishFlat true session
 
 let private commitSession (session: Session) : Session = commitSessionWith false session
 
@@ -2793,7 +2795,7 @@ let private completePreparedXa commit xid session =
 let private commitXa xid onePhase session =
     match session.Tx, xaAssociation session with
     | Some transaction, Some(current, Idle) when current = xid && onePhase ->
-        publishTransaction false session transaction
+        publishTransaction false true session transaction
         TableLocks.releaseTransactionAccess session.Store session.ConnectionId
         removeXaAssociation session xid
         removeTransactionView session
@@ -2998,6 +3000,25 @@ let private prepareTransactionWrite (temporaryCatalog: Catalog option) (statemen
                 { transaction with Snapshot = snapshot; BaseCatalog = baseCatalog; Seeded = true }
             else refreshCommitted transaction
 
+        let protectGaps = transaction.Isolation = RepeatableRead || transaction.Isolation = Serializable
+        let scanned, transaction =
+            if canRefresh then
+                match Executor.tryUnindexedWriteScan protectGaps transaction.Snapshot registry dbName statement with
+                | Some(database, table)
+                    when temporaryCatalog |> Option.forall (fun catalog ->
+                        (CatalogOverlay.tryTable catalog (database, table.OriginalName)).IsNone) ->
+                    let mutable current = transaction
+                    let refreshScan () =
+                        current <- refreshCommitted current
+                        current.Snapshot
+                    if (Storage.primaryKeyColumns table).IsEmpty then
+                        Storage.lockKeylessWriteScan timeout transaction.Snapshot database table.OriginalName protectGaps refreshScan |> ignore
+                    else
+                        Storage.lockUnindexedPrimaryWrite timeout session.Store refreshScan database table protectGaps |> ignore
+                    true, current
+                | _ -> false, transaction
+            else false, transaction
+
         let pendingConnection =
             match transaction.Isolation with
             | RepeatableRead | Serializable when canRefresh -> Some session.ConnectionId
@@ -3141,7 +3162,7 @@ let private prepareTransactionWrite (temporaryCatalog: Catalog option) (statemen
 
         match targets, readTargets with
         | [], [] ->
-            if pendingReads.IsEmpty && primaryProbes.IsEmpty then session
+            if pendingReads.IsEmpty && primaryProbes.IsEmpty && not scanned then session
             else
                 let snapshot =
                     if transaction.Isolation = ReadUncommitted || not primaryProbes.IsEmpty then refreshReadRows transaction
@@ -4136,7 +4157,12 @@ let private directAutocommitTarget =
     | Delete { Ctes = []; Source = SingleDeleteTable source } -> Some(SqlText.objectName source.Database source.Table)
     | _ -> None
 
-let private canExecuteDirectAutocommit (session: Session) dbName statement =
+type private AutocommitExecution =
+    | RunDirectly
+    | TrackStatement
+    | LockSingleScan
+
+let private autocommitExecution (session: Session) dbName statement =
     match directAutocommitTarget statement with
     | Some table ->
         let mayRunNestedWrites =
@@ -4152,9 +4178,22 @@ let private canExecuteDirectAutocommit (session: Session) dbName statement =
 
         let database, table = splitQualified dbName table
 
-        not mayRunNestedWrites
-        && (Storage.tableSnapshot (Session.currentStore session) database table |> Result.isOk)
-    | None -> false
+        let store = Session.currentStore session
+        if mayRunNestedWrites || (Storage.tableSnapshot store database table |> Result.isError) then
+            TrackStatement
+        else
+            match statement with
+            | Update _ | Delete _ ->
+                let isolation = configuredIsolation session
+                let protectGaps = isolation = RepeatableRead || isolation = Serializable
+                match Executor.tryUnindexedWriteScan protectGaps store (registryFor session) dbName statement with
+                | None -> RunDirectly
+                | Some(database, table) ->
+                    let event = match statement with Update _ -> "UPDATE" | _ -> "DELETE"
+                    if isolation = Serializable && Executor.hasMutationTriggers store database table.OriginalName event then TrackStatement
+                    else LockSingleScan
+            | _ -> RunDirectly
+    | None -> TrackStatement
 
 let private autocommitDisabled (session: Session) =
     sessionValue session "autocommit" = Some "0"
@@ -4596,13 +4635,13 @@ let private executeParsedWithTemporaryActionCore (action: TemporaryAction option
                 else
                     session
 
-            if
-                session.Tx.IsSome
-                || not (startsTransaction stmt)
-                || canExecuteDirectAutocommit session dbName stmt
-            then
-                executeParsedCore session stmt
-            else
+            let execution =
+                if session.Tx.IsSome || not (startsTransaction stmt) then RunDirectly
+                else autocommitExecution session dbName stmt
+
+            match execution with
+            | RunDirectly -> executeParsedCore session stmt
+            | TrackStatement | LockSingleScan ->
                 let mutable working =
                     beginTransaction
                         ImplicitTrackedTransaction
@@ -4617,7 +4656,10 @@ let private executeParsedWithTemporaryActionCore (action: TemporaryAction option
 
                         match terminalErrorInfo result with
                         | Some _ -> rollbackSession executed, result
-                        | None -> commitSessionWith true executed, result
+                        | None ->
+                            // The locking scan protects its only SQL source.
+                            // Unrelated commits cannot invalidate that scan.
+                            commitSessionWithValidation true (execution <> LockSingleScan) executed, result
                     with _ ->
                         rollbackSession working |> ignore
                         reraise ()

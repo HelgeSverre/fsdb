@@ -31546,6 +31546,10 @@ let private triggersFor
             |> Seq.sortBy (fun trigger -> trigger.Order)
             |> List.ofSeq
 
+let internal hasMutationTriggers store db table event =
+    not (triggersFor store db table "BEFORE" event).IsEmpty
+    || not (triggersFor store db table "AFTER" event).IsEmpty
+
 let private afterInsertTriggers (store: Store) (db: string) (table: string) =
     triggersFor store db table "AFTER" "INSERT"
 
@@ -38311,6 +38315,47 @@ let internal transactionWritePlan temporaryCatalog store registry dbName stateme
     let pointSearches = ResizeArray<string * string * string>()
     let targets = transactionWriteTargetsIn temporaryCatalog pointSearches.Add store registry dbName statement
     targets, List.ofSeq pointSearches
+
+let internal tryUnindexedWriteScan protectGaps store registry dbName statement =
+    let source =
+        match statement with
+        | Update { Ctes = []; Joins = []; Limit = None; From = source; Where = predicate; Assignments = assignments } when protectGaps ->
+            Some(source, predicate, assignments)
+        | Delete { Ctes = []; Limit = None; Source = SingleDeleteTable source; Where = predicate } ->
+            Some(source, predicate, [])
+        | _ -> None
+
+    source
+    |> Option.filter (fun (_, predicate, _) ->
+        predicate |> Option.forall isPlainRowPredicate
+        && not (Diagnostics.suppress (fun () ->
+            predicate
+            |> Option.bind (plannerConstantEvaluator store registry)
+            |> Option.exists (fun value -> truthy value <> Some true))))
+    |> Option.bind (fun (source, predicate, assignments) ->
+        physicalFastPathTable store dbName source
+        |> Option.filter (fun table ->
+            let qualifier = source.Alias |> Option.defaultValue source.Table
+            let isLocal owner = equalsIgnoreCase owner qualifier
+            let boundColumn name = resolveColumn table.Columns name |> Result.isOk
+            let hasUnknownColumn = Expression.exists (function
+                | Col name -> not (boundColumn name)
+                | QualifiedCol(owner, name) -> not (isLocal owner && boundColumn name)
+                | _ -> false)
+            let assignable (assignment: Assignment) =
+                Option.forall isLocal assignment.Table
+                && (resolveAssignableColumn table.Columns source.Table assignment.Column |> Result.isOk)
+                && not (hasUnknownColumn assignment.Value)
+            let primaryTypes =
+                Storage.primaryKeyColumns table
+                |> List.choose (fun name -> resolveColumn table.Columns name |> Result.toOption |> Option.map (fun index -> table.Columns.[index].Type))
+
+            // Unknown columns are rejected before the engine scans the index.
+            (predicate |> Option.forall (hasUnknownColumn >> not))
+            && List.forall assignable assignments
+            && Storage.supportsPrimaryRangeKeyTypes primaryTypes
+            && (tryPhysicalAccessInTableWith CandidateNarrowing store registry table source predicate |> Option.isNone))
+        |> Option.map (fun table -> source.Database |> Option.defaultValue dbName, table))
 
 [<RequireQualifiedAccess>]
 type internal WriteReadScope =
