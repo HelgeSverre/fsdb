@@ -72,6 +72,24 @@ and qualified outer names, both index directions, and force and ignore
 hints. Outer sources were limited projections, computed projections,
 unions, nested derived tables, grouped queries, or a preceding
 lateral source. JSON and TREE named the derived reference, and
-ANALYZE reported the actual ordered lookups. The separate static
-`EXPLAIN WITH` path still fails to resolve the audited materialized
-CTE name.
+ANALYZE reported the actual ordered lookups.
+
+### Materialized common table expressions
+
+`EXPLAIN WITH` resolves a CTE in its declaration scope and emits a
+derived block for its definition. Repeated references reuse that block.
+An unqualified CTE name shadows a physical table, while a schema-qualified
+reference still names the physical table. Correlated probes use the
+CTE's declared output columns and the alias at the point of reference.
+
+All 192 indexed and ignored-index variants match MySQL 8.4.11 on
+inner select type, access type, key, key length, and references in
+memory and with WAL. The cases combine direct, renamed, unioned,
+chained, and grouped CTEs or lateral projections that read a CTE,
+with integer and text keys, scalar and lateral probes, bare and
+qualified names, and both index directions. All 192 returned error
+1146 at `1ebb8c6e`. The earlier derived-source comparison still
+matches all 192 cases. JSON reports the CTE alias and its nested
+body. ANALYZE records the observed ordered lookup for each CTE row.
+MySQL's CTE merging, automatic temporary indexes, estimates, and
+recursive plan details remain open.

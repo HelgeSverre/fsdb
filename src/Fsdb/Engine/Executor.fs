@@ -28830,8 +28830,50 @@ let private tryExplainBoundViewUpdate (store: Store) registry account dbName id 
                                       [ if residual then "Using where"
                                         if covering then "Using index" ] }))))
 
+type private ExplainOuterScope =
+    { Context: EvalContext
+      Sources: (string option * string * ColumnDef list) list
+      Outer: ExplainOuterScope option }
+
+type private ExplainCte =
+    { Definition: CommonTableExpr
+      VisibleCtes: Map<string, ExplainCte>
+      Outer: ExplainOuterScope option
+      Columns: Lazy<Result<ViewColumnDescriptor list, ColumnDescriptionError>>
+      mutable BlockId: int option }
+
+let private explainCteScope = System.Threading.AsyncLocal<Map<string, ExplainCte>>()
+
+let private explainCtes () = DynamicScope.valueOrDefault Map.empty explainCteScope
+
+let private withExplainCtes scope action =
+    DynamicScope.withValue explainCteScope scope (fun () ->
+        DynamicScope.withValue describedCteScope (scope |> Map.map (fun _ binding -> binding.Columns)) action)
+
+let private explainCteBinding scope (tableRef: TableRef) =
+    if tableRef.Database.IsSome then None else Map.tryFind (tableRef.Table.ToLowerInvariant()) scope
+
+let private (|ExplainCteReference|_|) tableRef =
+    explainCteBinding (explainCtes ()) tableRef |> Option.map (fun binding -> tableRef, binding)
+
+let private extendExplainCtes store registry dbName outer ctes =
+    (explainCtes (), ctes)
+    ||> List.fold (fun visible (cte: CommonTableExpr) ->
+        let columns = lazy (
+            // Describe a reference so declared output names and recursive
+            // anchor types use the same rules as other CTE metadata.
+            let source = FromTable(correlatedSourceRef cte.CteName)
+            let query = mutationSourceQuery (Some source) [] [ cte ] [ Star None ]
+            withExplainCtes visible (fun () ->
+                describeQueryColumnDescriptorsInScope store registry dbName
+                    (SourceBody(FromSubquery(PlainSelect query, cte.CteName)))
+                    (outer |> Option.map _.Context) (fun _ -> Ok())))
+        Map.add (cte.CteName.ToLowerInvariant())
+            { Definition = cte; VisibleCtes = visible; Outer = outer; Columns = columns; BlockId = None } visible)
+
 let private tryExplainPhysicalSource (store: Store) (dbName: string) (item: FromItem) : Result<(string * ColumnDef list * Table) option, QueryResult> =
     match item with
+    | FromTable(ExplainCteReference _) -> Ok None
     | FromTable tableRef ->
         tryPhysicalTableRef store dbName tableRef
         |> Result.map (Option.map (fun table -> (tableRef.Alias |> Option.defaultValue tableRef.Table), table.Columns, table))
@@ -28942,11 +28984,6 @@ let private indexedJoinExplainPlans
     |> List.fold step (initial |> Result.map (fun sources -> sources, Map.empty))
     |> Result.map snd
 
-type private ExplainOuterScope =
-    { Context: EvalContext
-      Sources: (string option * string * ColumnDef list) list
-      Outer: ExplainOuterScope option }
-
 let private explainOuterScope store registry dbName outer items =
     let makeScope sources =
         match sources with
@@ -28968,6 +29005,9 @@ let private explainOuterScope store registry dbName outer items =
         preceding |> Option.bind (fun sources ->
             let description =
                 match item with
+                | FromTable(ExplainCteReference(tref, binding)) ->
+                    binding.Columns.Value |> Result.toOption
+                    |> Option.map (fun columns -> None, tref.Alias |> Option.defaultValue tref.Table, columns |> List.map _.Column)
                 | FromTable tref ->
                     physicalFastPathTable store dbName tref
                     |> Option.map (fun table ->
@@ -29231,6 +29271,29 @@ let rec private explainJoinBlock
             explainJoinBlock store registry dbName nextId acc analysis id selectType
                 (Some source) innerJoins None groupExtra (innerJoins |> List.map _.On) 0 None consumption
                 (scopeFor (List.take idx items)) None
+        | FromTable(ExplainCteReference(_, binding)), _ ->
+            let emit id = emitTableRow idx (sprintf "<derived%d>" id) None "ALL"
+            match binding.BlockId with
+            | Some id ->
+                emit id
+                Ok()
+            | None ->
+                let derivedId = nextId ()
+                binding.BlockId <- Some derivedId
+                emit derivedId
+                let visible =
+                    if cteSelfReferenced binding.Definition then
+                        Map.add (binding.Definition.CteName.ToLowerInvariant()) binding binding.VisibleCtes
+                    else binding.VisibleCtes
+                withExplainCtes visible (fun () ->
+                    let describe id kind select =
+                        explainSelectBlock store registry dbName nextId acc analysis id kind select binding.Outer
+                    match binding.Definition.Body with
+                    | PlainSelect sub -> describe derivedId "DERIVED" sub
+                    | UnionSelect(first, rest, _, _, _) ->
+                        describe derivedId "DERIVED" first
+                        |> Result.bind (fun () -> rest |> traverse (fun (_, branch) -> describe (nextId ()) "UNION" branch))
+                        |> Result.map ignore)
         | FromTable tref, Some(key, reference) ->
             acc.Add
                 { Id = Some id
@@ -29355,16 +29418,22 @@ and private explainSelectBlock
         | true, access when access.Indexes.Count > 0 -> observed.CorrelatedBlocks.Add(id, access)
         | _ -> ())
 
-    let joins = planJoinOrder store dbName select
+    let cteBindings = extendExplainCtes store registry dbName outer select.Ctes
+    let isCte = function FromTable tref -> (explainCteBinding cteBindings tref).IsSome | _ -> false
+    let usesCte =
+        (Option.toList select.From @ List.map (fun (join: Join) -> join.Table) select.Joins)
+        |> List.collect FromItem.leaves
+        |> List.exists isCte
+    let joins = if usesCte then select.Joins else planJoinOrder store dbName select
 
     let correlatedOrder =
         match select.From, joins, outer with
-        | Some(FromTable tref), [], Some _ -> explainCorrelatedOrder store registry dbName outer tref select
+        | Some(FromTable tref), [], Some _ when not usesCte -> explainCorrelatedOrder store registry dbName outer tref select
         | _ -> None
 
     let hasBareOuterFilter () =
         match select.From, joins, outer, select.Where with
-        | Some(FromTable tref), [], Some _, Some predicate ->
+        | Some(FromTable tref), [], Some _, Some predicate when not usesCte ->
             physicalFastPathTable store dbName tref
             |> Option.exists (fun table ->
                 let source = correlatedProbeSource (tref.Alias |> Option.defaultValue tref.Table) table.Columns
@@ -29377,6 +29446,7 @@ and private explainSelectBlock
 
     let selectType =
         match correlatedOrder, selectType with
+        | _, "SIMPLE" when usesCte -> "PRIMARY"
         | Some _, "DERIVED" -> "DEPENDENT DERIVED"
         | Some _, "SUBQUERY" -> "DEPENDENT SUBQUERY"
         | None, "DERIVED" when outer.IsSome && (Expression.hasQualifiedOuterReference select || hasBareOuterFilter ()) ->
@@ -29386,7 +29456,7 @@ and private explainSelectBlock
 
     let indexOrderPlan =
         match select.From, joins with
-        | Some(FromTable tref), [] ->
+        | Some(FromTable tref), [] when not usesCte ->
             match tryGroupIndexOrder store registry dbName tref select with
             | Some plan -> Some plan
             | None ->
@@ -29432,25 +29502,26 @@ and private explainSelectBlock
 
     let consumption = joinConsumptionFor select.Limit
 
-    explainJoinBlock
-        store
-        registry
-        dbName
-        nextId
-        acc
-        analysis
-        id
-        selectType
-        select.From
-        joins
-        select.Where
-        extra
-        (selectSubqueryExprs select)
-        (select.Projections |> List.sumBy (fun projection -> collectSubqueries projection.Expression |> List.length))
-        selectedIndexOrderPlan
-        consumption
-        outer
-        correlatedOrder
+    withExplainCtes cteBindings (fun () ->
+        explainJoinBlock
+            store
+            registry
+            dbName
+            nextId
+            acc
+            analysis
+            id
+            selectType
+            select.From
+            joins
+            select.Where
+            extra
+            (selectSubqueryExprs select)
+            (select.Projections |> List.sumBy (fun projection -> collectSubqueries projection.Expression |> List.length))
+            selectedIndexOrderPlan
+            consumption
+            outer
+            correlatedOrder)
 
 /// Renders collected plan rows into `EXPLAIN`'s classic 12-column
 /// resultset — `id` ascending, `None -> NULL` in every `option` cell the
@@ -29840,6 +29911,10 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
                     |> List.choose (fun (id, select) ->
                         match select.From with
                         | Some(FromSubquery(_, alias)) -> Some(id, alias)
+                        | Some(FromTable tref)
+                            when tref.Database.IsNone
+                                 && (select.Ctes |> List.exists (fun cte -> equalsIgnoreCase cte.CteName tref.Table)) ->
+                            Some(id, tref.Alias |> Option.defaultValue tref.Table)
                         | _ -> None)
                     |> Map.ofList
 

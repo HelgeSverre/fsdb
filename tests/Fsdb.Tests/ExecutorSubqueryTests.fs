@@ -209,6 +209,53 @@ let tests =
                       (innerAccess ("SELECT o.id,q.id FROM " + from + " LEFT JOIN LATERAL (" + ignored + ") q ON TRUE"))
                       [ Some "DEPENDENT DERIVED", Some "ALL", None, None, None ] from
 
+          testCase "EXPLAIN resolves materialized CTEs in correlated scopes"
+          <| fun _ ->
+              let store = newStore ()
+              for sql in
+                  [ "CREATE TABLE owners(id INT PRIMARY KEY,tenant INT)"
+                    "CREATE TABLE events(id INT PRIMARY KEY,tenant INT,state INT,stamp INT,KEY recent(tenant,state,stamp DESC,id))"
+                    "INSERT INTO owners VALUES(1,1),(2,2),(3,5)"
+                    "INSERT INTO events VALUES(1,1,1,2),(2,1,1,1),(3,2,1,8),(4,2,2,99)" ] do
+                  match runDefault store sql with
+                  | Affected _ -> ()
+                  | other -> failtestf "%s: %A" sql other
+
+              let withNamed = "WITH o(id,k) AS (SELECT id,tenant FROM owners ORDER BY id LIMIT 2) "
+              let lookup = "SELECT e.id FROM events e FORCE INDEX(recent) WHERE e.tenant=p.k AND e.state=1 ORDER BY e.stamp DESC,e.id LIMIT 1"
+              let scalar = "SELECT p.id,(" + lookup + ") FROM o p"
+              let lateral = "SELECT p.id,q.id FROM o p LEFT JOIN LATERAL (" + lookup + ") q ON TRUE"
+              let chained = "WITH a AS (SELECT id,tenant FROM owners LIMIT 2),o AS (SELECT id,tenant AS k FROM a LIMIT 2) "
+              for sql, kind in
+                  [ withNamed + scalar, "DEPENDENT SUBQUERY"
+                    withNamed + lateral, "DEPENDENT DERIVED"
+                    chained + scalar, "DEPENDENT SUBQUERY" ] do
+                  match runDefault store ("EXPLAIN " + sql) with
+                  | ResultSet(_, rows) ->
+                      let access = rows |> List.choose (function
+                          | _ :: subType :: Some "e" :: _ :: access :: _ :: key :: length :: reference :: _ ->
+                              Some(subType, access, key, length, reference)
+                          | _ -> None)
+                      Expect.equal access [ Some kind, Some "ref", Some "recent", Some "10", Some "p.k,const" ] sql
+                      let owners = rows |> List.filter (fun row -> row.[1] = Some "DERIVED" && row.[2] = Some "owners")
+                      Expect.hasLength owners 1 "explain the CTE definition once"
+                  | other -> failtestf "expected a static CTE plan, got %A" other
+
+              match runDefault store ("EXPLAIN ANALYZE " + withNamed + scalar) with
+              | ResultSet(_, rows) ->
+                  let plan = rows |> List.choose (List.tryHead >> Option.flatten) |> String.concat "\n"
+                  Expect.stringContains plan "Ordered index lookup on e using recent" "the original CTE execution is observed"
+                  Expect.stringContains plan "loops=2" "both CTE rows open the lookup"
+              | other -> failtestf "expected an analyzed CTE plan, got %A" other
+
+              match runDefault store ("EXPLAIN " + withNamed + "SELECT p.id,q.id FROM o p JOIN o q ON TRUE") with
+              | ResultSet(_, rows) ->
+                  let sources = rows |> List.filter (fun row -> row.[1] = Some "PRIMARY")
+                  Expect.equal (sources |> List.map (fun row -> row.[2])) [ Some "<derived2>"; Some "<derived2>" ]
+                      "both references point to one materialization block"
+                  Expect.hasLength (rows |> List.filter (fun row -> row.[1] = Some "DERIVED")) 1 "emit the body once"
+              | other -> failtestf "expected a CTE reuse plan, got %A" other
+
           testCase "correlated top-N seeks nullable equality prefixes"
           <| fun _ ->
               let store = newStore ()
