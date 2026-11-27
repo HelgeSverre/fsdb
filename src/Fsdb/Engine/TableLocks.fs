@@ -1068,7 +1068,7 @@ let private isTemporary (catalog: Catalog) access =
     |> Option.exists (Map.containsKey (normalizeTableName access.Table))
 
 let private viewSources (view: SystemCatalog.View.Entry) =
-    Parser.parseViewDefinition view.Definition
+    Parser.parseSavedViewDefinition view.Definition
     |> Result.map (fun definition -> directStatementAccesses view.Schema definition.Statement)
 
 let private expandDependencies store temporaryCatalog accesses =

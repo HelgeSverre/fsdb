@@ -5807,6 +5807,36 @@ let tests =
               Expect.equal (run "SELECT tag FROM cte_labels ORDER BY id")
                   (ResultSet([ "tag" ], [ [ Some "101" ]; [ Some "200" ] ])) "the declared CTE column keeps its local owner"
 
+          testCase "saved EXISTS ignores its query limit while retaining inner relation limits"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE exists_items(id INT PRIMARY KEY)"
+                        "CREATE TABLE exists_labels(id INT PRIMARY KEY)"
+                        "INSERT INTO exists_items VALUES(1),(2)"
+                        "INSERT INTO exists_labels VALUES(1),(2)"
+                        "CREATE VIEW exists_filtered AS SELECT l.id FROM exists_labels l WHERE EXISTS(SELECT 1 FROM exists_items i WHERE i.id=l.id LIMIT 0)"
+                        "CREATE VIEW exists_checks AS SELECT EXISTS(WITH q AS (SELECT id FROM exists_items LIMIT 0) SELECT 1 FROM q LIMIT 0) AS retained, EXISTS(SELECT 1 FROM exists_items WHERE 0 UNION ALL SELECT 2 LIMIT 0) AS global_bound, EXISTS((SELECT 1 FROM exists_items LIMIT 0) UNION ALL (SELECT 2 LIMIT 0) LIMIT 0) AS branch_bounds, EXISTS((SELECT 1 UNION ALL SELECT 2 LIMIT 0)) AS grouped_bound" ]
+              Expect.equal (run "SELECT EXISTS(SELECT 1 FROM exists_items LIMIT 0) AS direct")
+                  (ResultSet([ "direct" ], [ [ Some "0" ] ])) "an ad hoc EXISTS keeps its limit"
+              Expect.equal (run "SELECT id FROM exists_filtered ORDER BY id")
+                  (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ])) "reopening the filter discards its EXISTS limit"
+              let expectedChecks =
+                  ResultSet([ "retained"; "global_bound"; "branch_bounds"; "grouped_bound" ], [ [ Some "0"; Some "1"; Some "0"; Some "1" ] ])
+              Expect.equal (run "SELECT * FROM exists_checks") expectedChecks "only the bound on the EXISTS query is discarded"
+              let definition =
+                  match run "SHOW CREATE VIEW exists_checks" with
+                  | ResultSet(_, [ _ :: Some sql :: _ ]) -> sql
+                  | other -> failtestf "expected stored view SQL: %A" other
+              Expect.equal (definition.Split("limit 0").Length - 1) 3 "SHOW CREATE keeps the CTE and both branch limits"
+              Expect.equal (run "DROP VIEW exists_checks") (Affected 0UL) "drop before recreating the rendered view"
+              Expect.equal (run definition) (Affected 0UL) "recreate the rendered definition"
+              Expect.equal (run "SELECT * FROM exists_checks") expectedChecks "recreating the view preserves its rows"
+              Expect.equal (run "ALTER VIEW exists_filtered AS SELECT l.id FROM exists_labels l WHERE EXISTS(SELECT 1 FROM exists_items i WHERE i.id=l.id LIMIT 1 OFFSET 2)")
+                  (Affected 0UL) "ALTER stores the new filter"
+              Expect.equal (run "DELETE i FROM exists_items i JOIN exists_filtered l ON i.id=l.id")
+                  (Affected 2UL) "joined DELETE sees the reopened filter"
+
           testCase "geometry equality and binary casts use the SQL geometry bytes"
           <| fun _ ->
               let cartesian = "00000000010100000000000000000024400000000000004E40"

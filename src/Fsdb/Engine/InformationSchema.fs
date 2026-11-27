@@ -88,7 +88,7 @@ let internal relationColumns (catalog: Catalog) schema name =
         |> Option.map (_.ColumnNames >> storedViewColumns))
 
 let private canonicalViewDefinition catalog schema includeSchema definition =
-    match Parser.parseViewDefinition definition with
+    match Parser.parseSavedViewDefinition definition with
     | Error _ -> definition
     | Ok parsed ->
         SqlText.viewDefinition
@@ -2163,7 +2163,7 @@ let internal viewExpressionReadTables catalog schema canMerge includeProjection 
                 | Some entry when canMerge.IsSome && eqI entry.Algorithm "TEMPTABLE" -> Set.empty
                 | Some entry ->
                     let reads = if canMerge.IsNone then Set.singleton key else Set.empty
-                    match Fsdb.Parser.parse entry.Definition with
+                    match (Parser.parseSavedViewDefinition entry.Definition |> Result.map _.Statement) with
                     | Ok(Select definition) when crosses (PlainSelect definition) ->
                         Set.union reads (query (Set.add key seen) entry.Schema Map.empty (PlainSelect definition))
                     | Ok(Union(first, rest, orderBy, limit, offset)) when canMerge.IsNone ->
@@ -2206,7 +2206,7 @@ let internal viewDefinitionInheritsSelfRead catalog schema select =
                     views.Value
                     |> List.tryFind (fun entry -> (entry.Schema.ToLowerInvariant(), entry.Name.ToLowerInvariant()) = key)
                     |> Option.exists (fun entry ->
-                        match Fsdb.Parser.parse entry.Definition with
+                        match (Parser.parseSavedViewDefinition entry.Definition |> Result.map _.Statement) with
                         | Ok(Select definition) -> check (Set.add key seen) entry.Schema definition
                         | _ -> false)
             | _ -> false)
@@ -2240,7 +2240,7 @@ let private isUpdatableView (catalog: Catalog) (view: SystemCatalog.View.Entry) 
                     not (Set.contains key seen) && check (Set.add key seen) sourceView)
 
         match view.Algorithm.Equals("TEMPTABLE", StringComparison.OrdinalIgnoreCase),
-              Fsdb.Parser.parse view.Definition with
+              (Parser.parseSavedViewDefinition view.Definition |> Result.map _.Statement) with
         | true, _ -> false
         | _, Ok(Select parsed) ->
             // Direct CTE projections have MySQL's updatable metadata even when
@@ -2363,7 +2363,7 @@ let private viewTableUsageRows (catalog: Catalog) =
 
     viewCatalogEntries catalog
     |> List.collect (fun view ->
-        match Parser.parseViewDefinition view.Definition with
+        match Parser.parseSavedViewDefinition view.Definition with
         | Error _ -> []
         | Ok definition ->
             Fsdb.Auth.requiredPrivileges view.Schema definition.Statement
@@ -2478,7 +2478,7 @@ let private viewRoutineUsageRows (catalog: Catalog) =
 
     viewCatalogEntries catalog
     |> List.collect (fun view ->
-        match Parser.parseViewDefinition view.Definition with
+        match Parser.parseSavedViewDefinition view.Definition with
         | Error _ -> []
         | Ok definition ->
             let calls =

@@ -1092,8 +1092,9 @@ the individual UPDATE, DELETE, and INSERT decisions. A direct joined UPDATE
 also checks the expressions of a merged read-side view against the physical
 assignment targets. Saved joined-view writes preserve qualified and audited
 bare correlations when a component is renamed, including through CTEs
-with resolvable output columns. Some joined DELETE and nested view
-definition cases still differ.
+with resolvable output columns. Saved `EXISTS` predicates discard their
+outer `LIMIT` and `OFFSET`, preserving bounds on inner relations and set
+branches. Some joined DELETE and nested view definition cases still differ.
 
 Uncorrelated scalar projection subqueries can leave direct columns writable
 while preventing insertion. Dependent projection subqueries refuse writes.

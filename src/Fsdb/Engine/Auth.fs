@@ -1847,7 +1847,7 @@ let private storedViewColumns store database table =
             match decode view.ColumnNames with
             | _ :: _ as explicit -> explicit
             | [] ->
-                match Parser.parseViewDefinition view.Definition with
+                match Parser.parseSavedViewDefinition view.Definition with
                 | Ok definition ->
                     match definition.Statement with
                     | Select select -> projectionNames select

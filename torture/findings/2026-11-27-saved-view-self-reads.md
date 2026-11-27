@@ -87,9 +87,33 @@ loading a checkpoint containing the view definitions.
 
 Joined DELETE still has differences for scalar subqueries and for
 predicates that MySQL keeps as subqueries during view resolution.
-The direct correlated EXISTS control remains allowed. In the audited
-saved EXISTS views, MySQL drops LIMIT and OFFSET from the stored
-definition, which changes the rows available to a later joined DELETE.
+MySQL returns 1443 in the audited cases where a read-side view reads the
+target in an uncorrelated scalar projection, a scalar ORDER BY, an EXISTS
+with an always-false inner predicate or a HAVING clause, or an EXISTS
+under `1 OR …`. Fsdb currently accepts those statements. Both engines
+allow the direct correlated EXISTS control with default settings.
+MySQL rejects the same control with 1443 when
+`optimizer_switch='semijoin=off'`.
+
+## Query bounds on saved EXISTS predicates
+
+MySQL omits the outer `LIMIT` and `OFFSET` of an `EXISTS` query when
+[serializing a view definition](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_lex.cc#L2768-L2788).
+Fsdb applies the same rule when reopening a saved view. The definition
+shown by `SHOW CREATE VIEW` and `information_schema.VIEWS` uses the
+reopened query. Ad hoc `EXISTS` keeps its bounds. A CTE, derived table,
+or individual set-operation branch inside the `EXISTS` query keeps its
+own bounds.
+
+For a saved filter containing `EXISTS(SELECT 1 FROM items i WHERE i.id =
+l.id LIMIT 1 OFFSET 2)`, the two matching rows remain visible through
+the view. The audited joined DELETE now affects both rows, as it does in
+MySQL 8.4.11. Before the fix, the offset hid both rows from Fsdb.
+The prepared DELETE and the metadata checks also matched after a
+checkpoint restart. The differential matrix compared direct and saved
+results, creation status, and the reported bounds in both storage modes.
+The regression also recreates the view using `SHOW CREATE VIEW` and checks
+that the branch-local limits still affect its results.
 
 ## Aliases in saved joined views
 

@@ -1627,7 +1627,7 @@ let private joinedMutationStore snapshot split temporary =
 
 let private parseStoredViewStatement (view: StoredView) =
     let options = { Parser.defaultOptions with LiteralCollation = Some view.CollationConnection }
-    Parser.parseViewDefinitionWithOptions options view.Definition |> Result.map _.Statement
+    Parser.parseSavedViewDefinitionWithOptions options view.Definition |> Result.map _.Statement
 
 let private isStoredView store defaultDatabase qualifiedName =
     let database, view = splitQualified defaultDatabase qualifiedName

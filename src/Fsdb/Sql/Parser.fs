@@ -204,9 +204,11 @@ type private QueryBlockCapture =
     { Selects: Dictionary<int, SelectStmt>
       CteBodies: ResizeArray<CommonTableExpr * string> }
 
+type private ParserContext = StatementSyntax | StoredProgramSyntax | SavedViewSyntax
+
 type private ParserState =
     { Options: ParserOptions
-      StoredProgramSyntax: bool
+      Context: ParserContext
       SourceText: string
       SourceOffsets: (int * int) array
       QueryBlocks: QueryBlockCapture option
@@ -236,7 +238,7 @@ let private activeOptions () =
     currentState.Value |> Option.map _.Options |> Option.defaultValue defaultOptions
 
 let private storedProgramSyntaxEnabled () =
-    currentState.Value |> Option.exists _.StoredProgramSyntax
+    currentState.Value |> Option.exists (fun state -> state.Context = StoredProgramSyntax)
 
 let private whenOption
     (enabled: ParserOptions -> bool)
@@ -1380,9 +1382,9 @@ let private positionOperand, positionOperandRef = createParserForwardedToRef<Exp
 /// by `selectStmt` once `tableRef`/`projection`/etc. exist.
 let private selectStmtRecord, selectStmtRecordRef = createParserForwardedToRef<SelectStmt, unit> ()
 
-let private selectWithCtes, selectWithCtesRef = createParserForwardedToRef<SelectStmt, unit> ()
-
 let private selectQuery, selectQueryRef = createParserForwardedToRef<SelectOrUnion, unit> ()
+
+let private selectWithCtes = selectQuery |>> SelectStmt.ofExpressionQuery
 
 /// `EXPLAIN stmt` wraps any other statement, including (in principle)
 /// another `EXPLAIN` — tie the same forward-reference knot so `explainStmt`
@@ -1840,7 +1842,21 @@ let private convertTypeExpr: Parser<Expr, unit> =
     |>> fun (((e, first, finish), target), charset) -> castConversion e first finish target charset
 
 let private existsExpr: Parser<Expr, unit> =
-    attempt (keyword "EXISTS" >>. sym "(" >>. selectWithCtes .>> sym ")") |>> Exists
+    attempt (keyword "EXISTS" >>. sym "(" >>. selectQuery .>> sym ")")
+    |>> fun query ->
+        // MySQL omits the outer EXISTS bounds when it serializes a view definition.
+        if (parserState ()).Context = SavedViewSyntax then
+            let outerQuery =
+                match query with
+                | PlainSelect select -> SelectStmt.expressionQuery select
+                | UnionSelect _ -> query
+
+            match outerQuery with
+            | PlainSelect select -> Exists { select with Limit = None; Offset = None }
+            | UnionSelect(first, rest, orderBy, _, _) ->
+                Exists(SelectStmt.ofExpressionQuery (UnionSelect(first, rest, orderBy, None, None)))
+        else
+            Exists(SelectStmt.ofExpressionQuery query)
 
 /// `(SELECT ...)` used as a value — tried with `attempt` ahead of parenthesized expressions
 /// since both start with `(`; a plain parenthesized expression never starts
@@ -4079,32 +4095,9 @@ let private unionOp: Parser<SetOp, unit> =
 let private selectOrUnionBranches, selectOrUnionBranchesRef =
     createParserForwardedToRef<(SelectStmt * bool) * (SetOp * (SelectStmt * bool)) list, unit> ()
 
-let private expressionSelect =
-    function
-    | PlainSelect select -> select
-    | (UnionSelect _ as body) ->
-        { Projections = [ Projection.create (Star None) None ]
-          IntoVariables = []
-          IntoFile = None
-          Distinct = false
-          CalculateFoundRows = false
-          StraightJoin = false
-          From = Some(FromLateral(body, SelectStmt.setExpressionAlias))
-          Joins = []
-          Where = None
-          GroupBy = []
-          Rollup = false
-          Windows = []
-          Ctes = []
-          Having = None
-          OrderBy = []
-          Limit = None
-          Offset = None
-          Locking = [] }
-
 let private parenthesizedSetBranch: Parser<SelectStmt * bool, unit> =
     attempt (sym "(" >>. selectQuery .>> sym ")")
-    |>> fun body -> expressionSelect body, true
+    |>> fun body -> SelectStmt.ofExpressionQuery body, true
 
 /// A whole set operation wrapped in one more layer of parens and standing on
 /// its own — `((SELECT ...) EXCEPT ALL (SELECT ...)) ORDER BY x`, the shape a
@@ -4602,9 +4595,6 @@ selectQueryRef.Value <-
                 fail "only the last query block can contain INTO"
             else
                 unionTailClause |>> fun tail -> combineUnion first rest tail |> UnionSelect
-
-selectWithCtesRef.Value <-
-    selectQuery |>> expressionSelect
 
 /// A single `SELECT`, or a `UNION`-chained sequence of them. Each
 /// branch is a full `selectStmtRecord` (so it can itself carry a trailing
@@ -5601,12 +5591,12 @@ let private runWithDepthLimit (parser: Parser<'value, unit>) (sql: string) : Res
     | SemanticParseError message -> Result.Error message
     | ex -> Result.Error ex.Message
 
-let private withParserStateCore queryBlocks storedProgramSyntax (options: ParserOptions) (sql: string) parse =
+let private withParserState queryBlocks context (options: ParserOptions) (sql: string) parse =
     let source = expandVersionComments options sql
     let rewritten, offsets = rewriteSqlForOptions options source
     let state =
         { Options = options
-          StoredProgramSyntax = storedProgramSyntax
+          Context = context
           SourceText = source
           SourceOffsets = offsets
           QueryBlocks = queryBlocks
@@ -5616,26 +5606,23 @@ let private withParserStateCore queryBlocks storedProgramSyntax (options: Parser
     DynamicScope.withThreadValue currentState (Some state) (fun () ->
         parse rewritten)
 
-let private withParserState storedProgramSyntax options sql parse =
-    withParserStateCore None storedProgramSyntax options sql parse
-
 let private withStatementParserState options sql parse =
-    withParserState false options sql parse
+    withParserState None StatementSyntax options sql parse
 
-let parseWithOptions (options: ParserOptions) (sql: string) : Result<Statement, string> =
+let private parseStatement context options sql =
     let full = ws >>. statement .>> opt (sym ";") .>> eof
-    withStatementParserState options sql (runWithDepthLimit full)
+    withParserState None context options sql (runWithDepthLimit full)
+
+let parseWithOptions options sql = parseStatement StatementSyntax options sql
 
 /// Optional source capture retains hint-owning SELECTs and CTE reparse text without changing the persisted AST.
 let internal parseQueryBlocksWithOptions options sql =
     let capture = { Selects = Dictionary<int, SelectStmt>(); CteBodies = ResizeArray() }
     let full = ws >>. statement .>> opt (sym ";") .>> eof
-    withParserStateCore (Some capture) false options sql (runWithDepthLimit full)
+    withParserState (Some capture) StatementSyntax options sql (runWithDepthLimit full)
     |> Result.map (fun statement -> statement, (capture.Selects |> Seq.map (fun pair -> pair.Key, pair.Value) |> Seq.sortBy fst |> List.ofSeq), List.ofSeq capture.CteBodies)
 
-let parseStoredStatementWithOptions (options: ParserOptions) (sql: string) : Result<Statement, string> =
-    let full = ws >>. statement .>> opt (sym ";") .>> eof
-    withParserState true options sql (runWithDepthLimit full)
+let parseStoredStatementWithOptions options sql = parseStatement StoredProgramSyntax options sql
 
 let parseWithAnsiQuotes (enabled: bool) (sql: string) : Result<Statement, string> =
     parseWithOptions { defaultOptions with AnsiQuotes = enabled } sql
@@ -5648,8 +5635,8 @@ type ParsedViewDefinition =
       Sql: string
       CheckOption: string }
 
-let parseViewDefinitionWithOptions options (sql: string) : Result<ParsedViewDefinition, string> =
-    let parsed = parseWithOptions options sql
+let private parseViewDefinitionSource parseDefinition (sql: string) : Result<ParsedViewDefinition, string> =
+    let parsed = parseDefinition sql
 
     let trailingCheckOption =
         Text.RegularExpressions.Regex.Match(
@@ -5677,7 +5664,7 @@ let parseViewDefinitionWithOptions options (sql: string) : Result<ParsedViewDefi
 
     let parsedDefinition =
         match checkOptionMatch with
-        | Some _ -> parseWithOptions options definition
+        | Some _ -> parseDefinition definition
         | None -> parsed
 
     parsedDefinition
@@ -5686,7 +5673,15 @@ let parseViewDefinitionWithOptions options (sql: string) : Result<ParsedViewDefi
           Sql = definition
           CheckOption = checkOption })
 
+let parseViewDefinitionWithOptions options sql =
+    parseViewDefinitionSource (parseWithOptions options) sql
+
 let parseViewDefinition sql = parseViewDefinitionWithOptions defaultOptions sql
+
+let internal parseSavedViewDefinitionWithOptions options sql =
+    parseViewDefinitionSource (parseStatement SavedViewSyntax options) sql
+
+let internal parseSavedViewDefinition sql = parseSavedViewDefinitionWithOptions defaultOptions sql
 
 let private maxLoadDataMarkerLength = 1
 let private maxLoadDataTerminatorLength = 16

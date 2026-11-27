@@ -952,6 +952,37 @@ module SelectStmt =
     // Expression subqueries use a SELECT wrapper to carry a set-operation body.
     let internal setExpressionAlias = "__fsdb_set_expression"
 
+    let private setExpressionWrapper =
+        { Projections = [ Projection.create (Star None) None ]
+          IntoVariables = []
+          IntoFile = None
+          Distinct = false
+          CalculateFoundRows = false
+          StraightJoin = false
+          From = None
+          Joins = []
+          Where = None
+          GroupBy = []
+          Rollup = false
+          Windows = []
+          Ctes = []
+          Having = None
+          OrderBy = []
+          Limit = None
+          Offset = None
+          Locking = [] }
+
+    let internal ofExpressionQuery = function
+        | PlainSelect select -> select
+        | UnionSelect _ as query -> { setExpressionWrapper with From = Some(FromLateral(query, setExpressionAlias)) }
+
+    let internal expressionQuery (select: SelectStmt) =
+        match select.From with
+        | Some(FromLateral((UnionSelect _ as query), alias))
+            when alias = setExpressionAlias && { select with From = None } = setExpressionWrapper ->
+            query
+        | _ -> PlainSelect select
+
     let hasDestination select =
         not select.IntoVariables.IsEmpty || select.IntoFile.IsSome
 

@@ -261,7 +261,7 @@ let rec private renderViewExpression (options: ViewRenderOptions) (context: View
     | Collate(value, collation) -> sprintf "(%s collate %s)" (render value) collation
     | Star qualifier -> (qualifier |> Option.map (quoteIdentifier >> fun value -> value + ".") |> Option.defaultValue "") + "*"
     | Exists select ->
-        let sql, _ = renderSelect options (nestedContext context) select
+        let sql, _ = renderSelectOrUnion options (nestedContext context) (SelectStmt.expressionQuery select)
         sprintf "exists(%s)" sql
     | Subquery select ->
         let sql, _ = renderSelect options (nestedContext context) select
@@ -660,7 +660,14 @@ and private renderSelectOrUnion (options: ViewRenderOptions) (context: ViewConte
     match query with
     | PlainSelect select -> renderSelect options context select
     | UnionSelect(first, rest, orderBy, limit, offset) ->
-        let firstSql, outputNames = renderSelect options context first
+        let renderBranch select =
+            let query = SelectStmt.expressionQuery select
+            let sql, columns = renderSelectOrUnion options context query
+            match query with
+            | PlainSelect branch when branch.OrderBy.IsEmpty && branch.Limit.IsNone && branch.Offset.IsNone -> sql, columns
+            | _ -> "(" + sql + ")", columns
+
+        let firstSql, outputNames = renderBranch first
 
         let restSql =
             rest
@@ -674,7 +681,7 @@ and private renderSelectOrUnion (options: ViewRenderOptions) (context: ViewConte
                     | OpExcept false -> "except"
                     | OpExcept true -> "except all"
 
-                let sql, _ = renderSelect options context select
+                let sql, _ = renderBranch select
                 operatorText + " " + sql)
 
         let orderContext =
