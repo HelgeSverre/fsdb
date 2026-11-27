@@ -233,6 +233,30 @@ let tests =
                   for query, expected in [ "中ɥ", [ 2 ]; "中Ꭰ", [ 3 ]; "中ß", smallSharpS ] do
                       Expect.equal (booleanScores index ("\"" + query + "\"") |> ids) expected (name + " Boolean " + query)
 
+          testCase "legacy utf8mb3 ngram postings fold Kana and keep Hangul syllables distinct from Jamo"
+          <| fun _ ->
+              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let documents =
+                  [ "か"; "ガ"; "ｶ"; "ゕ"; "が"; "ｶﾞ"; "하"; "하"; "ᄒ" ]
+                  |> List.mapi (fun i text -> i + 1, rules, [ text + "中"; "日" + text ])
+              let collation = tryFind "utf8mb3_unicode_ci" |> Option.get
+              let index = buildIndexWithDocumentSettings rules collation documents
+              for view in [ index; flushPostings index ] do
+                  let ids scores = scores |> Map.keys |> Seq.toList
+                  Expect.equal (naturalScores view "ガ中" |> ids) [ 1; 2; 3; 4 ] "exact gram matches Kana width, script, size, and voice"
+                  Expect.equal (booleanScores view "ｶ*" |> ids) [ 1; 2; 3; 4; 5; 6 ] "prefix also reaches decomposed voicing"
+                  Expect.equal (booleanScores view "하*" |> ids) [ 7 ] "Hangul syllable does not compose from Jamo postings"
+                  Expect.equal (booleanScores view "ᄒ*" |> ids) [ 8; 9 ] "leading Jamo still matches the decomposed spelling"
+
+          testCase "ngram Kana ligatures share bidirectional wildcard keys in Unicode collations"
+          <| fun _ ->
+              let documents = [ 1, "ヿ中"; 2, "こと中"; 3, "ゟ中"; 4, "より中"; 5, "花束" ]
+              for name in [ "utf8mb3_unicode_ci"; "utf8mb4_unicode_ci"; "utf8mb4_unicode_520_ci"; "utf8mb4_0900_ai_ci" ] do
+                  let index = buildIndexWithTokenizer (Ngrams 2) (tryFind name |> Option.get) documents
+                  for term, expected in [ "ヿ*", [ 1; 2 ]; "こ*", [ 1; 2 ]; "ゟ*", [ 3; 4 ]; "よ*", [ 3; 4 ] ] do
+                      let ids = booleanScores index term |> Map.keys |> Seq.toList
+                      Expect.equal ids expected (name + " " + term)
+
           testCase "Unicode 5.2 ngrams share padded space keys but retain Mongolian separator weight"
           <| fun _ ->
               let collation = tryFind "utf8mb4_unicode_520_ci" |> Option.get

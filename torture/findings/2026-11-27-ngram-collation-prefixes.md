@@ -30,9 +30,10 @@ across token sizes 1–10. A durable database created before the fix
 returned the corrected results on reopen, including a wildcard after
 a phrase on flushed postings.
 
-The mixed bigram corpus still shows six `utf8mb3_unicode_ci` membership
-differences involving Kana and Hangul equivalence. Accent-sensitive
-wildcards and broader flushed-posting ranking also remain open.
+The [Kana and Jamo follow-up](2026-11-27-ngram-kana-and-jamo.md) covers
+the outstanding Kana and Hangul equivalences in a dedicated mixed
+corpus. Accent-sensitive wildcards and broader flushed-posting ranking
+remain open.
 
 MySQL's [InnoDB wildcard cache search](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L844-L875)
 uses the [UCA prefix comparison](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/strings/ctype-uca.cc#L1667-L1717).

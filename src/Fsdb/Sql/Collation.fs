@@ -702,17 +702,30 @@ let private foldUnicode520LetterlikeForms (value: string) =
             | _ -> result.Append(c) |> ignore
         result.ToString()
 
-// UCA 4.0 expands kana ligatures and folds the small katakana extension
-// before ordinary kana and accent folding.
+let private kanaLigatureExpansion = function
+    | 'ゟ' -> Some "より"
+    | 'ヿ' -> Some "コト"
+    | _ -> None
+
+let private foldKanaLigatures (value: string) =
+    if not (value.Contains('ゟ') || value.Contains('ヿ')) then value
+    else
+        let result = StringBuilder(value.Length)
+        for c in value do
+            match kanaLigatureExpansion c with
+            | Some expansion -> result.Append(expansion) |> ignore
+            | None -> result.Append(c) |> ignore
+        result.ToString()
+
+// UCA 4.0 also folds the small Katakana extension.
 let private foldLegacyKanaForms (value: string) =
     let ordinary = "クシストヌハヒフヘホムラリルレロ"
-    if not (value |> Seq.exists (fun c -> c = 'ゟ' || c = 'ヿ' || (c >= '\u31F0' && c <= '\u31FF'))) then value
+    let value = foldKanaLigatures value
+    if not (value |> Seq.exists (fun c -> c >= '\u31F0' && c <= '\u31FF')) then value
     else
         let result = StringBuilder(value.Length)
         for c in value do
             match c with
-            | 'ゟ' -> result.Append("より") |> ignore
-            | 'ヿ' -> result.Append("コト") |> ignore
             | c when c >= '\u31F0' && c <= '\u31FF' -> result.Append(ordinary.[int c - 0x31F0]) |> ignore
             | c -> result.Append(c) |> ignore
         result.ToString()
@@ -1576,6 +1589,7 @@ let internal fullTextPrefixExpansion name (rune: Rune) =
         | 0x00DF -> Some "ss"
         | 0x1E9E when not uca400 -> Some "ss"
         | 0x0152 | 0x0153 -> Some "oe"
+        | 0x309F | 0x30FF -> kanaLigatureExpansion (char rune.Value)
         | 0x2150 | 0x2151 | 0x2152 | 0x2189 | 0x327E when uca400 -> None
         | 0x32FF -> None // UCA 9 predates this Japanese era symbol.
         | value ->
@@ -1680,9 +1694,12 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             foldGeneral false s |> trim
         elif name = "utf8mb4_unicode_520_ci" then
             // MySQL's ngram index keeps the older token equivalence classes.
-            foldUnicode520 false s |> trim
+            s |> foldKanaLigatures |> foldUnicode520 false |> trim
         elif name = "utf8mb3_unicode_ci" then
-            foldFullwidthAscii s |> trim
+            s |> foldFullwidthAscii |> foldLegacyKanaForms |> foldKanaVariants
+              |> foldSmallKana |> foldLegacyUnicodeJamo |> trim
+        elif name = "utf8mb4_0900_ai_ci" then
+            s |> foldKanaLigatures |> primaryText
         elif name = "utf8mb4_ja_0900_as_cs_ks" then
             s |> markJapaneseHiraganaForFullText |> foldJapaneseCompatibility |> trim
         else primaryText s
