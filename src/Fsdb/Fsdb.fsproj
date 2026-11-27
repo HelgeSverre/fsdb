@@ -41,8 +41,9 @@
     <Compile Include="Sql/Regexp.fs" />
     <Compile Include="Sql/Temporal.fs" />
     <Compile Include="Sql/TemporalLocale.fs" />
-    <Compile Include="Sql/Value.fs" />
     <Compile Include="Sql/SpatialReferenceSystems.fs" />
+    <Compile Include="Sql/Value.fs" />
+    <Compile Include="Sql/GeometryCoordinates.fs" />
     <Compile Include="Sql/GeographicIntersection.fs" />
     <Compile Include="Sql/GeometryOperations.fs" />
     <Compile Include="Sql/Privileges.fs" />

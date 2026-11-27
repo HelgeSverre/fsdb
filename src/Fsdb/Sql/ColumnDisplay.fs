@@ -28,7 +28,7 @@ let renderOutputValue format value =
     let text =
         match format.Column |> Option.bind _.NumericDisplay, value with
         | _, VGeometry geometry ->
-            SpatialReferenceSystems.geometryToSqlBinary geometry |> System.Text.Encoding.Latin1.GetString |> Some
+            Value.geometryToSqlBinary geometry |> System.Text.Encoding.Latin1.GetString |> Some
         | Some display, VDouble number ->
             match display.Decimals with
             | Some decimals -> Some(Value.formatDoubleWithScale decimals number)

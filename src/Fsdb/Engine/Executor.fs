@@ -6412,6 +6412,7 @@ let private isTextColumn column =
         | _ -> false)
 
 let private compareWithColumnDomain
+    (ctx: EvalContext)
     (leftExpr: Expr) (leftColumn: ColumnDef option) left
     (rightExpr: Expr) (rightColumn: ColumnDef option) right =
     match left, right with
@@ -6425,6 +6426,10 @@ let private compareWithColumnDomain
     let rowDependent expression =
         Expression.exists (function Col _ | QualifiedCol _ -> true | _ -> false) expression
     match left, right with
+    | VGeometry _, VString text ->
+        Value.compare left (VBytes(Charset.encode (sourceCharset ctx rightExpr) text))
+    | VString text, VGeometry _ ->
+        Value.compare (VBytes(Charset.encode (sourceCharset ctx leftExpr) text)) right
     | VInt integer, VDouble bound
         when isIntegerColumn leftColumn && rightColumn.IsNone && not (rowDependent rightExpr) ->
         Value.compareIntegerToDouble (bigint integer) bound
@@ -6469,7 +6474,7 @@ let private resolvedCompareWithColumns
     | Some sa, Some sb ->
         comparisonCollation ctx operation leftExpr leftColumn rightExpr rightColumn
         |> Result.map (fun collation -> collation.ComparePrimary sa sb)
-    | _ -> Ok(compareWithColumnDomain leftExpr leftColumn pa rightExpr rightColumn pb)
+    | _ -> Ok(compareWithColumnDomain ctx leftExpr leftColumn pa rightExpr rightColumn pb)
 
 let private resolvedCompare (ctx: EvalContext) (operation: string) (leftExpr: Expr) (left: Value) (rightExpr: Expr) (right: Value) : Result<int, EvalError> =
     resolvedCompareWithColumns
@@ -6538,7 +6543,7 @@ let private comparisonResult
                     (collation.ComparePrimary leftText rightText)
                     (collation.Equals leftText rightText))
         | _ ->
-            let compared = compareWithColumnDomain leftExpr leftColumn comparedLeft rightExpr rightColumn comparedRight
+            let compared = compareWithColumnDomain ctx leftExpr leftColumn comparedLeft rightExpr rightColumn comparedRight
             Ok(finish compared (compared = 0))
 
 let private comparisonResultWithNulls
@@ -7711,8 +7716,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 | VEncodedString(_, bytes)
                 | VBinaryLiteral bytes
                 | VBytes bytes -> VBytes bytes
-                | VGeometry geometry when (Value.tryGeometrySqlEncoding geometry).IsSome ->
-                    VBytes(SpatialReferenceSystems.geometryToSqlBinary geometry)
+                | VGeometry geometry -> VBytes(Value.geometryToSqlBinary geometry)
                 | _ ->
                     let text = displayValueForText ctx e source |> Value.toText |> Option.defaultValue ""
                     VBytes(Charset.encode (sourceCharset ctx e) text)

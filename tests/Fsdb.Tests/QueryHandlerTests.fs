@@ -5628,6 +5628,27 @@ let tests =
                       [ TypeGeometry, BinaryFlag ] "prepared GEOMETRY result"
               | Error error -> failtestf "expected ST_Validate to prepare, got %A" error
 
+          testCase "geometry equality and binary casts use the SQL geometry bytes"
+          <| fun _ ->
+              let cartesian = "00000000010100000000000000000024400000000000004E40"
+              let geographic = "E6100000010100000000000000000024400000000000004E40"
+              let literal = $"X'{geographic}'"
+              let geometry = $"ST_Validate({literal})"
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE byte_shapes(id INT PRIMARY KEY, g GEOMETRY, b VARBINARY(100))"
+                        $"INSERT INTO byte_shapes VALUES (1,ST_Validate(X'{cartesian}'),X'{cartesian}'),(2,{geometry},{literal})" ]
+
+              let scalar =
+                  $"SELECT {geometry}={literal}, 0x{geographic}<=>{geometry}, {geometry}<>UNHEX('{geographic}'), {geometry} IN (SELECT {literal}), CASE {geometry} WHEN {literal} THEN 1 ELSE 0 END, NULLIF({geometry},{literal}) IS NULL, HEX(CAST({geometry} AS BINARY)), HEX(CAST({geometry} AS BINARY(27)))"
+              match run scalar with
+              | ResultSet(_, [ row ]) ->
+                  Expect.equal row ([ "1"; "1"; "0"; "1"; "1"; "1"; geographic; geographic + "0000" ] |> List.map Some) scalar
+              | other -> failtestf "expected geometry comparison result, got %A" other
+
+              let join = "SELECT a.id AS id FROM byte_shapes a JOIN byte_shapes b ON a.g=b.b ORDER BY a.id"
+              Expect.equal (run join) (ResultSet([ "id" ], [ [ Some "1" ]; [ Some "2" ] ])) join
+
           testCase "ST_IsSimple distinguishes repeated coordinates and intersecting interiors from validity"
           <| fun _ ->
               let run = queryFixture [ "USE fsdb" ]

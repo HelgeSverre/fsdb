@@ -46,7 +46,30 @@ big-endian or mixed-endian multi-geometry comparisons. A prepared
 statement matched result metadata and bytes for nine BLOB parameters
 tested individually in both modes.
 Six values cast to BLOB matched MySQL before and after a durable restart.
-Two differences remain. Direct equality against a binary literal still
-differs for canonical little-endian multi-geometries. MySQL returns 1210
-for an execute packet that declares a `MYSQL_TYPE_GEOMETRY` parameter,
-which fsdb accepts.
+
+## Geometry equality and binary casts
+
+Equality with a hex literal, a binary column, or another geometry
+compares the complete SRID-prefixed byte strings. Binary casts preserve
+those bytes and apply the requested width. The same encoding serves
+SQL result output, including longitude-first bytes in geographic
+reference systems. [MySQL equality comparison](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/item_cmpfunc.cc#L3443-L3464)
+
+Both storage modes matched 2,016 result cells across all seven WKB
+shape types, SRIDs 0, 3857, 4326, and 4258, and little-endian, big-endian,
+and mixed byte orders. The cases cover equality, inequality, NULL-safe
+equality, list and subquery membership, simple CASE, NULLIF, STRCMP, and
+binary casts.
+An additional 19 SELECTs matched on tables with an indexed VARBINARY
+column, including joins and correlated subqueries. The same SELECTs
+matched after a durable restart.
+
+Prepared equality matched the 16 executed results with BLOB bindings.
+MySQL advertises a GEOMETRY parameter for `ST_Validate(...) = ?` and
+sets the binary flag on the integer result. Fsdb still advertises
+VAR_STRING and omits that result flag. MySQL also returns 1210 for an
+execute packet that declares a `MYSQL_TYPE_GEOMETRY` parameter, which
+fsdb accepts. Typed geometry ordering operators and BETWEEN still
+return values where MySQL rejects the expressions with 1210. Audited
+geometry-to-number equality returns the same values with a missing
+1292 warning in fsdb.

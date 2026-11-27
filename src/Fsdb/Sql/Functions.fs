@@ -19,6 +19,7 @@ open Fsdb.Ast
 open Fsdb.Sql
 open Fsdb.Value
 open Fsdb.Temporal
+open Fsdb.GeometryCoordinates
 open Fsdb.GeometryOperations
 open Fsdb.SpatialReferenceSystems
 
@@ -5766,14 +5767,14 @@ let private geometryArgument functionName = function
 let private legacyGeometryArgument functionName value =
     let geometry = geometryArgument functionName value
     match tryGeometrySqlEncoding geometry with
-    | Some encoding when encoding.Bytes.[4] = 0uy ->
+    | Some bytes when bytes.[4] = 0uy ->
         raise (SqlError(3055, "Geometry byte string must be little endian."))
     | Some _ ->
         raise (SqlError(3037, $"Invalid GIS data provided to function {functionName.ToLowerInvariant()}."))
     | None -> geometry
 
 let private validateGeometryParameter (functionName: string) geometry =
-    match SpatialReferenceSystems.tryGeometryParameterDomainError geometry with
+    match GeometryCoordinates.tryGeometryParameterDomainError geometry with
     | None -> geometry
     | Some error ->
         let code, coordinate, value, range =
@@ -5862,7 +5863,7 @@ let private raiseCoordinateDomainError (functionName: string) = function
 
 let private validateGeographicCoordinates functionName (geometry: Geometry) =
     geometry
-    |> SpatialReferenceSystems.tryCoordinateDomainError
+    |> GeometryCoordinates.tryCoordinateDomainError
     |> Option.iter (raiseCoordinateDomainError functionName)
 
     geometry
@@ -5874,7 +5875,7 @@ let private prepareConstructedGeometry (functionName: string) axisOrder (geometr
     match referenceSystem.SemiMajorAxis with
     | Some _ ->
         geometry
-        |> SpatialReferenceSystems.withAxisOrder suppliedOrder
+        |> GeometryCoordinates.withAxisOrder suppliedOrder
         |> validateGeographicCoordinates functionName
     | None -> geometry
 
@@ -5883,7 +5884,7 @@ let private prepareSerializedGeometry (functionName: string) axisOrder (geometry
     let requestedOrder = geometryAxisOrder functionName referenceSystem axisOrder
 
     match referenceSystem.SemiMajorAxis with
-    | Some _ -> SpatialReferenceSystems.withAxisOrder requestedOrder geometry
+    | Some _ -> GeometryCoordinates.withAxisOrder requestedOrder geometry
     | None -> geometry
 
 let private unsupportedGeographicFunction functionName =
@@ -5961,7 +5962,7 @@ let private geometryFromWkbFn requiredKind functionName: Scalar =
 let private geometryToTextFn functionName: Scalar =
     let serialize value axisOrder =
         let geometry = legacyGeometryArgument functionName value
-        if SpatialReferenceSystems.hasNonFiniteCoordinates geometry then VNull
+        if GeometryCoordinates.hasNonFiniteCoordinates geometry then VNull
         else geometry |> prepareSerializedGeometry functionName axisOrder |> geometryToText |> VString
 
     function
@@ -6038,7 +6039,7 @@ let private geometrySridFn: Scalar =
     | [ VNull ] -> VNull
     | [ value ] ->
         let geometry = geometryArgument "ST_SRID" value
-        if SpatialReferenceSystems.hasNonFiniteCoordinates geometry then
+        if GeometryCoordinates.hasNonFiniteCoordinates geometry then
             raise (SqlError(3037, "Invalid GIS data provided to function st_srid."))
         VInt(int64 (validateGeometryParameter "ST_SRID" geometry).Srid)
     | [ _; _ ] -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_SRID geometry mutation'"))
@@ -6069,12 +6070,12 @@ let private geometryTransformFn: Scalar =
             let transform =
                 SpatialReferenceSystems.tryCoordinateTransform sourceSrid targetSrid
                 |> Option.defaultWith (fun () -> geometryError "ST_Transform" "the coordinate transformation is not supported")
-            let transformed = SpatialReferenceSystems.mapGeometry transform geometry
+            let transformed = GeometryCoordinates.mapGeometry transform geometry
             if targetReferenceSystem.SemiMajorAxis.IsSome
-               && (SpatialReferenceSystems.tryTransformedCoordinateDomainError transformed |> Option.isSome) then
+               && (GeometryCoordinates.tryTransformedCoordinateDomainError transformed |> Option.isSome) then
                 VNull
             else
-                VGeometry(SpatialReferenceSystems.withSrid targetSrid transformed)
+                VGeometry(GeometryCoordinates.withSrid targetSrid transformed)
     | _ -> nativeParameterCountError "st_transform"
 
 let private geometrySwapXYFn: Scalar =
@@ -6082,7 +6083,7 @@ let private geometrySwapXYFn: Scalar =
     | [ VNull ] -> VNull
     | [ value ] ->
         geometryArgument "ST_SwapXY" value
-        |> SpatialReferenceSystems.mapGeometry (fun (x, y) -> y, x)
+        |> GeometryCoordinates.mapGeometry (fun (x, y) -> y, x)
         |> VGeometry
     | _ -> nativeParameterCountError "st_swapxy"
 
@@ -6299,16 +6300,14 @@ let private gisGeometryArgumentWith decode functionName value =
     |> validateGeometryParameter functionName
 
 let private gisGeometryArgument functionName value =
-    let decode bytes = tryGeometryFromMySqlBinary bytes |> Option.map SpatialReferenceSystems.swapMySqlGeographicAxes
+    let decode bytes = tryGeometryFromMySqlBinary bytes |> Option.map GeometryCoordinates.swapMySqlGeographicAxes
     gisGeometryArgumentWith decode functionName value
 
 let private validatedGeometryArgument functionName value =
     let decode bytes =
         tryGeometryFromMySqlBinaryWithByteOrder bytes |> Option.map (fun struct (decoded, hasBigEndian) ->
-            let geometry = SpatialReferenceSystems.swapMySqlGeographicAxes decoded
-            if hasBigEndian then
-                let geographic = SpatialReferenceSystems.tryFind geometry.Srid |> Option.exists (fun srs -> srs.SemiMajorAxis.IsSome)
-                retainGeometrySqlEncoding geographic bytes geometry
+            let geometry = GeometryCoordinates.swapMySqlGeographicAxes decoded
+            if hasBigEndian then retainGeometrySqlEncoding bytes geometry
             else geometry)
     gisGeometryArgumentWith decode functionName value
 
@@ -6330,7 +6329,7 @@ let private gisGeometryTypeName shape =
     | kind -> geometryTypeName kind
 
 let private requireWellFormedGisGeometry functionName (geometry: Geometry) =
-    if not (geometryShapeIsWellFormed geometry.Shape) || SpatialReferenceSystems.hasNonFiniteCoordinates geometry then
+    if not (geometryShapeIsWellFormed geometry.Shape) || GeometryCoordinates.hasNonFiniteCoordinates geometry then
         raise (SqlError(3037, $"Invalid GIS data provided to function {functionName}."))
 
 let private geometryValidityFn (name: string) project: Scalar =
@@ -6438,7 +6437,7 @@ let private pointPropertyFn (functionName: string) coordinate: Scalar =
                 raise (SqlError(1690, $"DOUBLE value is out of range in '{name}'"))
             let nextX, nextY = if first then number, y else x, number
             let updated = { geometry with Shape = GPoint(nextX, nextY) }
-            SpatialReferenceSystems.tryGeometryParameterDomainError updated
+            GeometryCoordinates.tryGeometryParameterDomainError updated
             |> Option.iter (function
                 | LatitudeOutOfRange _ -> raiseCoordinateDomainError name (LatitudeOutOfRange number)
                 | LongitudeOutOfRange _ -> raiseCoordinateDomainError name (LongitudeOutOfRange number))
@@ -6532,7 +6531,7 @@ let private geometryDistanceSphereFn: Scalar =
 
         points
         |> List.iter (fun point ->
-            SpatialReferenceSystems.tryPointDomainError point
+            GeometryCoordinates.tryPointDomainError point
             |> Option.iter (raiseCoordinateDomainError functionName))
 
         points

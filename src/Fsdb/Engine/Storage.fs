@@ -3103,7 +3103,7 @@ let private spatialEnvelopeAt (group: SpatialKeyGroup) (row: Value[]) =
 
     match row.[group.ColumnIndex], group.Geography with
     | VGeometry geometry, Some referenceSystem ->
-        if SpatialReferenceSystems.tryGeometryParameterDomainError geometry |> Option.isSome then
+        if GeometryCoordinates.tryGeometryParameterDomainError geometry |> Option.isSome then
             Some SpatialIndex.Envelope.Invalid
         else
             GeometryOperations.geographicMbrBounds referenceSystem geometry
@@ -6451,7 +6451,7 @@ let internal trySpatialLookupInTableWhere
             |> Option.bind (fun group ->
                 table.SpatialIndexes
                 |> Map.tryFind group.Name
-                |> Option.filter (fun _ -> SpatialReferenceSystems.tryGeometryParameterDomainError geometry |> Option.isNone)
+                |> Option.filter (fun _ -> GeometryCoordinates.tryGeometryParameterDomainError geometry |> Option.isNone)
                 |> Option.bind (spatialCandidateIds disjointLimit probe group.Geography geometry)
                 |> Option.map (fun candidates ->
                     let rows =

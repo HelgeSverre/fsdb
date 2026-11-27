@@ -36,14 +36,12 @@ and Geometry =
     { Srid: int
       Shape: GeometryShape }
 
-type internal GeometrySqlEncoding = { Bytes: byte[]; Geographic: bool }
-
 // ST_Validate can return its input bytes verbatim. Keep that representation
 // on the returned instance without changing geometric equality or constructors.
-let private originalGeometrySql = Runtime.CompilerServices.ConditionalWeakTable<Geometry, GeometrySqlEncoding>()
+let private originalGeometrySql = Runtime.CompilerServices.ConditionalWeakTable<Geometry, byte[]>()
 
-let internal retainGeometrySqlEncoding geographic bytes geometry =
-    originalGeometrySql.Add(geometry, { Bytes = Array.copy bytes; Geographic = geographic })
+let internal retainGeometrySqlEncoding bytes geometry =
+    originalGeometrySql.Add(geometry, Array.copy bytes)
     geometry
 
 let internal tryGeometrySqlEncoding geometry =
@@ -287,13 +285,23 @@ let private geometryToWkbInAxisOrder reverseAxes (geometry: Geometry) : byte[] =
 
 let geometryToWkb geometry = geometryToWkbInAxisOrder false geometry
 
-let internal geometryToMySqlBinaryInAxisOrder reverseAxes (geometry: Geometry) : byte[] =
+let private geometryToMySqlBinaryInAxisOrder reverseAxes (geometry: Geometry) : byte[] =
     let writer = Writer()
     writer.WriteInt32LE geometry.Srid
     writer.WriteBytes(geometryToWkbInAxisOrder reverseAxes geometry)
     writer.ToArray()
 
 let geometryToMySqlBinary geometry = geometryToMySqlBinaryInAxisOrder false geometry
+
+let private canonicalGeometrySqlBinary geometry =
+    geometryToMySqlBinaryInAxisOrder (SpatialReferenceSystems.isGeographic geometry.Srid) geometry
+
+/// SQL uses longitude first for geographic coordinates, independently of
+/// the internal encoder used for persistence and public geometry values.
+let internal geometryToSqlBinary geometry =
+    match tryGeometrySqlEncoding geometry with
+    | Some bytes -> Array.copy bytes
+    | None -> canonicalGeometrySqlBinary geometry
 
 let private decodeGeometryWkb allowNonFinitePoint (srid: int) (bytes: byte[]) =
     let mutable position = 0
@@ -1305,7 +1313,7 @@ let toText (v: Value) : string option =
     | VZeroDateTime dt -> Some(formatZeroDateTime dt)
     | VJson j -> Some j
     | VGeometry geometry ->
-        let bytes = tryGeometrySqlEncoding geometry |> Option.map _.Bytes |> Option.defaultWith (fun () -> geometryToMySqlBinary geometry)
+        let bytes = tryGeometrySqlEncoding geometry |> Option.defaultWith (fun () -> geometryToMySqlBinary geometry)
         Some(Text.Encoding.Latin1.GetString bytes)
 
 /// Renders a value at a declared fractional-seconds precision (fsp 0-6),
@@ -1887,16 +1895,9 @@ let compareDecimalToDouble (number: decimal) (floating: float) =
         else
             Operators.compare (signedCoefficient <<< -exponent) (signedSignificand * decimalFactor)
 
-let private (|OriginalGeometrySql|_|) = tryGeometrySqlEncoding
-
-let private compareGeometryBytes (left: Geometry) (right: Geometry) =
-    let encodePeer geometry (source: Geometry) encoding =
-        geometryToMySqlBinaryInAxisOrder (encoding.Geographic && geometry.Srid = source.Srid) geometry
-    match tryGeometrySqlEncoding left, tryGeometrySqlEncoding right with
-    | Some first, Some second -> compareBytesLex first.Bytes second.Bytes
-    | Some original, None -> compareBytesLex original.Bytes (encodePeer right left original)
-    | None, Some original -> compareBytesLex (encodePeer left right original) original.Bytes
-    | None, None -> compareBytesLex (geometryToMySqlBinary left) (geometryToMySqlBinary right)
+let private geometryComparisonBytes geometry =
+    tryGeometrySqlEncoding geometry
+    |> Option.defaultWith (fun () -> canonicalGeometrySqlBinary geometry)
 
 /// Total order over values for ORDER BY: NULL sorts first, numbers compare
 /// numerically (a number vs. a string coerces the string to a number, so
@@ -1956,8 +1957,15 @@ let rec compare (a: Value) (b: Value) : int =
     | VString x, VString y -> compareStrings x y
     | VBit(_, value), VBinaryLiteral bytes -> compareBitBytes value bytes
     | VBinaryLiteral bytes, VBit(_, value) -> -(compareBitBytes value bytes)
-    | VGeometry(OriginalGeometrySql encoding), (VBytes bytes | VBinaryLiteral bytes) -> compareBytesLex encoding.Bytes bytes
-    | (VBytes bytes | VBinaryLiteral bytes), VGeometry(OriginalGeometrySql encoding) -> compareBytesLex bytes encoding.Bytes
+    | VGeometry x, VGeometry y -> compareBytesLex (geometryComparisonBytes x) (geometryComparisonBytes y)
+    | VGeometry geometry, (VBytes bytes | VBinaryLiteral bytes | VEncodedString(_, bytes)) ->
+        compareBytesLex (geometryComparisonBytes geometry) bytes
+    | (VBytes bytes | VBinaryLiteral bytes | VEncodedString(_, bytes)), VGeometry geometry ->
+        compareBytesLex bytes (geometryComparisonBytes geometry)
+    | VGeometry geometry, VString text ->
+        compareBytesLex (geometryComparisonBytes geometry) (Text.Encoding.UTF8.GetBytes text)
+    | VString text, VGeometry geometry ->
+        compareBytesLex (Text.Encoding.UTF8.GetBytes text) (geometryComparisonBytes geometry)
     | VBinaryLiteral x, VBinaryLiteral y -> compareBytesLex x y
     | VBinaryLiteral x, (VBytes _ | VString _) -> compare (VBytes x) b
     | (VBytes _ | VString _), VBinaryLiteral y -> compare a (VBytes y)
@@ -1969,7 +1977,6 @@ let rec compare (a: Value) (b: Value) : int =
     // character collation the generic text fallback below would apply.
     | VBytes x, VString s -> compareBytesLex x (Text.Encoding.UTF8.GetBytes s)
     | VString s, VBytes y -> compareBytesLex (Text.Encoding.UTF8.GetBytes s) y
-    | VGeometry x, VGeometry y -> compareGeometryBytes x y
     | VDate x, VDate y -> Operators.compare x y
     | VDateTime x, VDateTime y -> Operators.compare x y
     | VTimestamp x, VTimestamp y -> Operators.compare x y
