@@ -3534,7 +3534,10 @@ implementation effort:
    lobes. Shared-edge intersection now follows the source ring and
    preserves its vertices. Remaining gaps include some cuts at the
    clipping ring's start, serialized ring starts, member ordering,
-   polar endpoints, and general mixed-collection overlays.
+   and polar endpoints. [Geographic collection difference](torture/findings/2026-11-26-geographic-polygon-union.md#mixed-collection-difference)
+   normalizes areas, lines, and points before applying the mask.
+   General mixed-collection intersection and symmetric difference
+   remain open.
    Broader geographic polygon relation and precision rules remain open.
    Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
    and [line-to-line distance](torture/findings/2026-10-11-geographic-line-line-distance.md)

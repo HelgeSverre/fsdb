@@ -764,6 +764,36 @@ let tests =
                         Expect.equal (call "ST_SRID" [ result ]) (VInt 4326L) "the operation retains the SRID"
                         Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"{operation} of {left} and {right}"
 
+                testCase "geographic collection difference normalizes source dimensions before subtraction"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let area = "POLYGON((0 -2,4 -2,4 2,0 2,0 -2))"
+                    let line = "LINESTRING(-2 0,6 0)"
+                    let point = "POINT(-3 0)"
+                    let mixed = $"GEOMETRYCOLLECTION({area},{line},MULTIPOINT((-3 0),(2 0),(5 0)))"
+                    let clip = "GEOMETRYCOLLECTION(GEOMETRYCOLLECTION(POLYGON((1 -1,3 -1,3 1,1 1,1 -1)),LINESTRING(4 0,5 0)),POINT(-3 0))"
+                    let distant = "POLYGON((10 -2,14 -2,14 2,10 2,10 -2))"
+                    let holed = "POLYGON((0 -2,4 -2,4 2,0 2,0 -2),(1 -1,1 1,3 1,3 -1,1 -1))"
+                    let difference first second = call "ST_Difference" [ geometry first; geometry second ]
+                    for first, second, expected in
+                        [ area, clip, holed
+                          line, clip, "MULTILINESTRING((-2 0,1 0),(3 0,4 0),(5 0,6 0))"
+                          mixed, line, $"GEOMETRYCOLLECTION({area},{point})"
+                          clip, mixed, "GEOMETRYCOLLECTION EMPTY"
+                          $"GEOMETRYCOLLECTION({area},{point})", point, area
+                          $"GEOMETRYCOLLECTION({area},{distant},{point})", point, $"GEOMETRYCOLLECTION({distant},{area})" ] do
+                        Expect.equal (call "ST_AsText" [ difference first second; axis ]) (VString expected) $"difference of {first} and {second}"
+
+                    match difference mixed clip with
+                    | VGeometry { Srid = 4326
+                                  Shape = GGeometryCollection [ polygon;
+                                                                 { Shape = GLineString [ (0.0, -2.0); (0.0, cut) ] };
+                                                                 { Shape = GLineString [ (0.0, 5.0); (0.0, 6.0) ] } ] } ->
+                        Expect.isLessThan (abs cut) 1e-10 "the first line stops at the original area"
+                        Expect.equal (call "ST_AsText" [ VGeometry polygon; axis ]) (VString holed) "the mask opens a hole without restoring covered points or lines"
+                    | actual -> failtestf "expected one polygon and two exterior lines, got %A" actual
+
                 testCase "geographic polygon intersection follows the first shared ring"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"

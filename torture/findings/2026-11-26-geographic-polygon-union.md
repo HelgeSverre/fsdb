@@ -126,3 +126,39 @@ rounds each coordinate to 10 decimal places. In the 15 remaining cases
 MySQL splits a shared line at the clipping ring's start while Fsdb
 returns one continuous line. All 612 earlier polygon comparisons
 retained their previous Fsdb results.
+
+### Mixed collection difference
+
+`ST_Difference` first dissolves the source collection's polygons,
+clips its lines against those polygons, and removes points covered by
+either. It then subtracts each mask member in collection order from
+each surviving dimension. A polygon cut can create a hole without
+reintroducing lines or points that the original area covered. When
+the normalized source has several dimensions, result members appear
+in area, line, point order. If several members survive in one
+dimension, they can still be returned as a geometry collection.
+[MySQL collection normalization](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/gc_utils.cc#L124-L169) [MySQL collection difference](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/difference_functor.cc#L43-L96)
+
+The wire audit ran 72 pairs in both orders at SRIDs 4326, 4269, and
+4267 against pinned MySQL 8.4.11. Seed `183` generated 18 sets of
+rectangles, lines, and points. Each set put a nested mixed collection,
+polygon, line, and point against a mixed mask. The masks covered
+contained, crossing, and disjoint polygons as well as overlapping
+and disjoint lines and points. The baseline at `f16ac022` returned
+error 1235 in 378 of 432 cases. Fsdb now returns geometry with the
+same SQL type and planar Hausdorff distance below 0.0001° in all 432
+cases, including pairs of empty results. Memory and WAL results are
+identical. Normalized members and vertices agree within 10⁻⁸ degrees
+in 422 cases. Exact WKT matches in 297 cases. The remaining numerical
+and serialization differences include ring starts and rounded
+crossing coordinates.
+
+Eleven additional controls checked for covered members, nested masks,
+and narrowing. Seven matched exact WKT and four differed only in the
+case of the exponent marker in a line coordinate. Eight other controls
+covered overlapping source polygons and lines, multipart masks, and
+empty collections. Five matched exact WKT. The other three differed
+in ring start and coordinate rounding. Of the earlier 612
+polygon comparisons, six differences involving polygon-only collections
+now match MySQL's WKT order. The other 606 results retained their
+previous Fsdb output.
