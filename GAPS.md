@@ -3527,10 +3527,13 @@ implementation effort:
    support intersections with points and multipoints and subtraction from
    those point operands. [Geographic polygon union](torture/findings/2026-11-26-geographic-polygon-union.md)
    dissolves polygon and multipolygon boundaries, including in collections
-   with lines and points. Ring start and member order, near-degenerate
-   area turns, and other general mixed-collection overlays remain open.
-   Broader geographic polygon relation and precision rules remain open;
-   these samples do not establish general intersection parity.
+   with lines and points. [Geographic polygon set operations](torture/findings/2026-11-26-geographic-polygon-union.md#intersection-difference-and-symmetric-difference)
+   extend intersection, difference, and symmetric difference to polygon,
+   multipolygon, and polygon-only collection operands. Near-degenerate
+   turns still affect isolated intersection points and symmetric difference
+   lobes. Shared-edge segmentation, ring start and member order, polar
+   endpoints, and general mixed-collection overlays remain open.
+   Broader geographic polygon relation and precision rules remain open.
    Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
    and [line-to-line distance](torture/findings/2026-10-11-geographic-line-line-distance.md)
    are covered for audited cases. [Point-to-polygon distance](torture/findings/2026-10-11-geographic-point-polygon-distance.md)

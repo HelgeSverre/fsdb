@@ -737,6 +737,66 @@ let tests =
                         Expect.isLessThan (abs longitude) 1e-12 "longitude at the crossing"
                     | actual -> failtestf "expected a geographic crossing point, got %A" actual
 
+                testCase "geographic polygon set operations preserve rings and boundary contacts"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let outer = "POLYGON((0 0,4 0,4 4,0 4,0 0))"
+                    let inner = "POLYGON((1 1,2 1,2 2,1 2,1 1))"
+                    let hole = "POLYGON((0 0,4 0,4 4,0 4,0 0),(1 1,1 2,2 2,2 1,1 1))"
+                    let disjoint = "POLYGON((6 6,7 6,7 7,6 7,6 6))"
+                    let vertex = "POLYGON((4 4,5 4,5 5,4 5,4 4))"
+                    let edge = "POLYGON((4 0,6 0,6 4,4 4,4 0))"
+                    let collection = $"GEOMETRYCOLLECTION(GEOMETRYCOLLECTION({outer}),{disjoint})"
+                    for operation, left, right, expected in
+                        [ "ST_Intersection", outer, inner, inner
+                          "ST_Intersection", inner, outer, inner
+                          "ST_Difference", outer, inner, hole
+                          "ST_SymDifference", outer, inner, hole
+                          "ST_Intersection", outer, disjoint, "GEOMETRYCOLLECTION EMPTY"
+                          "ST_Difference", outer, disjoint, outer
+                          "ST_Intersection", outer, vertex, "POINT(4 4)"
+                          "ST_Intersection", outer, edge, "LINESTRING(4 0,4 4)"
+                          "ST_Intersection", collection, inner, inner
+                          "ST_Intersection", inner, collection, inner
+                          "ST_Difference", inner, collection, "GEOMETRYCOLLECTION EMPTY" ] do
+                        let result = call operation [ geometry left; geometry right ]
+                        Expect.equal (call "ST_SRID" [ result ]) (VInt 4326L) "the operation retains the SRID"
+                        Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"{operation} of {left} and {right}"
+
+                testCase "geographic polygon crossings retain separately rounded contacts"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let left = geometry "POLYGON((-60 34,-56 34,-56 39,-60 39,-60 34))"
+                    let right = geometry "POLYGON((-58 36,-54 36,-54 40,-58 40,-58 36))"
+                    let intersection = call "ST_Intersection" [ left; right ]
+                    let hasVertex expectedLatitude expectedLongitude =
+                        List.exists (fun (latitude, longitude) ->
+                            abs (latitude - expectedLatitude) < 1e-10
+                            && abs (longitude - expectedLongitude) < 1e-10)
+
+                    match intersection with
+                    | VGeometry { Shape = GGeometryCollection [ { Shape = GMultiPoint points }; { Shape = GPolygon [ ring ] } ] } ->
+                        Expect.hasLength points 2 "both independently rounded contacts survive"
+                        Expect.isTrue (hasVertex 36.01667724411631 -55.99999999084024 points) "the original turn is a point"
+                        Expect.isTrue (hasVertex 36.01667724411631 -56.00000000915976 ring) "the reversed turn is on the ring"
+                    | actual -> failtestf "expected two geographic contacts and a polygon, got %A" actual
+
+                    match call "ST_Difference" [ left; right ] with
+                    | VGeometry { Shape = GPolygon [ ring ] } ->
+                        Expect.isTrue (hasVertex 36.01667724411631 -55.99999999084024 ring) "difference reverses only its clipping ring"
+                    | actual -> failtestf "expected a geographic difference polygon, got %A" actual
+
+                    let left = geometry "POLYGON((-31 -20,-27 -20,-27 -15,-31 -15,-31 -20))"
+                    let right = geometry "POLYGON((-29 -18,-25 -18,-25 -14,-29 -14,-29 -18))"
+                    match call "ST_SymDifference" [ left; right ] with
+                    | VGeometry { Shape = GMultiPolygon [ [ first ]; [ second ] ] } ->
+                        let hasCorner latitude longitude = hasVertex latitude longitude first || hasVertex latitude longitude second
+                        Expect.isTrue (hasCorner -20.0 -31.0) "the left exterior survives"
+                        Expect.isTrue (hasCorner -14.0 -25.0) "the right exterior survives"
+                    | actual -> failtestf "expected two geographic symmetric difference polygons, got %A" actual
+
                 testCase "geographic polygon unions dissolve intersecting boundaries"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"

@@ -52,5 +52,56 @@ point checks. WAL replay after an abrupt stop recovered the identical
 Fsdb WKB.
 
 The audit leaves serialized ring start and member order, polar endpoints,
-half-turn edges, near-degenerate multiway turns, and other geographic
-polygon overlay operations open.
+half-turn edges, and near-degenerate multiway turns open.
+
+## Intersection, difference, and symmetric difference
+
+Polygon and multipolygon operands, including nested collections containing
+only areas, support the other three set operations. A contained intersection
+returns the inner polygon. Subtracting it from the exterior preserves it as
+a hole. An intersection limited to one shared edge or vertex returns a line
+or point. A disjoint intersection returns an empty geometry collection.
+
+Area intersection uses clockwise turns. Its point result visits the rings
+in their original direction and removes contacts covered by the output area
+or lines. Two traversals of the same crossing can round to different
+coordinates, leaving an isolated point next to an output vertex. Difference
+reverses its clipping rings, so its generated coordinates can differ from
+those of intersection. Symmetric difference first tries the union of both
+directed differences. If the rounded cuts prevent the union from assembling
+closed rings, the overlay uses a single cut at each crossing and retains
+the boundary of the area covered by exactly one operand. [MySQL intersection functor](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/intersection_functor.cc#L124-L139) [Boost symmetric difference](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/sym_difference.hpp)
+
+The wire audit ran 34 polygon pairs in both orders at SRIDs 4326, 4269,
+and 4267 against the [digest-pinned MySQL 8.4.11 image](../config/toolchain.json).
+The pairs comprised 10 controls and 24 seeded crossings. The controls
+included equal, contained, disjoint, shared-vertex, shared-edge, and
+hole cases, plus multipolygon and nested polygon-only collections.
+The crossing fixtures used Python's `random.Random(127)`, integer
+origins within longitude −65 to 55 and latitude −45 to 40, and
+rectangles with corners `(x,y)` and `(x+4,y+5)`, and `(x+2,y+2)`
+and `(x+6,y+6)`.
+
+The baseline at `9728ec85` returned error 1235 in every case. The
+candidate returned geometry for all cases and produced identical results
+in memory and with WAL enabled. Area was computed from the returned WKT
+on the corresponding ellipsoid, summing the area of polygon members.
+The area check allows the greater of 1 m² or 0.001% of the MySQL area.
+The WKT distance check compares vertices and segments in longitude and
+latitude using planar Hausdorff distance below 0.0001°, and counts two
+empty results as a match.
+
+| Operation | Comparisons | Same SQL geometry type | Within area tolerance | Within WKT distance tolerance | Exact WKT |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Intersection | 204 | 182 | 204 | 204 | 42 |
+| Difference | 204 | 204 | 204 | 204 | 33 |
+| Symmetric difference | 204 | 173 | 170 | 170 | 24 |
+
+The intersection type differences come from near-vertex point members which
+one engine retains and the other absorbs. In several symmetric difference
+crossings MySQL emits one lobe, while Fsdb retains both. Serialized ring
+starts and member ordering also differ. When one polygon subdivides a
+shared meridian, MySQL can return one line with the first operand's
+vertices while Fsdb emits multiple line members. The audit covers
+polygon-only collections. Collections mixing areas, lines, and points
+still have unsupported cases.
