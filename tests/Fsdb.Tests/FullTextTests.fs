@@ -437,6 +437,22 @@ let tests =
                   for id in expected do
                       closeTo relevance scores.[id] query
 
+          testCase "kana-sensitive wildcard cursors stop at a different script on disk"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_ja_0900_as_cs_ks" |> Option.get
+              let documents = [ 1, "ア駅"; 2, "あ駅"; 3, "背景" ]
+              let index =
+                  (buildIndexWithTokenizer (Ngrams 2) collation [] |> flushPostings, documents)
+                  ||> List.fold (fun index (id, text) -> addDocument id text index)
+              let ids index query = booleanScores index query |> Map.keys |> Seq.toList
+              Expect.equal (ids index "ア*") [ 1 ] "the cache search finds the Katakana posting"
+              let disk = flushPostings index
+              Expect.isEmpty (ids disk "ア*") "the disk cursor stops at the Hiragana posting"
+              Expect.equal (ids disk "あ*") [ 2 ] "the Hiragana prefix reaches its posting"
+              Expect.equal (ids disk "ア駅") [ 1 ] "the exact lookup keeps the Katakana posting"
+              let withoutHiragana = buildIndexWithTokenizer (Ngrams 2) collation [ 1, "ア駅"; 3, "背景" ] |> flushPostings
+              Expect.equal (ids withoutHiragana "ア*") [ 1 ] "the prefix reaches disk without its neighboring script"
+
           testCase "weighted case-sensitive ngram prefixes count only visited postings"
           <| fun _ ->
               let collation = tryFind "utf8mb4_0900_as_cs" |> Option.get

@@ -10,7 +10,8 @@ open System.Text
 type private Weight =
     { Bytes: byte[]
       PrimaryEnd: int
-      SecondaryEnd: int }
+      SecondaryEnd: int
+      TertiaryEnd: int }
 
 [<Struct>]
 type private ImplicitRange =
@@ -18,7 +19,7 @@ type private ImplicitRange =
       Last: int
       Primary: uint32 }
 
-let private readWeight (bytes: byte[]) =
+let private readWeight quaternary (bytes: byte[]) =
     let separator start =
         let mutable index = start
         while bytes[index] <> 0uy || bytes[index + 1] <> 0uy do
@@ -26,11 +27,13 @@ let private readWeight (bytes: byte[]) =
         index
 
     let primary = separator 0
+    let secondary = separator (primary + 2)
     { Bytes = bytes
       PrimaryEnd = primary
-      SecondaryEnd = separator (primary + 2) }
+      SecondaryEnd = secondary
+      TertiaryEnd = if quaternary then separator (secondary + 2) else bytes.Length }
 
-let private loadTable resourceName signature =
+let private loadTable quaternary resourceName signature =
     lazy
         use resource = typeof<Weight>.Assembly.GetManifestResourceStream(resourceName)
         use compressed = new GZipStream(resource, CompressionMode.Decompress)
@@ -52,14 +55,14 @@ let private loadTable resourceName signature =
         for _ in 1..scalarCount do
             let codepoint = reader.ReadInt32()
             let bytes = reader.ReadBytes(int (reader.ReadUInt16()))
-            scalars.Add(codepoint, readWeight bytes)
+            scalars.Add(codepoint, readWeight quaternary bytes)
 
         let contractions =
             Array.init contractionCount (fun _ ->
                 let length = int (reader.ReadUInt16())
                 let weightLength = int (reader.ReadUInt16())
                 let text = Encoding.UTF8.GetString(reader.ReadBytes(length))
-                text, readWeight (reader.ReadBytes(weightLength)))
+                text, readWeight quaternary (reader.ReadBytes(weightLength)))
             |> Array.groupBy (fun (text, _) -> text[0])
             |> Array.map (fun (first, entries) -> first, Array.sortByDescending (fun ((text: string), _) -> text.Length) entries)
             |> dict
@@ -83,21 +86,25 @@ let private scalarWeight (ranges: ImplicitRange[]) (scalars: Dictionary<int, Wei
             [| byte (primary >>> 24); byte (primary >>> 16); byte (primary >>> 8); byte primary
                0uy; 0uy; 0uy; 0x20uy; 0uy; 0uy; 0uy; 2uy |]
           PrimaryEnd = 4
-          SecondaryEnd = 8 }
+          SecondaryEnd = 8
+          TertiaryEnd = 12 }
 
-let private chineseTable = loadTable "Fsdb.Zh0900Weights.bin.gz" 0x31485A46u
-let private accentSensitiveTable = loadTable "Fsdb.AccentSensitive0900Weights.bin.gz" 0x31534146u
-let private caseSensitiveTable = loadTable "Fsdb.CaseSensitive0900Weights.bin.gz" 0x31534346u
+let private chineseTable = loadTable false "Fsdb.Zh0900Weights.bin.gz" 0x31485A46u
+let private accentSensitiveTable = loadTable false "Fsdb.AccentSensitive0900Weights.bin.gz" 0x31534146u
+let private caseSensitiveTable = loadTable false "Fsdb.CaseSensitive0900Weights.bin.gz" 0x31534346u
+let private japaneseTable = loadTable true "Fsdb.Japanese0900Weights.bin.gz" 0x31414A46u
 
-let private weightOf (ranges, scalars, contractions: IDictionary<char, (string * Weight)[]>) (value: string) =
+let private weightOf quaternary (ranges, scalars, contractions: IDictionary<char, (string * Weight)[]>) (value: string) =
+    let separators = if quaternary then 6 else 4
     if value.Length = 0 then
-        { Bytes = Array.zeroCreate<byte> 4; PrimaryEnd = 0; SecondaryEnd = 2 }
+        { Bytes = Array.zeroCreate<byte> separators; PrimaryEnd = 0; SecondaryEnd = 2; TertiaryEnd = 4 }
     else
         let segments = ResizeArray<Weight>()
         let mutable offset = 0
         let mutable primaryLength = 0
         let mutable secondaryLength = 0
         let mutable tertiaryLength = 0
+        let mutable quaternaryLength = 0
         while offset < value.Length do
             let contraction =
                 match contractions.TryGetValue(value[offset]) with
@@ -120,38 +127,48 @@ let private weightOf (ranges, scalars, contractions: IDictionary<char, (string *
             offset <- offset + length
             primaryLength <- primaryLength + weight.PrimaryEnd
             secondaryLength <- secondaryLength + weight.SecondaryEnd - weight.PrimaryEnd - 2
-            tertiaryLength <- tertiaryLength + weight.Bytes.Length - weight.SecondaryEnd - 2
+            tertiaryLength <- tertiaryLength + weight.TertiaryEnd - weight.SecondaryEnd - 2
+            quaternaryLength <- quaternaryLength + max 0 (weight.Bytes.Length - weight.TertiaryEnd - 2)
 
-        let result = Array.zeroCreate<byte> (primaryLength + secondaryLength + tertiaryLength + 4)
+        let result = Array.zeroCreate<byte> (primaryLength + secondaryLength + tertiaryLength + quaternaryLength + separators)
         let mutable primary = 0
         let mutable secondary = primaryLength + 2
         let mutable tertiary = secondary + secondaryLength + 2
+        let mutable fourth = tertiary + tertiaryLength + 2
 
         for weight in segments do
             let secondaryStart = weight.PrimaryEnd + 2
             let tertiaryStart = weight.SecondaryEnd + 2
             let secondarySize = weight.SecondaryEnd - secondaryStart
-            let tertiarySize = weight.Bytes.Length - tertiaryStart
+            let tertiarySize = weight.TertiaryEnd - tertiaryStart
             Array.Copy(weight.Bytes, 0, result, primary, weight.PrimaryEnd)
             Array.Copy(weight.Bytes, secondaryStart, result, secondary, secondarySize)
             Array.Copy(weight.Bytes, tertiaryStart, result, tertiary, tertiarySize)
             primary <- primary + weight.PrimaryEnd
             secondary <- secondary + secondarySize
             tertiary <- tertiary + tertiarySize
+            let fourthStart = weight.TertiaryEnd + 2
+            if fourthStart < weight.Bytes.Length then
+                let size = weight.Bytes.Length - fourthStart
+                Array.Copy(weight.Bytes, fourthStart, result, fourth, size)
+                fourth <- fourth + size
 
-        { Bytes = result; PrimaryEnd = primaryLength; SecondaryEnd = secondary }
+        { Bytes = result; PrimaryEnd = primaryLength; SecondaryEnd = secondary; TertiaryEnd = tertiary }
 
-let chineseWeight value = (weightOf chineseTable.Value value).Bytes
+let chineseWeight value = (weightOf false chineseTable.Value value).Bytes
 
 let compareChinese a b =
     (chineseWeight a).AsSpan().SequenceCompareTo((chineseWeight b).AsSpan())
 
 let accentSensitiveKey value =
-    let weight = weightOf accentSensitiveTable.Value value
+    let weight = weightOf false accentSensitiveTable.Value value
     Convert.ToHexString(weight.Bytes, 0, weight.SecondaryEnd)
 
 let caseSensitiveKey value =
-    Convert.ToHexString((weightOf caseSensitiveTable.Value value).Bytes)
+    Convert.ToHexString((weightOf false caseSensitiveTable.Value value).Bytes)
+
+let japaneseFullTextKey value =
+    Convert.ToHexString((weightOf true japaneseTable.Value value).Bytes)
 
 let private prefixCompare levels (prefix: string) =
     let levelEnd (key: string) start =
@@ -182,3 +199,4 @@ let private prefixCompare levels (prefix: string) =
 
 let accentSensitivePrefixCompare prefix = prefixCompare 2 prefix
 let caseSensitivePrefixCompare prefix = prefixCompare 3 prefix
+let japanesePrefixCompare prefix = prefixCompare 4 prefix

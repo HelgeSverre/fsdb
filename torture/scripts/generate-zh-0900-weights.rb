@@ -8,11 +8,17 @@ collation, signature = case ARGV.first
                        when "--case-sensitive"
                          ARGV.shift
                          ["utf8mb4_0900_as_cs", "FCS1"]
+                       when "--japanese"
+                         ARGV.shift
+                         ["utf8mb4_ja_0900_as_cs_ks", "FJA1"]
                        else
                          ["utf8mb4_zh_0900_as_cs", "FZH1"]
                        end
 accent_sensitive = signature == "FAS1"
 chinese = signature == "FZH1"
+japanese = signature == "FJA1"
+japanese_heads = [*(0x3041..0x3096), *(0x30A1..0x30FA), *(0xFF66..0xFF9D)]
+japanese_tails = [0x309D, 0x309E, 0x30FC, 0x30FD, 0x30FE]
 
 case ARGV.shift
 when "queries"
@@ -23,6 +29,12 @@ when "queries"
     SELECT cp,HEX(WEIGHT_STRING(CONVERT(CHAR(cp USING utf32) USING utf8mb4) COLLATE #{collation}))
     FROM points WHERE cp NOT BETWEEN 55296 AND 57343 ORDER BY cp;
   SQL
+  if japanese
+    japanese_heads.product(japanese_tails).each do |codepoints|
+      hex = codepoints.pack("U*").unpack1("H*").upcase
+      puts "SELECT 'C:#{hex}',HEX(WEIGHT_STRING(CONVERT(X'#{hex}' USING utf8mb4) COLLATE #{collation}));"
+    end
+  end
   exit unless chinese
 
   sequences = %w[重庆 沈阳 藏文]
@@ -44,11 +56,24 @@ when "pack"
   ranges = []
   explicit = []
   sequences = []
+  context_count = 0
   first = nil
   last = nil
   base_weight = nil
   expected_scalar = 0
   implicit_suffix = accent_sensitive ? "000000200000" : "0000002000000002"
+  implicit_suffix += "0000" if japanese
+  context_weights = {}
+  context_scalars = (japanese_heads + japanese_tails).to_h { |cp| [cp, true] }
+  weight_levels = lambda do |hex|
+    hex.scan(/.{4}/).each_with_object([+""]) do |word, levels|
+      if word == "0000"
+        levels << +""
+      else
+        levels.last << word
+      end
+    end
+  end
 
   flush_range = lambda do
     if first
@@ -66,15 +91,23 @@ when "pack"
     # Keep the loader's two level delimiters. The second follows the final
     # secondary weight for this collation.
     hex += "0000" if accent_sensitive
+    hex += "0000" if japanese && weight_levels.call(hex).length == 3
     bytes = [hex].pack("H*")
     if input.start_with?("C:")
-      sequences << [[input.delete_prefix("C:")].pack("H*"), bytes]
+      context_count += 1
+      text = [input.delete_prefix("C:")].pack("H*")
+      if japanese
+        parts = text.dup.force_encoding("UTF-8").codepoints.map { |cp| context_weights.fetch(cp) }
+        next if parts.transpose.map(&:join).join("0000") == hex
+      end
+      sequences << [text, bytes]
       next
     end
 
     cp = Integer(input)
     abort "Expected scalar #{expected_scalar}, got #{cp}" unless cp == expected_scalar
     expected_scalar = cp == 0xD7FF ? 0xE000 : cp + 1
+    context_weights[cp] = weight_levels.call(hex) if japanese && context_scalars[cp]
 
     # Implicit weights are two primary words followed by fixed secondary and
     # tertiary weights. Runs encode adjacent primary values as a base and offset.
@@ -91,7 +124,14 @@ when "pack"
     end
   end
   flush_range.call
-  abort "Incomplete oracle dump" unless expected_scalar == 0x110000 && sequences.length == (chinese ? 19 : 0)
+  expected_contexts = if japanese
+                        japanese_heads.length * japanese_tails.length
+                      elsif chinese
+                        19
+                      else
+                        0
+                      end
+  abort "Incomplete oracle dump" unless expected_scalar == 0x110000 && context_count == expected_contexts
 
   Zlib::GzipWriter.open(destination, Zlib::BEST_COMPRESSION) do |output|
     output.mtime = 0

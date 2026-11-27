@@ -29,3 +29,35 @@ Reproduce after building `src/Fsdb.Cli` in Release:
 uv run --with pymysql torture/scripts/ngram-multicol-oracle.py --legacy-range 3040:3100 --all-range-scalars --collation utf8mb4_ja_0900_as_cs_ks --order-checks 1 2 3 4 5 6 7 8 9 10
 uv run --with pymysql torture/scripts/ngram-multicol-oracle.py --legacy-range 3040:3100 --all-range-scalars --collation utf8mb4_ja_0900_as_cs_ks --weight-checks --order-checks 1
 ```
+
+## Kana-sensitive full-text cursors
+
+With `ア駅`, `あ駅`, and `背景` indexed as bigrams, `ア*`
+matches the Katakana row in cache. After full-text-only optimize,
+the disk cursor stops at the Hiragana posting and the prefix returns
+no rows. The exact search `ア駅` still matches, and removing the
+Hiragana row restores the wildcard result. Fsdb now uses MySQL's
+four-level Japanese keys for postings and both prefix cursors.
+[MySQL Japanese collation scanner](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/strings/ctype-uca.cc#L1390-L1558)
+
+The expanded Japanese bigram corpus went from 6,499 differences to
+zero across 26,356 searches in fresh, flushed, mixed, and mixed
+postings after deletion. The maintained corpus matched 3,870 queries
+at sizes 1–10. The all-Kana corpus matched another 11,520 searches
+and all audited order and equality checks at those sizes. A checkpoint
+written before the change reopened with the corrected prefix result.
+
+The same expanded corpus with the default word parser went from
+1,306 differences to 288, with no new mismatches. The remaining
+cases include apostrophe modifiers and scores after deletion.
+
+The embedded weight table comes from pinned MySQL 8.4.11. Its
+generator captures every Unicode scalar and 1,160 Kana context pairs
+for iteration and length marks. It stores the 586 pairs whose weights
+differ from singleton composition, and repacking the same dump
+reproduces the asset byte for byte.
+
+```sh
+ruby torture/scripts/generate-zh-0900-weights.rb --japanese queries | mysql -NBr > japanese-weights.tsv
+ruby torture/scripts/generate-zh-0900-weights.rb --japanese pack japanese-weights.tsv src/Fsdb/Sql/Japanese0900Weights.bin.gz
+```

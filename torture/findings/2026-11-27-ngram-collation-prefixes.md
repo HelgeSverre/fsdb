@@ -58,11 +58,8 @@ postings after deletion. The fix resolved all nine case-sensitive
 relevance differences. The weighted score remained stable when
 the WAL-backed index reopened from a checkpoint.
 
-Under `utf8mb4_ja_0900_as_cs_ks`, MySQL's flushed cursor can return
-no rows for `ア*` even when the exact gram `ア駅` is indexed. Fsdb
-still returns the Katakana document in that fixture. A three-row
-reproduction uses `ア駅`, `あ駅`, and `背景`. Removing the
-Hiragana row restores the Katakana prefix match in MySQL.
+The separate Japanese wildcard case is covered in the
+[kana-sensitive full-text cursor follow-up](2026-11-06-japanese-kana-order-and-weights.md#kana-sensitive-full-text-cursors).
 
 ## Circled Katakana in accent-insensitive ngrams
 

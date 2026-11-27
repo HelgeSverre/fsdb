@@ -109,6 +109,7 @@
     <EmbeddedResource Include="Sql/Zh0900Weights.bin.gz" LogicalName="Fsdb.Zh0900Weights.bin.gz" />
     <EmbeddedResource Include="Sql/AccentSensitive0900Weights.bin.gz" LogicalName="Fsdb.AccentSensitive0900Weights.bin.gz" />
     <EmbeddedResource Include="Sql/CaseSensitive0900Weights.bin.gz" LogicalName="Fsdb.CaseSensitive0900Weights.bin.gz" />
+    <EmbeddedResource Include="Sql/Japanese0900Weights.bin.gz" LogicalName="Fsdb.Japanese0900Weights.bin.gz" />
     <PackageReference Include="FParsec" Version="1.1.1" />
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.401" PrivateAssets="all" />
     <PackageReference Include="NetTopologySuite" Version="2.6.0" />

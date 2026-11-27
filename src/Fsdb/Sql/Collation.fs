@@ -192,18 +192,8 @@ let private markJapaneseKana isKana (value: string) =
             if isKana c || c = marker then result.Append(marker) |> ignore
         result.ToString()
 
-let private markJapaneseHiraganaForFullText (value: string) =
-    let value =
-        if value.Contains('\u3099') || value.Contains('\u309A') then
-            value.Normalize(NormalizationForm.FormC)
-        else value
-    let isHiragana (c: char) =
-        (c >= '\u3041' && c <= '\u3096') || c = '\u309D' || c = '\u309E'
-    markJapaneseKana isHiragana value
-
 // ICU's Japanese sort key merges kana scripts even for MySQL's `_ks` variant.
-// SQL ordering uses the unmarked base key followed by a script tie-break;
-// full-text tokens use the hiragana marker above.
+// SQL ordering uses the unmarked base key followed by a script tie-break.
 let private markJapaneseKatakana (value: string) =
     let value = normalizeJapaneseKana value
     let isKatakana (c: char) =
@@ -1749,8 +1739,6 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
               |> foldSmallKana |> foldLegacyUnicodeJamo |> trim
         elif name = "utf8mb4_0900_ai_ci" then
             s |> foldCircledKatakana |> foldKanaLigatures |> primaryText
-        elif name = "utf8mb4_ja_0900_as_cs_ks" then
-            s |> markJapaneseHiraganaForFullText |> foldJapaneseCompatibility |> trim
         else primaryText s
     let substringFold =
         if spec.Fold.HasFlag CompareOptions.IgnoreCase then
@@ -2082,6 +2070,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                 Uca0900Weights.accentSensitiveKey s
             elif name = "utf8mb4_0900_as_cs" then
                 Uca0900Weights.caseSensitiveKey s
+            elif name = "utf8mb4_ja_0900_as_cs_ks" then
+                Uca0900Weights.japaneseFullTextKey s
             elif usesGeneralFullTextWeights name then
                 s |> lowercaseWith LegacyFullTextCaseData.unicode400 |> trim |> generalFullTextKey
             else
