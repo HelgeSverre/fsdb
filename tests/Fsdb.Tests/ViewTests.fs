@@ -4879,6 +4879,37 @@ let tests =
                   [ [ Some "1"; Some "1" ]; [ Some "2"; Some "2" ] ]
                   "stored rows receive generated IDs after the check"
 
+          testCase "checked INSERT SELECT upserts reserve IDs in growing ranges"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE incoming(k INT PRIMARY KEY, qty INT)"
+                    "INSERT INTO incoming VALUES (1,0),(2,0),(3,7),(4,8),(5,9),(6,0),(7,6)"
+                    "CREATE TABLE ai(id INT AUTO_INCREMENT PRIMARY KEY,k INT UNIQUE,qty INT)"
+                    "CREATE VIEW checked_ai AS SELECT id,k,qty FROM ai WHERE qty>0 WITH CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+
+              let upsert maxKey =
+                  run store (sprintf "INSERT IGNORE INTO checked_ai(k,qty) SELECT k,qty FROM incoming WHERE k<=%d ORDER BY k ON DUPLICATE KEY UPDATE qty=9" maxKey)
+
+              for maxKey, accepted, nextId in [ 2, 0, "1"; 4, 2, "4"; 5, 3, "4"; 7, 4, "8" ] do
+                  expectOk (run store "TRUNCATE ai") "start from ID 1"
+                  Expect.equal (upsert maxKey) (Affected(uint64 accepted)) "only candidates passing CHECK OPTION affect rows"
+                  expectOk (run store "INSERT INTO ai(k,qty) VALUES(90,7)") "insert after the bulk upsert"
+                  let expectedIds = [ for id in 1 .. accepted -> [ Some(string id) ] ] @ [ [ Some nextId ] ]
+                  Expect.equal (rows store "SELECT id FROM ai ORDER BY id") expectedIds (sprintf "allocated and reserved IDs with %d accepted rows" accepted)
+
+              expectOk (run store "TRUNCATE ai") "reset the target counter"
+              expectOk (run store "TRUNCATE incoming") "reset the source"
+              expectOk (run store "INSERT INTO incoming VALUES (1,1),(2,1),(3,1),(4,1),(5,1),(6,0),(7,1),(8,1)") "source with a high explicit ID"
+              expectOk
+                  (run store "INSERT IGNORE INTO checked_ai(id,k,qty) SELECT CASE WHEN k=7 THEN 100 ELSE NULL END,k,qty FROM incoming ORDER BY k ON DUPLICATE KEY UPDATE qty=9")
+                  "an accepted explicit ID can move the cursor beyond a partially used range"
+              expectOk (run store "INSERT INTO ai(k,qty) VALUES(90,7)") "insert after the high ID"
+              Expect.equal (rows store "SELECT id FROM ai ORDER BY id")
+                  ([ 1; 2; 3; 4; 5; 100; 101; 102 ] |> List.map (fun id -> [ Some(string id) ]))
+                  "the new interval uses the previous interval's remaining attempt budget"
+
           testCase "writable views do not expose unprojected base columns"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

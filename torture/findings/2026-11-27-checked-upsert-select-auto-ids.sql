@@ -1,0 +1,53 @@
+CREATE DATABASE fsdb_checked_select_ids;
+USE fsdb_checked_select_ids;
+
+CREATE TABLE incoming(k INT PRIMARY KEY, id INT, qty INT);
+INSERT INTO incoming VALUES (1,100,0),(2,11,0),(3,0,0),(4,NULL,0),
+                            (5,20,7),(6,NULL,8),(7,0,9),(8,NULL,6),
+                            (9,200,0),(10,NULL,5),(11,0,4),(12,NULL,3);
+CREATE TABLE ai(id INT AUTO_INCREMENT PRIMARY KEY,k INT UNIQUE,qty INT);
+CREATE VIEW checked_ai AS SELECT id,k,qty FROM ai WHERE qty>0 WITH CHECK OPTION;
+INSERT IGNORE INTO checked_ai(k,qty)
+    SELECT k,qty FROM incoming WHERE k<5 ORDER BY k ON DUPLICATE KEY UPDATE qty=9;
+SHOW WARNINGS;
+INSERT INTO ai(k,qty) VALUES(90,7);
+SELECT id,k FROM ai ORDER BY id;
+
+TRUNCATE ai;
+INSERT IGNORE INTO checked_ai(k,qty)
+    SELECT k,qty FROM incoming WHERE k BETWEEN 3 AND 6 ORDER BY k ON DUPLICATE KEY UPDATE qty=9;
+SHOW WARNINGS;
+SELECT LAST_INSERT_ID();
+INSERT INTO ai(k,qty) VALUES(90,7);
+SELECT id,k FROM ai ORDER BY id;
+
+TRUNCATE ai;
+INSERT IGNORE INTO checked_ai(id,k,qty)
+    SELECT id,k,qty FROM incoming WHERE k>=4 ORDER BY k ON DUPLICATE KEY UPDATE qty=9;
+SHOW WARNINGS;
+SELECT LAST_INSERT_ID();
+INSERT INTO ai(k,qty) VALUES(90,7);
+SELECT id,k FROM ai ORDER BY id;
+
+TRUNCATE ai;
+PREPARE batch FROM 'INSERT IGNORE INTO checked_ai(k,qty) SELECT k,qty FROM incoming WHERE k BETWEEN ? AND ? ORDER BY k ON DUPLICATE KEY UPDATE qty=9';
+SET @lo=3,@hi=8;
+START TRANSACTION;
+EXECUTE batch USING @lo,@hi;
+SHOW WARNINGS;
+SELECT id,k FROM ai ORDER BY id;
+ROLLBACK;
+INSERT INTO ai(k,qty) VALUES(90,7);
+SELECT id,k FROM ai ORDER BY id;
+DEALLOCATE PREPARE batch;
+
+CREATE VIEW checked_zero AS SELECT id,k,qty FROM ai WHERE id=0 WITH CHECK OPTION;
+TRUNCATE ai;
+SET SESSION sql_mode='NO_AUTO_VALUE_ON_ZERO';
+INSERT IGNORE INTO checked_zero(id,k,qty)
+    SELECT id,k,qty FROM incoming WHERE k IN (5,6,7,8) ORDER BY k ON DUPLICATE KEY UPDATE qty=9;
+SHOW WARNINGS;
+INSERT INTO ai(k,qty) VALUES(90,7);
+SELECT id,k FROM ai ORDER BY id;
+
+DROP DATABASE fsdb_checked_select_ids;

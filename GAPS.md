@@ -1348,11 +1348,12 @@ Prepared duplicate-key assignments bind `VALUES(column)` to the
 view's exposed columns.
 [`INSERT IGNORE` through a checked view](torture/findings/2026-11-27-ignored-upsert-view-checks.md)
 skips failed candidate and duplicate-update checks with warning 1369
-in audited batches. [Checked upserts with generated IDs](torture/findings/2026-11-27-checked-upsert-auto-ids.md)
-defer allocation until a VALUES candidate passes CHECK OPTION and
-retain the reserved range across WAL recovery. Allocation from
-INSERT SELECT and reuse of the candidate ID after a secondary-key
-duplicate update still differ.
+in audited batches. Checked upserts defer allocation until a candidate
+passes CHECK OPTION and retain reserved IDs across WAL recovery.
+[VALUES batches](torture/findings/2026-11-27-checked-upsert-auto-ids.md)
+use the row count for the first reservation. [INSERT SELECT batches](torture/findings/2026-11-27-checked-upsert-select-auto-ids.md)
+reserve IDs in growing intervals. Reuse of the candidate ID after a
+secondary-key duplicate update still differs.
 [Windowed `NATURAL JOIN` read sources](torture/findings/2026-11-06-window-natural-joined-view.md)
 also leave the physical target writable with either source order or a CTE
 input; duplicate joined rows still update that target once.

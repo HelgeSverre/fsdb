@@ -32184,7 +32184,7 @@ let rec private executeAsWithViewSources
         (sourceBindings: (Expr * ColumnDef option * Value) list array)
         (onDuplicateUpdate: (string * Expr) list)
         ignoreDuplicates
-        valuesCount
+        input
         =
         match scan store db table with
         | Error e -> ids, storageErr e
@@ -32206,10 +32206,11 @@ let rec private executeAsWithViewSources
 
                 let checkScope = viewCheckForTarget s db table
                 let ignoreViewCheck = ignoreDuplicates && checkScope.IsSome
-                let checkedAllocation =
-                    valuesCount
-                    |> Option.filter (fun _ -> ignoreViewCheck && (tableColumns |> List.exists _.AutoIncrement))
-                    |> Option.map (fun count -> count, computeGeneratedRow s registry db table tableColumns)
+                let finishGenerated =
+                    if ignoreViewCheck && (tableColumns |> List.exists _.AutoIncrement) then
+                        Some(computeGeneratedRow s registry db table tableColumns)
+                    else
+                        None
                 let applyUpdate ordinal existing candidate =
                     match checkScope with
                     | Some scope when scope.JoinCheck.IsSome ->
@@ -32225,15 +32226,15 @@ let rec private executeAsWithViewSources
 
                 if not (Storage.dynamicWriteRebaseActive s) then
                     let allocation =
-                        checkedAllocation
-                        |> Option.map AllocateAfterViewCheck
+                        finishGenerated
+                        |> Option.map (fun finish -> AllocateAfterViewCheck(input, finish))
                         |> Option.defaultValue StandardAllocation
                     upsertRowsWithOrdinalChecked
                         s db table cols (List.map Ok rowsValues) prepare applyUpdate checkChangedRow (Some coercedAssignments) foundRows ignoreViewCheck allocation
                 else
                     let preparation =
-                        match checkedAllocation with
-                        | Some(count, finish) -> Storage.checkedUpsertPreparation s db table cols count prepare finish
+                        match finishGenerated with
+                        | Some finish -> Storage.checkedUpsertPreparation s db table cols input prepare finish
                         | None -> Ok(fun values -> Storage.prepareInsertCandidate s db table cols values prepare)
                     preparation
                     |> Result.bind (fun prepareCandidate ->
@@ -32247,7 +32248,7 @@ let rec private executeAsWithViewSources
                     |> Result.bind (fun prepared ->
                         let candidates = prepared |> List.map (Result.map _.Values)
                         let allocation =
-                            match checkedAllocation with
+                            match finishGenerated with
                             | None -> StandardAllocation
                             | Some _ ->
                                 prepared
@@ -34335,7 +34336,7 @@ let rec private executeAsWithViewSources
                                 ignoreDuplicates)
                 else
                     Storage.withPermissiveIndexExpressions ignoreDuplicates (fun () ->
-                        upsertEvaluated db table cols rowsValues (Array.create rowsValues.Length []) onDuplicateUpdate ignoreDuplicates (Some(int64 rowsValues.Length)))
+                        upsertEvaluated db table cols rowsValues (Array.create rowsValues.Length []) onDuplicateUpdate ignoreDuplicates (ValuesBatch(int64 rowsValues.Length)))
 
     | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) when isStoredView store dbName table ->
         let viewDb, viewName = splitQualified dbName table
@@ -34412,7 +34413,7 @@ let rec private executeAsWithViewSources
                                     ignoreDuplicates)
                     else
                         Storage.withPermissiveIndexExpressions ignoreDuplicates (fun () ->
-                            upsertEvaluated db table cols rowsValues sourceBindings onDuplicateUpdate ignoreDuplicates None)
+                            upsertEvaluated db table cols rowsValues sourceBindings onDuplicateUpdate ignoreDuplicates SelectedRows)
 
     | Replace(table, columns, rowsExprs) when isStoredView store dbName table ->
         let viewDb, viewName = splitQualified dbName table

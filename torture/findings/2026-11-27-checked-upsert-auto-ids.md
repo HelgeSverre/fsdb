@@ -16,12 +16,11 @@ input forms, view checks, and transaction outcomes. The WAL regression
 covers autocommit, explicit commit, and rollback without a checkpoint.
 [SQL fixture](2026-11-27-checked-upsert-auto-ids.sql)
 
-Two allocation gaps remain. After four candidates from INSERT SELECT
-all fail CHECK OPTION, the next successful insert receives ID 1 in
-MySQL and ID 5 in Fsdb. In MySQL, two or three eligible generated
-rows leave ID 4 for the next statement, and four or five leave ID 8.
+The [INSERT SELECT follow-up](2026-11-27-checked-upsert-select-auto-ids.md)
+covers the separate reservation rules for selected rows.
 
-When an eligible candidate with a generated ID finds a secondary-key
-duplicate, MySQL can reuse the candidate ID for the next row. In the
-audited mixed batch, MySQL assigns the fresh rows IDs 2 and 3, while
-Fsdb assigns IDs 3 and 4. Both assign ID 6 to the next statement.
+Candidate ID reuse remains open. When an eligible candidate with a
+generated ID finds a secondary-key duplicate, MySQL can reuse the ID
+for the next row. In the audited mixed batch, MySQL assigns the fresh
+rows IDs 2 and 3, while Fsdb assigns IDs 3 and 4. Both assign ID 6
+to the next statement.

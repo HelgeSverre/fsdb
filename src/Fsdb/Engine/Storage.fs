@@ -10635,36 +10635,60 @@ let private processRowWithAutoPolicy
 
 let private processRow = processRowWithAutoPolicy false
 
-let private upsertBatchReservation store database (table: Table) count =
+type internal UpsertInput =
+    | ValuesBatch of count: int64
+    | SelectedRows
+
+type private CheckedUpsertReservation =
+    { Allocate: int64 -> int64
+      CountCandidate: unit -> unit
+      Upper: unit -> int64 }
+
+let private checkedUpsertReservation store database (table: Table) input =
     let reserve = reserveAutoIncrementRange store database table.OriginalName
     let mutable range = None
-    let reserveBatch minimum =
-        match range with
-        | Some reserved -> reserved
-        | None ->
-            let reserved = reserve minimum count
-            range <- Some reserved
-            reserved
+    let mutable requestSize =
+        match input with
+        | ValuesBatch count -> count
+        | SelectedRows -> 1L
+
+    let mutable nextDefaultSize = 2L
+    let mutable remainingAttempts = 0L
+
     let allocate minimum =
-        let first, upper = reserveBatch minimum
-        let next = max first minimum
-        if next < upper then next else reserve next 1L |> fst
-    let reservedUpper () = range |> Option.map snd |> Option.defaultValue table.NextAutoId
-    reserveBatch, allocate, reservedUpper
+        match range with
+        | Some(first, upper) when minimum < upper -> max first minimum
+        | _ ->
+            // An explicit ID can end the interval while InnoDB still has attempts left in its budget.
+            let size = if remainingAttempts > 0L then remainingAttempts else requestSize
+            let first, upper = reserve minimum size
+            range <- Some(first, upper)
+            remainingAttempts <- size
+            requestSize <- nextDefaultSize
+            // MySQL doubles each default request, up to 2^16 - 1.
+            nextDefaultSize <- min 65535L (nextDefaultSize * 2L)
+            first
+
+    { Allocate = allocate
+      CountCandidate = fun () -> remainingAttempts <- max 0L (remainingAttempts - 1L)
+      Upper = fun () -> range |> Option.map snd |> Option.defaultValue table.NextAutoId }
 
 /// CHECK OPTION sees the row before the engine generates its auto-increment ID.
-let private prepareCheckedUpsertRow mode generateAutoOnZero next raw (table: Table) autoIndex allocate prepare finish =
+let private prepareCheckedUpsertRow mode generateAutoOnZero next raw (table: Table) autoIndex reservation prepare finish =
     processRowWithAutoPolicy true mode generateAutoOnZero next raw table.Columns Set.empty
     |> Result.bind (fun (values, nextId, assigned, omitted) ->
         prepare omitted (Array.ofList values)
         |> Result.bind (fun (candidate: Value[]) ->
             match assigned with
             | Some(true, _) ->
-                let id = allocate nextId
+                let id = reservation.Allocate nextId
                 candidate.[autoIndex] <- VInt id
                 let next = if id = Int64.MaxValue then id else id + 1L
                 finish candidate |> Result.map (fun row -> row, next, Some(true, id))
-            | _ -> Ok(candidate, nextId, assigned)))
+            | _ -> Ok(candidate, nextId, assigned))
+        |> Result.map (fun prepared ->
+            reservation.CountCandidate()
+            prepared))
 
 let private finalizePreparedAutoValue
     (mode: TemporalCoercionMode)
@@ -10799,7 +10823,7 @@ let internal prepareInsertCandidateWithDeferred store dbName tableName columns v
     prepareInsertCandidateCore store dbName tableName columns values deferred prepare finish
 
 /// The transaction path evaluates each candidate once before taking write locks.
-let internal checkedUpsertPreparation store dbName tableName columns valuesCount prepare finish =
+let internal checkedUpsertPreparation store dbName tableName columns input prepare finish =
     match tableAt store dbName tableName with
     | None -> Error(NoSuchTable(dbName, tableName))
     | Some table ->
@@ -10810,14 +10834,14 @@ let internal checkedUpsertPreparation store dbName tableName columns valuesCount
             | Some autoIndex ->
                 let mode = temporalCoercionMode store
                 let generateAutoOnZero = not store.ExecutionSettings.SqlMode.NoAutoValueOnZero
-                let _, allocate, reservedUpper = upsertBatchReservation store dbName table valuesCount
+                let reservation = checkedUpsertReservation store dbName table input
                 let mutable next = table.NextAutoId
                 fun values ->
                     alignInsertValues table.Columns indices values
-                    |> Result.bind (fun raw -> prepareCheckedUpsertRow mode generateAutoOnZero next raw table autoIndex allocate prepare finish)
+                    |> Result.bind (fun raw -> prepareCheckedUpsertRow mode generateAutoOnZero next raw table autoIndex reservation prepare finish)
                     |> Result.map (fun (candidate, nextId, assigned) ->
                         next <- nextId
-                        let nextAutoId = max nextId (reservedUpper ())
+                        let nextAutoId = max nextId (reservation.Upper())
                         advanceAutoIncrementCounter store dbName tableName nextAutoId
                         { Values = candidate; NextAutoId = nextAutoId; AssignedAutoId = assigned }))
 
@@ -11561,7 +11585,7 @@ and private cascadeUpdateVisitedFrom
 
 type internal UpsertAllocation =
     | StandardAllocation
-    | AllocateAfterViewCheck of valuesCount: int64 * finish: (Value[] -> Result<Value[], StorageError>)
+    | AllocateAfterViewCheck of input: UpsertInput * finish: (Value[] -> Result<Value[], StorageError>)
     | PreparedAllocation of nextId: int64
 
 type private UpsertSummary =
@@ -11718,27 +11742,29 @@ and private upsertRowsInTable
                 |> Result.bind (fun idxs ->
                     let mode = temporalCoercionMode store
                     let generateAutoOnZero = not store.ExecutionSettings.SqlMode.NoAutoValueOnZero
-                    let reservationCount =
-                        match allocation with
-                        | AllocateAfterViewCheck(valuesCount, _) -> valuesCount
-                        | _ -> generatedAutoValueCount mode generateAutoOnZero table idxs Set.empty (rowsIn |> List.choose Result.toOption)
-                    let reserveBatch, allocate, reservedUpper = upsertBatchReservation store dbName table reservationCount
+                    let prepareStandardRow next raw =
+                        processRow mode generateAutoOnZero next raw table.Columns Set.empty
+                        |> Result.bind (fun (values, nextId, assigned, omitted) ->
+                            prepare omitted (Array.ofList values)
+                            |> Result.map (fun candidate -> candidate, nextId, assigned))
+
                     let deferredAuto =
                         match allocation with
-                        | AllocateAfterViewCheck(_, finish) ->
-                            table.Columns |> List.tryFindIndex _.AutoIncrement |> Option.map (fun index -> index, finish)
+                        | AllocateAfterViewCheck(input, finish) ->
+                            table.Columns |> List.tryFindIndex _.AutoIncrement |> Option.map (fun index -> index, input, finish)
                         | _ -> None
-                    let firstAutoId = if deferredAuto.IsSome then table.NextAutoId else reserveBatch table.NextAutoId |> fst
 
-                    let prepareRow next raw =
+                    let initialAutoId, prepareRow, reservedUpper =
                         match deferredAuto with
-                        | Some(index, finish) ->
-                            prepareCheckedUpsertRow mode generateAutoOnZero next raw table index allocate prepare finish
+                        | Some(index, input, finish) ->
+                            let reservation = checkedUpsertReservation store dbName table input
+                            let prepareRow next raw =
+                                prepareCheckedUpsertRow mode generateAutoOnZero next raw table index reservation prepare finish
+                            table.NextAutoId, prepareRow, reservation.Upper
                         | None ->
-                            processRow mode generateAutoOnZero next raw table.Columns Set.empty
-                            |> Result.bind (fun (values, nextId, assigned, omitted) ->
-                                prepare omitted (Array.ofList values)
-                                |> Result.map (fun candidate -> candidate, nextId, assigned))
+                            let count = generatedAutoValueCount mode generateAutoOnZero table idxs Set.empty (rowsIn |> List.choose Result.toOption)
+                            let first, upper = reserveAutoIncrementRange store dbName table.OriginalName table.NextAutoId count
+                            first, prepareStandardRow, (fun () -> upper)
                     let uniqueGroups = uniqueKeyGroups table
                     let secondaryGroups = secondaryKeyGroups table
 
@@ -11876,7 +11902,7 @@ and private upsertRowsInTable
                     |> foldWithCancellation
                         step
                         (Ok
-                            { NextAutoId = firstAutoId
+                            { NextAutoId = initialAutoId
                               FirstGeneratedId = None
                               LastExplicitId = None
                               Affected = 0
