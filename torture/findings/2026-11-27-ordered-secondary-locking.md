@@ -104,9 +104,20 @@ clustered-record wait behavior.
 
 An INSERT with a known duplicate still claims the matching record.
 Its proposed secondary key does not enter the index and does not wait
-on a gap. REPLACE still checks the replacement key because it can enter
-the gap. Destination claims for the update branch of a duplicate-key
-upsert remain open.
+on a gap. REPLACE checks the replacement key. ON DUPLICATE KEY UPDATE
+checks the destination keys produced by its assignments and any foreign
+key cascades. The statement releases the catalog locks before waiting
+and publishes its staged changes after the destination is available.
+
+The pinned MySQL image, Fsdb memory mode, and Fsdb WAL mode agreed on
+VALUES and SELECT upserts, checked and ignored checked-view upserts,
+and ON UPDATE CASCADE moving a child into the protected gap in either
+the same database or a different database. Changing only the primary
+key can move the secondary record between otherwise equal keys. A
+blocked row rolled back the preceding insert in the same batch.
+After either a reader commit or rollback, the upsert finished and its
+user-variable assignment had executed once. A disjoint write by the
+reader remained visible only when the reader committed.
 
 A pending uncommitted key can bound the gap after `SKIP LOCKED`.
 In the audited case, the cursor returns score 10 while a pending score
@@ -125,3 +136,24 @@ The audited path requires whole exact-numeric key parts and explicit
 primary-key columns in the secondary index. Implicit suffixes, mixed
 residual predicates, purge of ordinary secondary boundary records, and
 covering shared-record ownership remain open.
+
+With `KEY ix(k,stamp)` and `PRIMARY KEY (id)`, MySQL and Fsdb both
+returned id 10 for the first `k=7` row ordered by `stamp,id` when
+ids 20 and 10 shared stamp 10. A concurrent insert at `(7,10,5)`
+in `(k,stamp,id)` order timed out on MySQL and succeeded on Fsdb.
+An insert at `(7,10,15)` succeeded on both. The reverse scan returned id 30 at
+stamp 30. MySQL blocked inserts at `(7,30,25)`, `(7,30,35)` and
+`(7,35,35)`, while Fsdb accepted all three.
+
+## Primary and unique upsert destinations
+
+On `t(id INT PRIMARY KEY,u INT NOT NULL,UNIQUE KEY ux(u))`, a locking
+read of missing id 15 between ids 10 and 20 blocks an ordinary UPDATE
+to id 15 on both engines. An upsert changing id 40 to id 15 returns
+1205 on MySQL and succeeds on Fsdb.
+
+When a transaction moves id 30 to unique value 7, MySQL waits for that
+transaction before an upsert can assign 7 to id 40. The upsert returns
+1062 after the holder commits and succeeds after the holder rolls back.
+Fsdb's upsert succeeds immediately and can cause the holder's commit to
+return 1205.

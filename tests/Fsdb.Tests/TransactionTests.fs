@@ -8678,7 +8678,7 @@ let tests =
                   next
               let owner = create 1 store
               run owner "CREATE TABLE jobs(id INT PRIMARY KEY,k INT,stamp INT,KEY ix(k,stamp,id))" (Affected 0UL) |> ignore
-              run owner "INSERT INTO jobs VALUES(1,0,0),(10,7,10),(40,8,0)" (Affected 3UL) |> ignore
+              run owner "INSERT INTO jobs VALUES(1,0,0),(10,7,10),(40,8,0),(60,7,10)" (Affected 4UL) |> ignore
               let reader = run owner "BEGIN" (Affected 0UL)
               let reader =
                   run reader "SELECT id FROM jobs FORCE INDEX(ix) WHERE k=7 ORDER BY stamp,id LIMIT 1 FOR UPDATE"
@@ -8688,9 +8688,54 @@ let tests =
               TestSupport.Sql.expectError 1062 duplicate "the secondary value is never inserted"
               let writer = run writer "INSERT IGNORE INTO jobs VALUES(40,7,5)" (Affected 0UL)
               let writer = run writer "INSERT INTO jobs VALUES(40,7,5) ON DUPLICATE KEY UPDATE stamp=1" (Affected 2UL)
-              let _, replace = handle writer "REPLACE INTO jobs VALUES(40,7,5)"
+              let movingUpsert = "INSERT INTO jobs VALUES(40,8,0) ON DUPLICATE KEY UPDATE k=7,stamp=5"
+              let writer, move = handle writer movingUpsert
+              TestSupport.Sql.expectError 1205 move "the duplicate update moves into the secondary gap"
+              let writer, primaryMove =
+                  handle writer "INSERT INTO jobs VALUES(60,7,10) ON DUPLICATE KEY UPDATE id=5"
+              TestSupport.Sql.expectError 1205 primaryMove "the primary key changes the secondary index position"
+              let writer, replace = handle writer "REPLACE INTO jobs VALUES(40,7,5)"
               TestSupport.Sql.expectError 1205 replace "REPLACE really moves into the secondary gap"
+              let writer = run writer "SELECT k,stamp FROM jobs WHERE id=40" (ResultSet([ "k"; "stamp" ], [ [ Some "8"; Some "1" ] ]))
               run reader "ROLLBACK" (Affected 0UL) |> ignore
+              run writer movingUpsert (Affected 2UL) |> ignore
+
+          testCase "duplicate-key updates publish once after a secondary gap wait"
+          <| fun _ ->
+              for ending, otherPayload in [ "COMMIT", "99"; "ROLLBACK", "0" ] do
+                  let store = Fsdb.Storage.create ()
+                  let run session sql expected =
+                      let next, result = handle session sql
+                      Expect.equal result expected sql
+                      next
+                  let owner = create 1 store
+                  run owner "CREATE TABLE jobs(id INT PRIMARY KEY,k INT,stamp INT,payload INT,KEY ix(k,stamp,id))" (Affected 0UL)
+                  |> ignore
+                  run owner "INSERT INTO jobs VALUES(1,0,0,0),(10,7,10,0),(40,8,0,0)" (Affected 3UL) |> ignore
+                  let holder = run owner "BEGIN" (Affected 0UL)
+                  let holder =
+                      run holder "SELECT id FROM jobs FORCE INDEX(ix) WHERE k=7 ORDER BY stamp,id LIMIT 1 FOR UPDATE"
+                          (ResultSet([ "id" ], [ [ Some "10" ] ]))
+                  let holder = run holder "UPDATE jobs SET payload=99 WHERE id=1" (Affected 1UL)
+                  let writer = run (create 2 store) "SET innodb_lock_wait_timeout=5" (Affected 0UL)
+                  let writer = run writer "SET @evaluations=0" (Affected 0UL)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          handle writer
+                              "INSERT INTO jobs SELECT 40,8,0,0 ON DUPLICATE KEY UPDATE k=7,stamp=5,payload=(@evaluations:=@evaluations+1)")
+                  let blocked () = lock store.LockWaits.SyncRoot (fun () -> store.LockWaits.Edges.Count > 0)
+                  let entered =
+                      Threading.SpinWait.SpinUntil((fun () -> blocked () || waiting.IsCompleted), TimeSpan.FromSeconds 3.0)
+                  let wasWaiting = entered && blocked ()
+                  run holder ending (Affected 0UL) |> ignore
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the upsert finishes after the gap is released"
+                  Expect.isTrue wasWaiting "the upsert waits on the destination gap"
+                  let writer, result = waiting.Result
+                  Expect.equal result (Affected 2UL) "the duplicate row changed"
+                  run writer "SELECT @evaluations AS n" (ResultSet([ "n" ], [ [ Some "1" ] ])) |> ignore
+                  run writer "SELECT payload FROM jobs WHERE id IN (1,40) ORDER BY id"
+                      (ResultSet([ "payload" ], [ [ Some otherPayload ]; [ Some "1" ] ]))
+                  |> ignore
 
           testCase "ordered secondary SKIP LOCKED retains the gap after the pending record"
           <| fun _ ->

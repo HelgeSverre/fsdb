@@ -1473,6 +1473,20 @@ let dropDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
 
         published |> Result.map (fun acknowledge -> acknowledge ())
 
+let private overlayChangedTables (original: Database) (updated: Database) (current: Database) =
+    if obj.ReferenceEquals(original, current) then
+        updated
+    else
+        // A trigger can re-enter the slot and publish changes to other tables.
+        let keys = Set.union (original |> Map.keys |> Set.ofSeq) (updated |> Map.keys |> Set.ofSeq)
+        (current, keys)
+        ||> Set.fold (fun published key ->
+            match Map.tryFind key original, Map.tryFind key updated with
+            | Some before, Some after when obj.ReferenceEquals(before, after) -> published
+            | _, Some after -> Map.add key after published
+            | None, None -> published
+            | Some _, None -> Map.remove key published)
+
 /// Applies `f` to `dbName`'s current table map and swaps the result into
 /// that database's own `Database ref` cell, under that cell's own lock (see
 /// below). A completely
@@ -1509,26 +1523,7 @@ let private withDatabasePublishing
                         let current = slot.Value
 
                         publishCatalogRoots store (fun () ->
-                            slot.Value <-
-                                if LanguagePrimitives.PhysicalEquality original current then
-                                    db'
-                                else
-                                    // Trigger bodies may re-enter this slot while the outer
-                                    // statement still owns its immutable starting root.
-                                    let keys =
-                                        Set.union
-                                            (original |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
-                                            (db' |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
-
-                                    keys
-                                    |> Set.fold
-                                        (fun published key ->
-                                            match Map.tryFind key original, Map.tryFind key db' with
-                                            | Some before, Some after when LanguagePrimitives.PhysicalEquality before after -> published
-                                            | _, Some after -> Map.add key after published
-                                            | Some _, None -> Map.remove key published
-                                            | None, None -> published)
-                                        current)
+                            slot.Value <- overlayChangedTables original db' current)
 
                         Ok(result, prepareResultEvents store eventsOf result))
 
@@ -4802,7 +4797,7 @@ let private acquireKeylessWriteCohort (store: Store) deadline database context o
     acquireStripeWithBlockers deadline store.LockWaits database context SharedStripe WaitUntilAvailable owner otherOwners
     |> snd
 
-let private withInsertLocks (store: Store) (dbName: string) tableName rowIds keys body =
+let private withInsertLocksUsing transactionLocks (store: Store) (dbName: string) tableName rowIds keys body =
     let timeout = Fsdb.Limits.statementLockWaitTimeout ()
     let keyless =
         if List.exists primaryLockKey keys
@@ -4813,12 +4808,12 @@ let private withInsertLocks (store: Store) (dbName: string) tableName rowIds key
             |> Option.exists (primaryKeyColumns >> List.isEmpty)
 
     if not keyless then
-        withWriteLocksFor timeout store dbName tableName rowIds keys body
+        withWriteLocksForContext transactionLocks timeout true store dbName tableName rowIds keys body
     else
         // Inserting transactions share one cohort. A scan waits for those
         // inserts and can keep the opposing cohort until transaction end.
         let context, release =
-            match store.TransactionLocks with
+            match transactionLocks with
             | Some context -> context, false
             | None -> createTransactionLockContext (store.NextLockOwnerId()), true
         let cache = keyLockCache store (lockNamespaceKey dbName tableName)
@@ -4831,6 +4826,9 @@ let private withInsertLocks (store: Store) (dbName: string) tableName rowIds key
                 reraise ()
         finally
             if release then releaseAllLockStripes context
+
+let private withInsertLocks (store: Store) dbName tableName rowIds keys body =
+    withInsertLocksUsing store.TransactionLocks store dbName tableName rowIds keys body
 
 let internal lockKeylessWriteScan timeout (store: Store) database tableName protectGaps refresh =
     match store.TransactionLocks with
@@ -12827,108 +12825,9 @@ let internal isViewCheckError = function
     | ExpressionError(1369, _) -> true
     | _ -> false
 
-/// Upserts through the collation-aware unique indexes. MySQL counts a changed
-/// match as two affected rows; an unchanged match counts as one only with
-/// CLIENT_FOUND_ROWS, otherwise zero.
-let rec upsertRows
-    (store: Store)
-    (dbName: string)
-    (tableName: string)
-    (columns: string list option)
-    (rowsIn: Value list list)
-    (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
-    (applyUpdate: Value[] -> Value[] -> Result<Value[], StorageError>)
-    (foundRows: bool)
-    : Result<InsertOutcome, StorageError> =
-    upsertRowsWithOrdinal
-        store
-        dbName
-        tableName
-        columns
-        rowsIn
-        prepare
-        (fun _ existing candidate -> applyUpdate existing candidate)
-        None
-        foundRows
-
-and upsertRowsWithOrdinal
-    (store: Store)
-    (dbName: string)
-    (tableName: string)
-    (columns: string list option)
-    (rowsIn: Value list list)
-    (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
-    (applyUpdate: int -> Value[] -> Value[] -> Result<Value[], StorageError>)
-    (assignedColumns: Set<int> option)
-    (foundRows: bool)
-    : Result<InsertOutcome, StorageError> =
-    upsertRowsWithOrdinalChecked store dbName tableName columns (List.map Ok rowsIn) prepare applyUpdate None assignedColumns foundRows false StandardAllocation
-
-and internal upsertRowsWithOrdinalChecked
-    (store: Store)
-    (dbName: string)
-    (tableName: string)
-    (columns: string list option)
-    (rowsIn: Result<Value list, StorageError> list)
-    (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
-    (applyUpdate: int -> Value[] -> Value[] -> Result<Value[], StorageError>)
-    (checkChangedRow: (Value[] -> Value[] -> Result<Value[], StorageError>) option)
-    (assignedColumns: Set<int> option)
-    (foundRows: bool)
-    (ignoreViewCheck: bool)
-    (allocation: UpsertAllocation)
-    : Result<InsertOutcome, StorageError> =
-        let key = normalizeTableName tableName
-
-        let eventsOf
-            (summary: UpsertSummary,
-             cascaded: Map<TableAddress, RowUpdate list>,
-             catalog: Catalog)
-            =
-            [ if not summary.InsertedRows.IsEmpty then
-                  RowsInserted(dbName, tableName, summary.InsertedRows)
-
-              if not summary.UpdatedRows.IsEmpty then
-                  RowsUpdatedById(dbName, tableName, summary.UpdatedRows)
-
-              for nextId in Option.toList summary.AutoIncrementAdvance do
-                  AutoIncrementAdvanced(dbName, tableName, nextId)
-
-              for KeyValue(address, changes) in cascaded do
-                  if not changes.IsEmpty then
-                      let database, table = catalogTableIdentity catalog address
-                      RowsUpdatedById(database, table, changes) ]
-
-        let publish () =
-            withReferentialCatalogPublishing store dbName SharedAccess eventsOf (fun catalog db ->
-                virtualWriteGuard store dbName tableName
-                |> Result.bind (fun () -> tryGetTable dbName db tableName)
-                |> Result.bind (fun table ->
-                    upsertRowsInTable store dbName catalog key table columns rowsIn prepare applyUpdate checkChangedRow assignedColumns foundRows ignoreViewCheck allocation)
-                |> Result.map (fun (catalog', cascaded, summary) -> catalog', (summary, cascaded, catalog)))
-
-        let result =
-            captureIndexExpressionError (fun () ->
-                let lockRows = rowsIn |> List.choose (Result.toOption >> Option.map (List.map Some))
-                match tryInsertLockTargets store dbName tableName columns lockRows with
-                | Some targets when not lockRows.IsEmpty ->
-                    withInsertLocks store dbName tableName targets.RowIds targets.Keys publish
-                | _ -> publish ())
-
-        match result with
-        | Ok(summary, _, _) ->
-            Ok {
-                LastInsertId = summary.LastInsertId
-                GeneratedId = summary.GeneratedId
-                Affected = summary.Affected
-                InsertedRows = summary.InsertedRows
-                IgnoredErrors = []
-            }
-        | Error e -> Error e
-
 /// Applies an upsert batch and returns direct changes alongside any foreign-key
 /// cascades so publication can emit matching row events.
-and private upsertRowsInTable
+let private upsertRowsInTable
     (store: Store)
     (dbName: string)
     (catalog: Catalog)
@@ -13181,46 +13080,6 @@ and private upsertRowsInTable
                           InsertedRows = List.rev state.InsertedRev
                           UpdatedRows = List.rev state.UpdatedRev
                           AutoIncrementAdvance = autoIncrementAdvance }))
-
-/// The duplicate outcome determines the next candidate's ID, so claim each row's
-/// actual keys before applying it. All writes stay in the caller's statement snapshot.
-let internal upsertCheckedRowsDynamically store dbName tableName columns rows input prepare finish applyUpdate checkChangedRow
-    assignedColumns assignsAuto foundRows =
-    checkedUpsertPreparation store dbName tableName columns input prepare finish
-    |> Result.bind (fun prepareCandidate ->
-        let step result (ordinal, values) =
-            result
-            |> Result.bind (fun (firstGenerated, lastExplicit, affected, inserted) ->
-                Diagnostics.withRowNumber (ordinal + 1) (fun () ->
-                    match prepareCandidate values with
-                    | Error error when isViewCheckError error ->
-                        let code, message = toMySqlError error
-                        Diagnostics.warning code message
-                        Ok(firstGenerated, lastExplicit, affected, inserted)
-                    | Error error -> Error error
-                    | Ok prepared ->
-                        let candidate = prepared.Candidate
-                        acquirePreparedInsertWriteTargets store dbName tableName [ candidate.Values ]
-                        upsertRowsWithOrdinalChecked
-                            store dbName tableName None [ Ok(Array.toList candidate.Values) ] (fun _ row -> Ok row)
-                            (fun _ -> applyUpdate ordinal) checkChangedRow assignedColumns foundRows true
-                            (PreparedAllocation(prepared, assignsAuto))
-                        |> Result.map (fun outcome ->
-                            let assigned = if outcome.InsertedRows.IsEmpty then None else candidate.AssignedAutoId
-                            let firstGenerated, lastExplicit =
-                                trackAutoIncrementAssignment assigned firstGenerated lastExplicit
-                            let inserted = outcome.InsertedRows |> List.fold (fun acc row -> row :: acc) inserted
-                            firstGenerated, lastExplicit, affected + outcome.Affected, inserted)))
-
-        rows
-        |> List.indexed
-        |> foldWithCancellation step (Ok(None, None, 0, []))
-        |> Result.map (fun (firstGenerated, lastExplicit, affected, inserted) ->
-            { LastInsertId = Option.defaultValue 0L (Option.orElse lastExplicit firstGenerated)
-              GeneratedId = firstGenerated
-              Affected = affected
-              InsertedRows = List.rev inserted
-              IgnoredErrors = [] }))
 
 /// Deletes `toDelete` (rows already known to belong to `tableKey`, e.g. from
 /// `deleteRows`'s WHERE match) from `db`, applying every other table's
@@ -14403,9 +14262,26 @@ type private StagedUpdate =
       OriginalCatalog: Catalog
       WarningPositions: Dictionary<RowId, int> option }
 
+let private orderedSecondaryWriteGroups (table: Table) =
+    let primary = primaryKeyColumns table |> List.choose (resolveColumn table.Columns >> Result.toOption)
+    primary, (insertOrderKeyGroups table |> List.filter (exactOrderedSecondaryKey table primary))
+
+let private orderedUpdateKeys table rows =
+    let primary, groups = orderedSecondaryWriteGroups table
+    [ for group in groups do
+          for change in rows do
+              if group.Indices |> List.exists (fun index -> change.Before.[index] <> change.After.[index]) then
+                  let encode indices =
+                      indices |> List.map (fun index -> change.After.[index]) |> encodeEqualityValues table.Columns indices
+                  yield secondaryOrderLockName group (encode group.Indices) (Some(encode primary)) ]
+
+let private directAndCascadedUpdates dbName tableName direct cascaded =
+    if List.isEmpty direct then cascaded
+    else Map.change (tableAddress dbName tableName) (fun affected -> Some(direct @ Option.defaultValue [] affected)) cascaded
+
 let private updateKeyClaims dbName tableName (batch: StagedUpdate) =
     let catalog = batch.OriginalCatalog
-    Map.change (tableAddress dbName tableName) (fun affected -> Some(batch.Changes @ Option.defaultValue [] affected)) batch.Cascaded
+    directAndCascadedUpdates dbName tableName batch.Changes batch.Cascaded
     |> Map.toList
     |> List.choose (fun (address, rows) ->
         tryCatalogTable address catalog
@@ -14420,17 +14296,7 @@ let private updateKeyClaims dbName tableName (batch: StagedUpdate) =
                                   | Some key when encodeUniqueKey table.Columns group change.Before <> Some key ->
                                       yield { Change = change; Group = group; Key = key }
                                   | _ -> () ])
-            let primary =
-                primaryKeyColumns table
-                |> List.choose (resolveColumn table.Columns >> Result.toOption)
-            let ordered = insertOrderKeyGroups table |> List.filter (exactOrderedSecondaryKey table primary)
-            let orderedKeys =
-                [ for change in rows do
-                      for group in ordered do
-                          if group.Indices |> List.exists (fun index -> change.Before.[index] <> change.After.[index]) then
-                              let encode indices =
-                                  indices |> List.map (fun index -> change.After.[index]) |> encodeEqualityValues table.Columns indices
-                              yield secondaryOrderLockName group (encode group.Indices) (Some(encode primary)) ]
+            let orderedKeys = orderedUpdateKeys table rows
             if moves.IsEmpty && orderedKeys.IsEmpty then None
             else
                 Some
@@ -14474,29 +14340,26 @@ let private validateMovedUniqueKeys currentCatalog groups =
         | Some error -> Error error
         | None -> Ok()
 
-let private withUpdateLockOwner (store: Store) body =
+let private withWriteLockOwner (store: Store) body =
     match store.TransactionLocks with
     | Some owner -> body owner
     | None ->
-        // An autocommit update keeps one wait-graph identity across its row
-        // locks and every destination key in a referential action.
+        // An autocommit statement keeps one wait-graph identity across its
+        // row locks and destination keys.
         let owner = createTransactionLockContext (store.NextLockOwnerId())
         try body owner
         finally releaseAllLockStripes owner
 
-let private withUpdateLocks owner store database table rowIds keys body =
+let private withOwnedWriteLocks owner store database table rowIds keys body =
     withWriteLocksForContext (Some owner) (Fsdb.Limits.statementLockWaitTimeout ()) true
         store database table rowIds keys body
 
-let private withUpdateKeyClaims owner (store: Store) groups publish =
+let private withDestinationKeyClaims owner store destinations publish =
     let rec claim = function
         | [] -> publish ()
-        | group :: remaining ->
-            let database, table = group.Target
-            let uniqueKeys = group.Moves |> List.map (fun move -> uniqueKeyLockName move.Group move.Key)
-            let keys = uniqueKeys @ group.OrderedKeys
-            withUpdateLocks owner store database table [] keys (fun () -> claim remaining)
-    claim groups
+        | ((database, table), keys) :: remaining ->
+            withOwnedWriteLocks owner store database table [] keys (fun () -> claim remaining)
+    claim destinations
 
 let internal tryIgnoreUpdateConstraintError = function
     | (ForeignKeyParentMissing _ | ForeignKeyRestrict _ | DuplicateKey _) as error ->
@@ -14558,7 +14421,11 @@ let private rebuildAcceptedUpdates (original: Table) changes =
             SecondaryOrder = order }
 
 let private withCheckedUpdateDestinations owner store policy groups replaceTable (batch, result: StagedUpdate) publish =
-    withUpdateKeyClaims owner store groups (fun () ->
+    let destinations =
+        groups |> List.map (fun group ->
+            let uniqueKeys = group.Moves |> List.map (fun move -> uniqueKeyLockName move.Group move.Key)
+            group.Target, uniqueKeys @ group.OrderedKeys)
+    withDestinationKeyClaims owner store destinations (fun () ->
         match policy, groups with
         | _, [] -> publish (batch, result)
         | RejectConstraintViolation, _ ->
@@ -14587,36 +14454,51 @@ let private withCheckedUpdateDestinations owner store policy groups replaceTable
             | _ -> publish (batch, result)
         | SkipConstraintViolation, _ -> publish (batch, result))
 
-let private withQualifiedUpdatePublishing
-    owner
+let private withStagedCatalogSlots (store: Store) (dbName: string) body =
+    let catalog = store.Catalog
+    if catalogHasQualifiedForeignKeysAffecting catalog (Set.singleton (dbName.ToLowerInvariant())) then
+        withCurrentCatalogSlots store dbName body
+    else
+        match tryCatalogDatabaseEntry dbName catalog with
+        | Some(name, _) ->
+            match store.Databases.TryGetValue name with
+            | true, slot ->
+                lock slot (fun () ->
+                    match store.Databases.TryGetValue name with
+                    | true, current when obj.ReferenceEquals(current, slot) ->
+                        body [ name, slot ] (Map.add name slot.Value catalog)
+                    | _ -> raise (LockWaitTimeout dbName))
+            | false, _ -> raise (LockWaitTimeout dbName)
+        | None -> body [] catalog
+
+let private withStagedCatalogPublishing
     (store: Store)
     dbName
-    policy
-    tableName
     eventsOf
-    operation
+    (operation: Catalog -> Database -> Result<Catalog * 'result, StorageError>)
+    keysOf
+    claimKeys
     =
     let publishAfterKeyWait baseCatalog batchCatalog result keys () =
-        withCheckedUpdateDestinations owner store policy keys setCatalogTable (batchCatalog, result) (fun (batchCatalog, result) ->
-            // Qualified foreign keys validate the full catalog at commit.
-            // Include the key holder's committed changes in that baseline.
+        claimKeys keys (batchCatalog, result) (fun (batchCatalog, result) ->
+            // Preserve the key holder's committed changes when rebasing the statement.
             match prepareDynamicWriteRebase store with
             | Some(rebase, prepared) -> applyDynamicWriteRebase store rebase prepared
             | None -> ()
 
             let acknowledge =
                 withReferentialSchemaLock SharedAccess store (fun () ->
-                    withCurrentCatalogSlots store dbName (fun slots liveCatalog ->
+                    withStagedCatalogSlots store dbName (fun slots liveCatalog ->
                         let merged =
                             (liveCatalog, batchCatalog)
                             ||> Map.fold (fun catalog database batch ->
                                 let original = Map.find database baseCatalog
                                 if obj.ReferenceEquals(original, batch) then catalog
                                 else
-                                    match Map.tryFind database liveCatalog with
+                                    match List.tryFind (fst >> (=) database) slots with
                                     | None -> raise (LockWaitTimeout database)
-                                    | Some live ->
-                                        Map.add database (mergeDatabase database original batch live) catalog)
+                                    | Some(_, slot) ->
+                                        Map.add database (mergeDatabase database original batch slot.Value) catalog)
 
                         let catalogUnchanged =
                             baseCatalog.Count = liveCatalog.Count
@@ -14632,15 +14514,17 @@ let private withQualifiedUpdatePublishing
 
     let prepared =
         withReferentialSchemaLock SharedAccess store (fun () ->
-            withCurrentCatalogSlots store dbName (fun slots baseCatalog ->
+            withStagedCatalogSlots store dbName (fun slots baseCatalog ->
                 match tryCatalogDatabase dbName baseCatalog with
                 | None -> Error(NoSuchDatabase dbName)
                 | Some database ->
                     operation baseCatalog database
                     |> Result.map (fun (batchCatalog, result) ->
-                        match updateKeyClaims dbName tableName result with
+                        match keysOf result with
                         | [] ->
-                            publishExistingCatalog store slots batchCatalog
+                            publishCatalogRoots store (fun () ->
+                                for name, slot in slots do
+                                    slot.Value <- overlayChangedTables baseCatalog.[name] batchCatalog.[name] slot.Value)
                             let acknowledge = prepareResultEvents store eventsOf result
                             fun () -> acknowledge (); Ok result
                         | keys ->
@@ -14649,6 +14533,163 @@ let private withQualifiedUpdatePublishing
                             publishAfterKeyWait baseCatalog batchCatalog result keys)))
 
     prepared |> Result.bind (fun publish -> publish ())
+
+let private withQualifiedUpdatePublishing owner store dbName policy tableName eventsOf operation =
+    withStagedCatalogPublishing store dbName eventsOf operation (updateKeyClaims dbName tableName)
+        (fun keys batch publish -> withCheckedUpdateDestinations owner store policy keys setCatalogTable batch publish)
+
+/// Upserts through the collation-aware unique indexes. MySQL counts a changed
+/// match as two affected rows; an unchanged match counts as one only with
+/// CLIENT_FOUND_ROWS, otherwise zero.
+let rec upsertRows
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columns: string list option)
+    (rowsIn: Value list list)
+    (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
+    (applyUpdate: Value[] -> Value[] -> Result<Value[], StorageError>)
+    (foundRows: bool)
+    : Result<InsertOutcome, StorageError> =
+    upsertRowsWithOrdinal
+        store
+        dbName
+        tableName
+        columns
+        rowsIn
+        prepare
+        (fun _ existing candidate -> applyUpdate existing candidate)
+        None
+        foundRows
+
+and upsertRowsWithOrdinal
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columns: string list option)
+    (rowsIn: Value list list)
+    (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
+    (applyUpdate: int -> Value[] -> Value[] -> Result<Value[], StorageError>)
+    (assignedColumns: Set<int> option)
+    (foundRows: bool)
+    : Result<InsertOutcome, StorageError> =
+    upsertRowsWithOrdinalChecked store dbName tableName columns (List.map Ok rowsIn) prepare applyUpdate None assignedColumns foundRows false StandardAllocation
+
+and internal upsertRowsWithOrdinalChecked
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columns: string list option)
+    (rowsIn: Result<Value list, StorageError> list)
+    (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
+    (applyUpdate: int -> Value[] -> Value[] -> Result<Value[], StorageError>)
+    (checkChangedRow: (Value[] -> Value[] -> Result<Value[], StorageError>) option)
+    (assignedColumns: Set<int> option)
+    (foundRows: bool)
+    (ignoreViewCheck: bool)
+    (allocation: UpsertAllocation)
+    : Result<InsertOutcome, StorageError> =
+        let key = normalizeTableName tableName
+
+        let eventsOf
+            (summary: UpsertSummary,
+             cascaded: Map<TableAddress, RowUpdate list>,
+             catalog: Catalog)
+            =
+            [ if not summary.InsertedRows.IsEmpty then
+                  RowsInserted(dbName, tableName, summary.InsertedRows)
+
+              if not summary.UpdatedRows.IsEmpty then
+                  RowsUpdatedById(dbName, tableName, summary.UpdatedRows)
+
+              for nextId in Option.toList summary.AutoIncrementAdvance do
+                  AutoIncrementAdvanced(dbName, tableName, nextId)
+
+              for KeyValue(address, changes) in cascaded do
+                  if not changes.IsEmpty then
+                      let database, table = catalogTableIdentity catalog address
+                      RowsUpdatedById(database, table, changes) ]
+
+        let operation catalog db =
+            virtualWriteGuard store dbName tableName
+            |> Result.bind (fun () -> tryGetTable dbName db tableName)
+            |> Result.bind (fun table ->
+                upsertRowsInTable store dbName catalog key table columns rowsIn prepare applyUpdate checkChangedRow assignedColumns foundRows ignoreViewCheck allocation)
+            |> Result.map (fun (catalog', cascaded, summary) -> catalog', (summary, cascaded, catalog))
+
+        let keysOf ((summary: UpsertSummary), cascaded, catalog) =
+            directAndCascadedUpdates dbName tableName summary.UpdatedRows cascaded
+            |> Map.toList
+            |> List.choose (fun (address, changes) ->
+                tryCatalogTable address catalog
+                |> Option.bind (fun table ->
+                    match orderedUpdateKeys table changes with
+                    | [] -> None
+                    | keys -> Some(catalogTableIdentity catalog address, keys)))
+
+        let result =
+            captureIndexExpressionError (fun () ->
+                withIndexExpressionDiagnostics store (fun () ->
+                    withWriteLockOwner store (fun owner ->
+                        let claimKeys destinations batch publish =
+                            withDestinationKeyClaims owner store destinations (fun () -> publish batch)
+                        let publish () = withStagedCatalogPublishing store dbName eventsOf operation keysOf claimKeys
+                        let lockRows = rowsIn |> List.choose (Result.toOption >> Option.map (List.map Some))
+                        match tryInsertLockTargets store dbName tableName columns lockRows with
+                        | Some targets when not lockRows.IsEmpty ->
+                            withInsertLocksUsing (Some owner) store dbName tableName targets.RowIds targets.Keys publish
+                        | _ -> publish ())))
+
+        match result with
+        | Ok(summary, _, _) ->
+            Ok {
+                LastInsertId = summary.LastInsertId
+                GeneratedId = summary.GeneratedId
+                Affected = summary.Affected
+                InsertedRows = summary.InsertedRows
+                IgnoredErrors = []
+            }
+        | Error e -> Error e
+
+/// The duplicate outcome determines the next candidate's ID, so claim each row's
+/// actual keys before applying it. All writes stay in the caller's statement snapshot.
+let internal upsertCheckedRowsDynamically store dbName tableName columns rows input prepare finish applyUpdate checkChangedRow
+    assignedColumns assignsAuto foundRows =
+    checkedUpsertPreparation store dbName tableName columns input prepare finish
+    |> Result.bind (fun prepareCandidate ->
+        let step result (ordinal, values) =
+            result
+            |> Result.bind (fun (firstGenerated, lastExplicit, affected, inserted) ->
+                Diagnostics.withRowNumber (ordinal + 1) (fun () ->
+                    match prepareCandidate values with
+                    | Error error when isViewCheckError error ->
+                        let code, message = toMySqlError error
+                        Diagnostics.warning code message
+                        Ok(firstGenerated, lastExplicit, affected, inserted)
+                    | Error error -> Error error
+                    | Ok prepared ->
+                        let candidate = prepared.Candidate
+                        acquirePreparedInsertWriteTargets store dbName tableName [ candidate.Values ]
+                        upsertRowsWithOrdinalChecked
+                            store dbName tableName None [ Ok(Array.toList candidate.Values) ] (fun _ row -> Ok row)
+                            (fun _ -> applyUpdate ordinal) checkChangedRow assignedColumns foundRows true
+                            (PreparedAllocation(prepared, assignsAuto))
+                        |> Result.map (fun outcome ->
+                            let assigned = if outcome.InsertedRows.IsEmpty then None else candidate.AssignedAutoId
+                            let firstGenerated, lastExplicit =
+                                trackAutoIncrementAssignment assigned firstGenerated lastExplicit
+                            let inserted = outcome.InsertedRows |> List.fold (fun acc row -> row :: acc) inserted
+                            firstGenerated, lastExplicit, affected + outcome.Affected, inserted)))
+
+        rows
+        |> List.indexed
+        |> foldWithCancellation step (Ok(None, None, 0, []))
+        |> Result.map (fun (firstGenerated, lastExplicit, affected, inserted) ->
+            { LastInsertId = Option.defaultValue 0L (Option.orElse lastExplicit firstGenerated)
+              GeneratedId = firstGenerated
+              Affected = affected
+              InsertedRows = List.rev inserted
+              IgnoredErrors = [] }))
 
 let internal canBatchIgnoredUpdates (store: Store) database table =
     // Referential actions retain per-row publication so later rows see preceding cascades.
@@ -14802,7 +14843,7 @@ let private updateRowsCore
 
         match candidates with
         | None ->
-            withUpdateLocks owner store dbName tableName (fullScanRowIds store dbName tableName) [] (fun () ->
+            withOwnedWriteLocks owner store dbName tableName (fullScanRowIds store dbName tableName) [] (fun () ->
                 if qualifiedForeignKeys then
                     withQualifiedUpdatePublishing owner store dbName constraintPolicy tableName eventsOf (apply None)
                 else publishPrepared [] (apply None))
@@ -14819,7 +14860,7 @@ let private updateRowsCore
             let applyRefreshed catalog db = apply (Some(refreshCandidates db)) catalog db
 
             // Refresh only inside publication locks, retaining the requested row order.
-            withUpdateLocks owner store dbName tableName rowIds [] (fun () ->
+            withOwnedWriteLocks owner store dbName tableName rowIds [] (fun () ->
                 if qualifiedForeignKeys then
                     withQualifiedUpdatePublishing owner store dbName constraintPolicy tableName eventsOf applyRefreshed
                 else
@@ -14827,7 +14868,7 @@ let private updateRowsCore
 
     let result =
         captureIndexExpressionError (fun () ->
-            withIndexExpressionDiagnostics store (fun () -> withUpdateLockOwner store publish))
+            withIndexExpressionDiagnostics store (fun () -> withWriteLockOwner store publish))
 
     match result with
     | Ok batch -> Ok batch.Changes.Length

@@ -963,7 +963,9 @@ and preserve the gaps at the records they visit successfully.
 also check pending insertion order before filling OFFSET and LIMIT.
 [Secondary next-key locks](torture/findings/2026-11-27-ordered-secondary-locking.md#next-key-locks)
 protect the visited gaps on audited exact-numeric indexes that explicitly
-include the primary key. The gaps block both inserts and UPDATE key moves.
+include the primary key. The gaps block inserts and key moves from UPDATE
+and ON DUPLICATE KEY UPDATE, including audited upserts through checked
+views and cascaded moves to a child table.
 Lower isolation retains row-only locking and can release OFFSET rows.
 Implicit primary-key suffixes, other secondary key types, and covering
 FOR SHARE record ownership remain open.
@@ -990,6 +992,9 @@ rechecks the destination after the wait and returns 1062 if the insert
 committed. [Batched UPDATE IGNORE](torture/findings/2026-11-27-ignored-update-key-waits.md)
 keeps unrelated updates after the wait. [Wrapped autocommit updates](torture/findings/2026-11-27-joined-update-key-waits.md)
 now do the same for audited joins, CTEs and correlated filters.
+[Primary and unique upsert destinations](torture/findings/2026-11-27-ordered-secondary-locking.md#primary-and-unique-upsert-destinations)
+can still skip the primary-key gap or fail to wait for a pending
+unique-key owner.
 [Joins through temporary sources](torture/findings/2026-11-27-joined-update-key-waits.md#session-local-join-sources)
 also refresh permanent keys after a wait, including when a temporary
 table shadows a permanent source. [Batched warning retention](torture/findings/2026-11-27-ignored-update-key-waits.md#warning-order-and-retention)
