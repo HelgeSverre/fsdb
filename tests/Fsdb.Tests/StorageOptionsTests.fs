@@ -419,7 +419,7 @@ let tests =
               let database = store.Catalog.[Storage.defaultDatabase]
               let table = database.["docs"]
               let filtered: FullText.IndexingRules =
-                  { Tokenizer = FullText.Ngrams 2; Stopwords = FullText.StopwordPolicy.BuiltIn }
+                  (FullText.indexingRules (FullText.Ngrams 2) FullText.StopwordPolicy.BuiltIn)
               let documents =
                   table.RowsArray.Indexed
                   |> Seq.mapi (fun position (id, _) ->
@@ -446,8 +446,8 @@ let tests =
               let database = store.Catalog.[Storage.defaultDatabase]
               let table = database.["docs"]
               let oldRules: FullText.IndexingRules =
-                  { Tokenizer = FullText.defaultTokenizer
-                    Stopwords = FullText.customStopwords Collation.defaultCollation [ "orchard" ] }
+                  FullText.indexingRules FullText.defaultTokenizer
+                      (FullText.customStopwords Collation.defaultCollation [ "orchard" ])
               let currentRules =
                   { oldRules with Stopwords = FullText.customStopwords (Collation.tryFind "utf8mb4_bin" |> Option.get) [ "cobalt" ] }
               let documents =
@@ -483,7 +483,7 @@ let tests =
               let database = store.Catalog.[Storage.defaultDatabase]
               let table = database.["docs"]
               let filtered: FullText.IndexingRules =
-                  { Tokenizer = FullText.Ngrams 2; Stopwords = FullText.StopwordPolicy.BuiltIn }
+                  (FullText.indexingRules (FullText.Ngrams 2) FullText.StopwordPolicy.BuiltIn)
               let unfiltered = { filtered with Stopwords = FullText.StopwordPolicy.Disabled }
               let histories = [| unfiltered, "ab"; filtered, "ab"; { unfiltered with Tokenizer = FullText.Ngrams 3 }, "abc"; filtered, "zz" |]
               let documents =
@@ -519,7 +519,7 @@ let tests =
               let database = store.Catalog.[Storage.defaultDatabase]
               let table = database.["docs"]
               let filtered: FullText.IndexingRules =
-                  { Tokenizer = FullText.defaultTokenizer; Stopwords = FullText.StopwordPolicy.BuiltIn }
+                  (FullText.indexingRules FullText.defaultTokenizer FullText.StopwordPolicy.BuiltIn)
               let documents =
                   table.RowsArray.Indexed
                   |> Seq.mapi (fun position (id, _) ->
@@ -611,7 +611,7 @@ let tests =
               Expect.equal (FullText.activeStopwords index) FullText.StopwordPolicy.Disabled "legacy active policy"
               for id, _ in table.RowsArray.Indexed do
                   Expect.equal (FullText.documentRules id index)
-                      (Some { Tokenizer = FullText.Ngrams 2; Stopwords = FullText.StopwordPolicy.Disabled })
+                      (Some (FullText.indexingRules (FullText.Ngrams 2) FullText.StopwordPolicy.Disabled))
                       "legacy index policy supplies document policy"
               Expect.equal
                   (TestSupport.Sql.executeDefault recovered "SELECT body FROM legacy_fts WHERE MATCH(body) AGAINST('ab' IN BOOLEAN MODE)" |> rows)
@@ -630,7 +630,7 @@ let tests =
               Persistence.snapshotNow dir store
               let path = System.IO.Path.Combine(dir, "snapshot.fsdb")
               let bytes = System.IO.File.ReadAllBytes path
-              Expect.equal (System.Text.Encoding.ASCII.GetString(bytes, 0, 4)) "FSNX" "rule references use the current snapshot format"
+              Expect.equal (System.Text.Encoding.ASCII.GetString(bytes, 0, 4)) "FSNY" "rule references use the current snapshot format"
               let trailerSize, preparedCountSize = 12, 4
               let documentOrderSize = 1 // One length-encoded position for the single row.
               let lastRuleReference = bytes.Length - trailerSize - preparedCountSize - documentOrderSize - 1

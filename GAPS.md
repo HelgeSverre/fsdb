@@ -1605,6 +1605,12 @@ prefixes that share a collation key](torture/findings/2026-11-26-ngram-shared-re
 now share relevance. All 8,787 searches in the audited bigram corpus
 match MySQL across the binary, UCA 9.0, and UCA 5.2 test collations.
 
+[Ngram stopword filtering during writes](torture/findings/2026-11-27-ngram-stopword-first-spelling.md)
+now checks the first collation-equivalent spelling for each document
+posting. Bulk index builds filter individual occurrences. Snapshots
+preserve the rule used by each document. Some short wildcard results
+under custom stopword lists and binary-collation bulk builds remain open.
+
 [Exact legacy `WEIGHT_STRING` bytes](torture/findings/2026-11-04-extension-a-exact-weights.md#implicit-ideograph-encoder-follow-up)
 now match all 137,910 adjacent-pair oracle cases across Extension A and the
 unified-ideograph range under five `utf8mb3`/`utf8mb4` collations. Printable

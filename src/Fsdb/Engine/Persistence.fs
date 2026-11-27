@@ -49,7 +49,8 @@ let private fullTextCacheSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x54uy |] //
 let private fullTextDeletedSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x55uy |] // "FSNU" (format 30)
 let private fullTextCacheBudgetSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x56uy |] // "FSNV" (format 31)
 let private fullTextOrderHighWatermarkSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x57uy |] // "FSNW" (format 32)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x58uy |] // "FSNX" (format 33)
+let private fullTextCacheSegmentEndsSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x58uy |] // "FSNX" (format 33)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x59uy |] // "FSNY" (format 34)
 
 type private SnapshotFormat =
     { GeneratedForeignKeyIndexes: bool
@@ -79,6 +80,7 @@ type private SnapshotFormat =
       FullTextCacheBudget: bool
       FullTextOrderHighWatermark: bool
       FullTextCacheSegmentEnds: bool
+      FullTextNgramStopwordGrouping: bool
       FullTextStopwordSources: bool
       TableStatistics: bool
       IndexCardinality: bool }
@@ -111,6 +113,7 @@ let private legacySnapshotFormat =
       FullTextCacheBudget = false
       FullTextOrderHighWatermark = false
       FullTextCacheSegmentEnds = false
+      FullTextNgramStopwordGrouping = false
       FullTextStopwordSources = false
       TableStatistics = false
       IndexCardinality = false }
@@ -196,8 +199,11 @@ let private fullTextCacheBudgetSnapshotFormat =
 let private fullTextOrderHighWatermarkSnapshotFormat =
     { fullTextCacheBudgetSnapshotFormat with FullTextOrderHighWatermark = true }
 
-let private currentSnapshotFormat =
+let private fullTextCacheSegmentEndsSnapshotFormat =
     { fullTextOrderHighWatermarkSnapshotFormat with FullTextCacheSegmentEnds = true }
+
+let private currentSnapshotFormat =
+    { fullTextCacheSegmentEndsSnapshotFormat with FullTextNgramStopwordGrouping = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
@@ -206,6 +212,8 @@ let private snapshotTrailerSize = 12
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
     if header = snapshotMagic then
         Some currentSnapshotFormat
+    elif header = fullTextCacheSegmentEndsSnapshotMagic then
+        Some fullTextCacheSegmentEndsSnapshotFormat
     elif header = fullTextOrderHighWatermarkSnapshotMagic then
         Some fullTextOrderHighWatermarkSnapshotFormat
     elif header = fullTextCacheBudgetSnapshotMagic then
@@ -2020,17 +2028,19 @@ let private encodeRuleTables (w: Writer) indexes =
         w.WriteInt32LE rules.Length
         rules |> Array.iter (fun rules ->
             encodeTokenizer w rules.Tokenizer
-            encodeStopwordPolicy w rules.Stopwords)
+            encodeStopwordPolicy w rules.Stopwords
+            writeBool w rules.UseFirstNgramSpelling)
         rules |> Array.mapi (fun id rules -> rules, uint64 id) |> Map.ofArray)
 
-let private decodeRuleTable rowCount (r: #IReader) =
+let private decodeRuleTable format rowCount (r: #IReader) =
     let count = r.ReadInt32LE()
     if count < 1 || int64 count > int64 rowCount + 1L then
         failwith "Persistence: invalid full-text rule table length"
     Array.init count (fun _ ->
         let tokenizer = decodeTokenizer r
         let stopwords = decodeStopwordPolicy r
-        ({ Tokenizer = tokenizer; Stopwords = stopwords }: FullText.IndexingRules))
+        { FullText.indexingRules tokenizer stopwords with
+            UseFirstNgramSpelling = format.FullTextNgramStopwordGrouping && readBool r })
 
 let private encodeFullTextDocuments (w: Writer) rowId indexes =
     for index, ruleIds in indexes do
@@ -2245,7 +2255,7 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
         else Map.empty
     let ruleTables =
         if format.FullTextDocumentRules then
-            fullTextNames |> List.map (fun name -> name, decodeRuleTable rowCount r)
+            fullTextNames |> List.map (fun name -> name, decodeRuleTable format rowCount r)
         else []
     let postingStates =
         if format.FullTextFlushPosition then
@@ -2332,7 +2342,7 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
                 fullTextNames |> List.map (fun name ->
                     let tokenizer = decodeTokenizer r
                     let policy = Map.tryFind name stopwords |> Option.defaultValue FullText.StopwordPolicy.BuiltIn
-                    name, ({ Tokenizer = tokenizer; Stopwords = policy }: FullText.IndexingRules))
+                    name, FullText.indexingRules tokenizer policy)
             else []
         for name, rules in rules do
             documents <- documents |> Map.change name (fun existing ->

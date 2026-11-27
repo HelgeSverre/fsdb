@@ -3528,8 +3528,7 @@ let private rebuildSecondaryOrder (table: Table) : SecondaryOrder =
 let private buildFullTextIndexesWithStopwords stopwordsFor rulesFor (table: Table) : FullTextIndexes =
     fullTextKeyGroups table
     |> List.map (fun group ->
-        let rules: FullText.IndexingRules =
-            { Tokenizer = group.Tokenizer; Stopwords = stopwordsFor group.Name }
+        let rules = FullText.indexingRules group.Tokenizer (stopwordsFor group.Name)
         group.Name,
         (table.RowsArray.Indexed
          |> Seq.map (fun (rowId, row) ->
@@ -3796,7 +3795,8 @@ let private publishRowsWithDocumentRules rulesFor (before: Table) (after: Table)
                             |> fun current -> removed |> Option.fold (fun current _ -> FullText.removeDocument rowId current) current
                             |> fun current ->
                                 added |> Option.fold (fun current row ->
-                                    let rules = rulesFor group.Name rowId (FullText.activeRules current)
+                                    let fallback = FullText.activeRules current |> FullText.rulesForDocumentWrite
+                                    let rules = rulesFor group.Name rowId fallback
                                     FullText.addDocumentFieldsWithRules rules rowId (fullTextFields group.Indices row) current) current
 
                     let index = changes |> Array.fold update (Map.find group.Name indexes)

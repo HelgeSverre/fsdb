@@ -56,7 +56,17 @@ let internal customStopwordContents words = words.CollationName, Set.toList word
 /// Rules captured by a document when its postings are built.
 type internal IndexingRules =
     { Tokenizer: Tokenizer
-      Stopwords: StopwordPolicy }
+      Stopwords: StopwordPolicy
+      UseFirstNgramSpelling: bool }
+
+let internal indexingRules tokenizer stopwords =
+    { Tokenizer = tokenizer; Stopwords = stopwords; UseFirstNgramSpelling = false }
+
+let internal rulesForDocumentWrite rules =
+    match rules.Tokenizer, rules.Stopwords with
+    | Ngrams _, (StopwordPolicy.BuiltIn | StopwordPolicy.Custom _) ->
+        { rules with UseFirstNgramSpelling = true }
+    | _ -> rules
 
 let tryTokenizer = function
     | None -> Some defaultTokenizer
@@ -372,8 +382,31 @@ let private isExactLookup rules token =
     | Words lengths -> hasLookupWordLength lengths token
     | Ngrams _ -> isBooleanSearchable rules token
 
-let private indexedTokens (document: Document) =
+let private searchableTokens (document: Document) =
     Array.concat document.Fields |> Array.filter (isSearchable document.Rules)
+
+let private wordsWithFirstSpelling (document: Document) =
+    // The write cache groups equivalent grams across fields before
+    // applying stopwords. The bulk builder filters each occurrence.
+    Array.concat document.Fields
+    |> Array.groupBy _.Key
+    |> Array.filter (fun (_, tokens) -> isSearchable document.Rules tokens.[0])
+
+let private indexedWords (document: Document) =
+    if document.Rules.UseFirstNgramSpelling then wordsWithFirstSpelling document
+    else searchableTokens document |> Array.groupBy _.Key
+
+let private indexedTokens (document: Document) =
+    if document.Rules.UseFirstNgramSpelling then wordsWithFirstSpelling document |> Array.collect snd
+    else searchableTokens document
+
+let private documentPostings (document: Document) =
+    if document.Rules.UseFirstNgramSpelling then
+        let words = wordsWithFirstSpelling document
+        Array.collect snd words, words
+    else
+        let tokens = searchableTokens document
+        tokens, Array.groupBy _.Key tokens
 
 let private cacheDocumentTerms (words: (string * Token[])[]) terms =
     (terms, Array.sortBy fst words)
@@ -509,7 +542,7 @@ let private emptyIndexWith policy tokenizer (collation: Collation) : Index<'id> 
       Postings = Map.empty
       PrefixPostings = Map.empty
       Collation = collation
-      Rules = { Tokenizer = tokenizer; Stopwords = policy }
+      Rules = indexingRules tokenizer policy
       StopwordSource = None
       StopwordReload = None
       NextDocumentOrder = 1L
@@ -567,8 +600,7 @@ let private removeDocumentCore retainPosting (id: 'id) (index: Index<'id>) : Ind
     | None -> index
     | Some indexed ->
         let document = indexed.Content
-        let tokens = indexedTokens document
-        let words = tokens |> Array.groupBy _.Key
+        let tokens, words = documentPostings document
         let prefixes = documentPrefixes index.Collation document.Rules.Tokenizer tokens words
 
         let postings =
@@ -598,8 +630,7 @@ let removeDocument id index = removeDocumentCore true id index
 
 let private addDocumentData id (document: Document) (index: Index<'id>) =
     let index = removeDocument id index
-    let postingTokens = indexedTokens document
-    let words = postingTokens |> Array.groupBy _.Key
+    let postingTokens, words = documentPostings document
 
     let postings =
         words
@@ -684,7 +715,7 @@ let internal mergeDocuments sourceRowIds (baseline: Index<'id>) (source: Index<'
             addDocumentData id document.Content index) target
 
 let addDocumentFields id texts (index: Index<'id>) =
-    addDocumentFieldsWithRules (activeRules index) id texts index
+    addDocumentFieldsWithRules (rulesForDocumentWrite (activeRules index)) id texts index
 
 let addDocument id text index = addDocumentFields id [ text ] index
 
@@ -813,7 +844,7 @@ let private cacheDocumentsAfter through (index: Index<'id>) initial =
     |> Seq.filter (fun document -> document.Order > through)
     |> Seq.sortBy _.Order
     |> Seq.fold (fun (terms, budget) document ->
-        let words = indexedTokens document.Content |> Array.groupBy _.Key
+        let words = indexedWords document.Content
         cacheDocumentTerms words terms, chargeDocument document.Content.Rules.Tokenizer index.Collation document.Order words budget) initial
 
 let private restoreAccentCacheTerms through (index: Index<'id>) =
@@ -927,7 +958,7 @@ let internal buildIndexWithDocumentSettings rules collation documents =
         addDocumentFieldsWithRules documentRules id fields index) (emptyIndexWith rules.Stopwords rules.Tokenizer collation)
 
 let internal buildIndexWithDocumentTokenizers tokenizer collation documents =
-    let rules = { Tokenizer = tokenizer; Stopwords = StopwordPolicy.BuiltIn }
+    let rules = indexingRules tokenizer StopwordPolicy.BuiltIn
     documents
     |> Seq.map (fun (id, documentTokenizer, fields) -> id, { rules with Tokenizer = documentTokenizer }, fields)
     |> buildIndexWithDocumentSettings rules collation

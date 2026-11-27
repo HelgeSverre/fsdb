@@ -97,6 +97,30 @@ let tests =
                   let index = buildIndexWithStopwords policy (Ngrams 2) defaultCollation documents
                   Expect.equal (naturalScores index "ab Ab AB áb ss ßx zz" |> Map.keys |> Seq.toList) expected "substring filtering observes the source collation"
 
+          testCase "ngram writes apply custom stopwords to the first spelling of a posting"
+          <| fun _ ->
+              let policy = customStopwords (tryFind "utf8mb4_bin" |> Option.get) [ "a " ]
+              let documents =
+                  [ 1, [ "京a"; "京Ａ" ]
+                    2, [ "京Ａ"; "京a" ]
+                    3, [ "京Ａ 京Ａ"; "京a" ]
+                    4, [ "雑音"; "" ] ]
+              let cached = buildIndexWithStopwords policy (Ngrams 2) defaultCollation documents
+              let scores = naturalScores cached "京a"
+              Expect.equal (scores |> Map.keys |> Seq.toList) [ 2; 3 ] "the first spelling decides whether all positions are retained"
+              closeTo (1.5 * scores.[2]) scores.[3] "retained spellings contribute their original frequencies"
+              Expect.equal (booleanScores cached "京Ａ" |> Map.keys |> Seq.toList) [ 2; 3 ] "the allowed spelling can search the posting"
+              Expect.isEmpty (booleanScores cached "京a") "the blocked query spelling still has no Boolean lookup"
+              let rules = indexingRules (Ngrams 2) policy
+              let bulk =
+                  documents |> Seq.map (fun (id, fields) -> id, rules, fields)
+                  |> buildIndexWithDocumentSettings rules defaultCollation
+              let scores = naturalScores bulk "京a"
+              Expect.equal (scores |> Map.keys |> Seq.toList) [ 1; 2; 3 ] "bulk indexing filters individual spellings"
+              closeTo (2.0 * scores.[2]) scores.[3] "bulk postings count only surviving occurrences"
+              let rewritten = bulk |> addDocumentFields 1 [ "京a"; "京Ａ" ]
+              Expect.equal (naturalScores rewritten "京a" |> Map.keys |> Seq.toList) [ 2; 3 ] "a rewritten row follows the write cache rule"
+
           testCase "custom word lists replace defaults and control phrase anchors"
           <| fun _ ->
               let documents = [ 1, [ "orchard cobalt" ]; 2, [ "other cobalt" ]; 3, [ "the cobalt" ]; 4, [ "orchard the cobalt" ]; 5, [ "zzzz" ] ]
@@ -120,7 +144,7 @@ let tests =
               for name in [ "utf8mb4_bin"; "utf8mb4_0900_bin" ] do
                   let collation = tryFind name |> Option.get
                   for tokenizer in [ defaultTokenizer; Ngrams 2 ] do
-                      let rules = { Tokenizer = tokenizer; Stopwords = StopwordPolicy.Disabled }
+                      let rules = indexingRules tokenizer StopwordPolicy.Disabled
                       let index =
                           buildIndexWithDocumentSettings rules collation
                               (documents |> List.map (fun (id, text) -> id, rules, [ text ]))
@@ -156,7 +180,7 @@ let tests =
           <| fun _ ->
               let collation = tryFind "utf8mb4_0900_as_cs" |> Option.get
               for tokenizer in [ defaultTokenizer; Ngrams 2 ] do
-                  let rules = { Tokenizer = tokenizer; Stopwords = StopwordPolicy.Disabled }
+                  let rules = indexingRules tokenizer StopwordPolicy.Disabled
                   let index =
                       buildIndexWithDocumentSettings rules collation
                           [ 1, rules, [ "orchard cobalt" ]; 2, rules, [ "Orchard Cobalt" ]
@@ -173,7 +197,7 @@ let tests =
           testCase "Chinese 0900 ngram postings preserve tailored equivalence in mixed-script text"
           <| fun _ ->
               let collation = tryFind "utf8mb4_zh_0900_as_cs" |> Option.get
-              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let rules = indexingRules (Ngrams 2) StopwordPolicy.BuiltIn
               let index =
                   [ "文ſ"; "文ꞅ"; "文s"; "文國"; "文国"; "文乾"; "文亁" ]
                   |> List.mapi (fun i body -> i + 1, rules, [ body ])
@@ -188,7 +212,7 @@ let tests =
 
           testCase "Boolean ngram boundaries follow the collation's lowercase table"
           <| fun _ ->
-              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let rules = indexingRules (Ngrams 2) StopwordPolicy.BuiltIn
               let documents =
                   [ "中Ɥ"; "中ɥ"; "中ẞ"; "中ß"; "中Ꞅ"; "中ꞅ"; "中Ɑ"; "中ɑ"; "中h" ]
                   |> List.mapi (fun i body -> i + 1, rules, [ body ])
@@ -214,7 +238,7 @@ let tests =
 
           testCase "legacy ngram postings respect the collation's lowercase mappings"
           <| fun _ ->
-              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let rules = indexingRules (Ngrams 2) StopwordPolicy.BuiltIn
               let documents =
                   [ "中Ɥ"; "中ɥ"; "中Ꭰ"; "中ꭰ"; "中ẞ"; "中ß"; "日本語" ]
                   |> List.mapi (fun i body -> i + 1, rules, [ body ])
@@ -235,7 +259,7 @@ let tests =
 
           testCase "legacy utf8mb3 ngram postings fold Kana and keep Hangul syllables distinct from Jamo"
           <| fun _ ->
-              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let rules = indexingRules (Ngrams 2) StopwordPolicy.BuiltIn
               let documents =
                   [ "か"; "ガ"; "ｶ"; "ゕ"; "が"; "ｶﾞ"; "하"; "하"; "ᄒ" ]
                   |> List.mapi (fun i text -> i + 1, rules, [ text + "中"; "日" + text ])
@@ -275,7 +299,7 @@ let tests =
           testCase "accent-sensitive cached ngram prefixes stop at a nonmatching neighbor"
           <| fun _ ->
               let collation = tryFind "utf8mb4_0900_as_ci" |> Option.get
-              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.Disabled }
+              let rules = indexingRules (Ngrams 2) StopwordPolicy.Disabled
               let cache texts =
                   texts
                   |> List.mapi (fun i text -> i + 1, rules, [ text ])
@@ -309,7 +333,7 @@ let tests =
           testCase "accent-sensitive ngram cache inserts grams in MySQL collation order"
           <| fun _ ->
               let collation = tryFind "utf8mb4_0900_as_ci" |> Option.get
-              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.Disabled }
+              let rules = indexingRules (Ngrams 2) StopwordPolicy.Disabled
               let index =
                   [ "中"; "花"; "株"; "㍿"; "ｷﾞ"; "ǽ"; "㋿" ]
                   |> List.mapi (fun i word -> i + 1, rules, [ word + "中 " + word + "花"; "田" + word + " 上海" ])
@@ -323,7 +347,7 @@ let tests =
           testCase "Unicode 5.2 ngrams share padded space keys but retain Mongolian separator weight"
           <| fun _ ->
               let collation = tryFind "utf8mb4_unicode_520_ci" |> Option.get
-              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let rules = indexingRules (Ngrams 2) StopwordPolicy.BuiltIn
               let characters = [ "\u3000"; "\u00a0"; "\u200c"; "\u200d"; "\u2060"; "\u180e"; " " ]
               let documents =
                   characters
@@ -339,7 +363,7 @@ let tests =
           testCase "UCA 9 accent-insensitive size-one ngrams share ignorable mark postings"
           <| fun _ ->
               let collation = tryFind "utf8mb4_0900_ai_ci" |> Option.get
-              let rules = { Tokenizer = Ngrams 1; Stopwords = StopwordPolicy.BuiltIn }
+              let rules = indexingRules (Ngrams 1) StopwordPolicy.BuiltIn
               let index =
                   buildIndexWithDocumentSettings rules collation
                       [ 1, rules, [ "生\u180e日"; "蒙古分隔" ]
@@ -352,7 +376,7 @@ let tests =
 
           testCase "older Unicode Boolean ngrams do not compose Korean Jamo into short terms"
           <| fun _ ->
-              let rules = { Tokenizer = Ngrams 5; Stopwords = StopwordPolicy.BuiltIn }
+              let rules = indexingRules (Ngrams 5) StopwordPolicy.BuiltIn
               for name in [ "utf8mb4_unicode_ci"; "utf8mb4_unicode_520_ci"; "utf8mb4_general_ci" ] do
                   let collation = tryFind name |> Option.get
                   let index = buildIndexWithDocumentSettings rules collation
@@ -361,7 +385,7 @@ let tests =
 
           testCase "UCA 9 Boolean ngrams compose Korean Jamo into short terms"
           <| fun _ ->
-              let rules = { Tokenizer = Ngrams 5; Stopwords = StopwordPolicy.BuiltIn }
+              let rules = indexingRules (Ngrams 5) StopwordPolicy.BuiltIn
               let collation = tryFind "utf8mb4_0900_ai_ci" |> Option.get
               let index = buildIndexWithDocumentSettings rules collation [ 1, rules, [ "하늘"; "" ] ]
               Expect.equal (booleanScores index "하늘" |> Map.keys |> Seq.toList) [ 1 ] "short composed query reaches the Jamo posting"
@@ -614,7 +638,7 @@ let tests =
 
           testCase "general Unicode ngrams retain halfwidth voicing marks in relevance"
           <| fun _ ->
-              let rules = { Tokenizer = Ngrams 6; Stopwords = StopwordPolicy.BuiltIn }
+              let rules = indexingRules (Ngrams 6) StopwordPolicy.BuiltIn
               let collation = tryFind "utf8mb4_general_ci" |> Option.get
               let index =
                   buildIndexWithDocumentSettings rules collation
@@ -631,7 +655,7 @@ let tests =
 
           testCase "general Unicode size-5 ngrams separate format and space controls"
           <| fun _ ->
-              let rules = { Tokenizer = Ngrams 5; Stopwords = StopwordPolicy.BuiltIn }
+              let rules = indexingRules (Ngrams 5) StopwordPolicy.BuiltIn
               let collation = tryFind "utf8mb4_general_ci" |> Option.get
               let index =
                   buildIndexWithDocumentSettings rules collation
@@ -654,7 +678,7 @@ let tests =
           <| fun _ ->
               let collation = tryFind "utf8mb4_general_ci" |> Option.get
               for size in [ 3; 4 ] do
-                  let rules = { Tokenizer = Ngrams size; Stopwords = StopwordPolicy.BuiltIn }
+                  let rules = indexingRules (Ngrams size) StopwordPolicy.BuiltIn
                   let index =
                       buildIndexWithDocumentSettings rules collation
                           [ 1, rules, [ "ガラス" ]
@@ -676,7 +700,7 @@ let tests =
 
           testCase "general Unicode radical postings do not inflate ideograph relevance"
           <| fun _ ->
-              let rules = { Tokenizer = Ngrams 3; Stopwords = StopwordPolicy.BuiltIn }
+              let rules = indexingRules (Ngrams 3) StopwordPolicy.BuiltIn
               let collation = tryFind "utf8mb4_general_ci" |> Option.get
               let index =
                   buildIndexWithDocumentSettings rules collation
@@ -694,7 +718,7 @@ let tests =
 
           testCase "general Unicode size-2 ngrams retain a decomposed accent"
           <| fun _ ->
-              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let rules = indexingRules (Ngrams 2) StopwordPolicy.BuiltIn
               let collation = tryFind "utf8mb4_general_ci" |> Option.get
               let index =
                   buildIndexWithDocumentSettings rules collation
@@ -708,7 +732,7 @@ let tests =
 
           testCase "general Unicode size-2 ngrams keep kana forms separate"
           <| fun _ ->
-              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let rules = indexingRules (Ngrams 2) StopwordPolicy.BuiltIn
               let collation = tryFind "utf8mb4_general_ci" |> Option.get
               let index =
                   buildIndexWithDocumentSettings rules collation
@@ -724,7 +748,7 @@ let tests =
 
           testCase "boolean ngram terms retain Unicode number characters"
           <| fun _ ->
-              let rules = { Tokenizer = Ngrams 1; Stopwords = StopwordPolicy.BuiltIn }
+              let rules = indexingRules (Ngrams 1) StopwordPolicy.BuiltIn
               let index =
                   buildIndexWithDocumentSettings rules defaultCollation
                       [ 1, rules, [ "①一" ]; 2, rules, [ "Ⅳ四" ]; 3, rules, [ "zz" ] ]
@@ -793,7 +817,7 @@ let tests =
 
           testCase "word lookups retain old postings after active stopwords change"
           <| fun _ ->
-              let unfiltered = { Tokenizer = defaultTokenizer; Stopwords = StopwordPolicy.Disabled }
+              let unfiltered = indexingRules defaultTokenizer StopwordPolicy.Disabled
               let filtered = { unfiltered with Stopwords = StopwordPolicy.BuiltIn }
               let index =
                   buildIndexWithDocumentSettings unfiltered defaultCollation [ 1, unfiltered, [ "the" ]; 2, unfiltered, [ "zzzz" ] ]
@@ -805,7 +829,7 @@ let tests =
 
           testCase "document indexing rules survive reconstruction and active policy changes"
           <| fun _ ->
-              let filtered = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let filtered = indexingRules (Ngrams 2) StopwordPolicy.BuiltIn
               let unfiltered = { filtered with Stopwords = StopwordPolicy.Disabled }
               let longer = { unfiltered with Tokenizer = Ngrams 3 }
               let documents =
@@ -828,14 +852,15 @@ let tests =
 
           testCase "transaction merge retains source document rules and target write rules"
           <| fun _ ->
-              let filtered = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.BuiltIn }
+              let filtered = indexingRules (Ngrams 2) StopwordPolicy.BuiltIn
               let unfiltered = { filtered with Stopwords = StopwordPolicy.Disabled }
               let baseline = buildIndexWithDocumentSettings filtered defaultCollation [ 1, filtered, [ "zz" ] ]
               let source = baseline |> withIndexingRules unfiltered |> addDocument 1 "ab"
               let target = baseline |> addDocument 2 "ab"
               let merged = mergeDocuments Map.empty baseline source target target
               Expect.equal (documentRules 1 merged) (Some unfiltered) "merged document keeps source indexing rules"
-              Expect.equal (documentRules 2 merged) (Some filtered) "concurrent document keeps target indexing rules"
+              Expect.equal (documentRules 2 merged) (Some { filtered with UseFirstNgramSpelling = true })
+                  "concurrent document keeps the target's write-time stopword grouping"
               Expect.equal (activeRules merged) filtered "publication does not replace the target's active rules"
               Expect.equal (naturalScores merged "ab" |> Map.keys |> Seq.toList) [ 1 ] "only the unfiltered source document has the posting"
 
