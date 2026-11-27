@@ -24,8 +24,9 @@ that error 1869 discards rows already written by the statement.
 
 ## Concurrent secondary-key moves
 
-The destination of a unique secondary-key UPDATE still lacks the
-same wait behavior as a pending insert. Prepare this schema once.
+The original audit found that a unique secondary-key UPDATE allowed a
+competing upsert to proceed first. The [locking follow-up](2026-11-27-unique-secondary-key-moves.md)
+fixed that ordering. This is the original two-session setup.
 
 ```sql
 CREATE TABLE ai(id INT AUTO_INCREMENT PRIMARY KEY,k INT UNIQUE,qty INT);
@@ -51,7 +52,5 @@ COMMIT;
 
 MySQL waits in session B. After A commits, B updates the moved row,
 inserts the next row with the reused ID, and reports three affected
-rows. The final rows are `(1,2,8)` and `(2,3,5)`. In the Fsdb run,
-B completed before A committed and reported two affected rows. A
-then returned 1205 on COMMIT. The final rows were `(1,1,5)`,
-`(2,2,5)`, and `(3,3,5)`.
+rows. The final rows are `(1,2,8)` and `(2,3,5)`. Before the fix,
+Fsdb allowed B to complete first and A returned 1205 on COMMIT.

@@ -3320,6 +3320,8 @@ let private encodeUniqueKey (columns: ColumnDef list) (group: IndexKeyGroup) (ro
     else
         Some(encodeEqualityValues columns group.Indices values)
 
+let private uniqueKeyLockName (group: IndexKeyGroup) key = group.Name + "\u0000" + key
+
 type WriteLockTargets =
     { RowIds: RowId list
       Keys: string list }
@@ -3381,7 +3383,7 @@ let tryInsertLockTargets
                                 |> List.iter (fun (index, value) -> candidate.[index] <- value)
 
                                 encodeUniqueKey table.Columns group candidate
-                                |> Option.map (fun key -> group.Name, key, group.Name + "\u0000" + key)))
+                                |> Option.map (fun key -> group.Name, key, uniqueKeyLockName group key)))
                     |> Result.map (fun uniqueKeys ->
                         let orderedKeys =
                             let primaryKey =
@@ -5968,7 +5970,7 @@ let internal tryPrimaryWriteLockTargets (store: Store) (table: Table) (values: V
             let rowId = table.UniqueIndex |> Map.tryFind group.Name |> Option.bind (Map.tryFind key)
 
             { RowIds = Option.toList rowId
-              Keys = [ group.Name + "\u0000" + key ] }))
+              Keys = [ uniqueKeyLockName group key ] }))
 
 let private exactRangeProbeValue (store: Store) (table: Table) (index: int) (value: Value) : Value option =
     match table.Columns.[index].Type, value with
@@ -13189,26 +13191,78 @@ let private withPointUpdateDatabase
                 acknowledge ()
                 result)))
 
-let private movedPrimaryKeys dbName tableName
+type private UniqueKeyMove =
+    { Change: RowUpdate
+      Group: IndexKeyGroup
+      Key: string }
+
+type private UniqueKeyMoves =
+    { Address: TableAddress
+      Target: string * string
+      Original: Table
+      Changes: RowUpdate list
+      Moves: UniqueKeyMove list }
+
+let private movedUniqueKeys dbName tableName
     (changes: RowUpdate list, cascaded: Map<TableAddress, RowUpdate list>, catalog: Catalog) =
     Map.change (tableAddress dbName tableName) (fun affected -> Some(changes @ Option.defaultValue [] affected)) cascaded
     |> Map.toList
     |> List.choose (fun (address, rows) ->
-        let database, tableName = catalogTableIdentity catalog address
-        let keys =
-            tryCatalogTable address catalog
-            |> Option.bind (fun table ->
-                uniqueKeyGroups table
-                |> List.tryFind (fun group -> group.Name = "PRIMARY")
-                |> Option.map (fun primary ->
-                    rows |> List.choose (fun change ->
-                        if primary.Indices |> List.exists (fun index -> change.Before.[index] <> change.After.[index]) then
-                            let before = encodeUniqueKey table.Columns primary change.Before
-                            let after = encodeUniqueKey table.Columns primary change.After
-                            if before = after then None else after |> Option.map (fun key -> primaryLockKeyPrefix + key)
-                        else None)))
-            |> Option.defaultValue []
-        if keys.IsEmpty then None else Some(database, tableName, keys))
+        tryCatalogTable address catalog
+        |> Option.bind (fun table ->
+            let groups = uniqueKeyGroups table
+            let moves =
+                withoutIndexExpressionDiagnostics (fun () ->
+                    [ for change in rows do
+                          for group in groups do
+                              if group.Indices |> List.exists (fun index -> change.Before.[index] <> change.After.[index]) then
+                                  match encodeUniqueKey table.Columns group change.After with
+                                  | Some key when encodeUniqueKey table.Columns group change.Before <> Some key ->
+                                      yield { Change = change; Group = group; Key = key }
+                                  | _ -> () ])
+            if moves.IsEmpty then None
+            else
+                Some
+                    { Address = address
+                      Target = catalogTableIdentity catalog address
+                      Original = table
+                      Changes = rows
+                      Moves = moves }))
+
+let private validateMovedUniqueKeys (store: Store) groups =
+    // A key holder can commit while this UPDATE waits. Recheck the staged
+    // values against the current keys without evaluating assignments again.
+    let currentCatalog =
+        match prepareDynamicWriteRebase store with
+        | Some(_, prepared) -> prepared.StatementCatalog
+        | None -> store.Catalog
+
+    groups
+    |> List.tryPick (fun group ->
+        match tryCatalogTable group.Address currentCatalog with
+        | Some current when not (obj.ReferenceEquals(current, group.Original)) && sameTableSchema current group.Original ->
+            let changesByRow = group.Changes |> List.map (fun change -> change.RowId, change) |> Map.ofList
+            group.Moves
+            |> List.tryPick (fun move ->
+                current.UniqueIndex
+                |> Map.tryFind move.Group.Name
+                |> Option.bind (Map.tryFind move.Key)
+                |> Option.bind (fun otherId ->
+                    let conflict =
+                        match Map.tryFind otherId changesByRow, current.RowsArray.TryFind otherId with
+                        | Some change, Some live when live = change.Before ->
+                            otherId <> move.Change.RowId
+                            && withoutIndexExpressionDiagnostics (fun () ->
+                                encodeUniqueKey current.Columns move.Group change.After = Some move.Key)
+                        | _ -> true
+                    if conflict then
+                        let value = formatDuplicateUniqueValue current.Columns move.Group move.Change.After
+                        Some(DuplicateKey(current.OriginalName, move.Group.Name, value))
+                    else None))
+        | _ -> None)
+    |> function
+        | Some error -> Error error
+        | None -> Ok()
 
 let private withUpdateLockOwner (store: Store) body =
     match store.TransactionLocks with
@@ -13224,10 +13278,15 @@ let private withUpdateLocks owner store database table rowIds keys body =
     withWriteLocksForContext (Some owner) (Fsdb.Limits.statementLockWaitTimeout ())
         store database table rowIds keys body
 
-let private withMovedPrimaryKeys owner (store: Store) groups publish =
+let private withMovedUniqueKeys owner (store: Store) recheck (groups: UniqueKeyMoves list) publish =
     let rec claim = function
-        | [] -> publish ()
-        | (database, table, keys) :: remaining ->
+        | [] ->
+            if recheck && not groups.IsEmpty then
+                validateMovedUniqueKeys store groups |> Result.bind publish
+            else publish ()
+        | group :: remaining ->
+            let database, table = group.Target
+            let keys = group.Moves |> List.map (fun move -> uniqueKeyLockName move.Group move.Key)
             withUpdateLocks owner store database table [] keys (fun () -> claim remaining)
     claim groups
 
@@ -13235,12 +13294,13 @@ let private withQualifiedUpdatePublishing
     owner
     (store: Store)
     dbName
+    recheck
     tableName
     eventsOf
     operation
     =
     let publishAfterKeyWait baseCatalog batchCatalog result keys () =
-        withMovedPrimaryKeys owner store keys (fun () ->
+        withMovedUniqueKeys owner store recheck keys (fun () ->
             let acknowledge =
                 withReferentialSchemaLock SharedAccess store (fun () ->
                     withCurrentCatalogSlots store dbName (fun slots liveCatalog ->
@@ -13264,7 +13324,8 @@ let private withQualifiedUpdatePublishing
 
                         publishExistingCatalog store slots merged
                         prepareResultEvents store eventsOf result))
-            acknowledge ())
+            acknowledge ()
+            Ok())
 
     let prepared =
         withReferentialSchemaLock SharedAccess store (fun () ->
@@ -13274,18 +13335,18 @@ let private withQualifiedUpdatePublishing
                 | Some database ->
                     operation baseCatalog database
                     |> Result.map (fun (batchCatalog, result) ->
-                        match movedPrimaryKeys dbName tableName result with
+                        match movedUniqueKeys dbName tableName result with
                         | [] ->
                             publishExistingCatalog store slots batchCatalog
-                            result, prepareResultEvents store eventsOf result
+                            let acknowledge = prepareResultEvents store eventsOf result
+                            result, (fun () -> acknowledge (); Ok())
                         | keys ->
                             // Wait after leaving the schema and catalog locks. A holder
                             // must be able to commit or roll back before this can publish.
                             result, publishAfterKeyWait baseCatalog batchCatalog result keys)))
 
-    prepared |> Result.map (fun (result, acknowledge) ->
-        acknowledge ()
-        result)
+    prepared |> Result.bind (fun (result, acknowledge) ->
+        acknowledge () |> Result.map (fun () -> result))
 
 let internal tryIgnoreUpdateConstraintError = function
     | (ForeignKeyParentMissing _ | ForeignKeyRestrict _ | DuplicateKey _) as error ->
@@ -13298,10 +13359,14 @@ let internal canBatchIgnoredUpdates (store: Store) database table =
     // Referential actions retain per-row publication so later rows see preceding cascades.
     referencingForeignKeys store.Catalog (tableAddress database table) |> List.isEmpty
 
+type private UpdateConstraintPolicy =
+    | RejectConstraintViolation
+    | SkipConstraintViolation
+
 // Constraint rejection precedes any change to the private builder or indexes.
 // Candidate IDs are refreshed under publication locks; fatal failures discard the builder.
 let private updateRowsCore
-    (onConstraintError: StorageError -> bool)
+    (constraintPolicy: UpdateConstraintPolicy)
     (assignedColumns: Set<int> option)
     (store: Store)
     (dbName: string)
@@ -13377,7 +13442,7 @@ let private updateRowsCore
                                                     newRow, index, secondaryIndex, secondaryOrder, cascadeCatalog', visited', cascaded'))
                                             |> function
                                                 | Ok accepted -> Ok(Some accepted)
-                                                | Error error when onConstraintError error -> Ok None
+                                                | Error error when constraintPolicy = SkipConstraintViolation && tryIgnoreUpdateConstraintError error -> Ok None
                                                 | Error error -> Error error)
                                         |> Result.map (function
                                         | None -> changesRev, index, secondaryIndex, secondaryOrder, cascadeCatalog, visited, cascaded
@@ -13407,7 +13472,8 @@ let private updateRowsCore
     let publish owner =
         let qualifiedForeignKeys =
             catalogHasQualifiedForeignKeysAffecting store.Catalog (Set.singleton (dbName.ToLowerInvariant()))
-        let claimMovedKeys result = withMovedPrimaryKeys owner store (movedPrimaryKeys dbName tableName result)
+        let recheck = constraintPolicy = RejectConstraintViolation
+        let claimMovedKeys result = withMovedUniqueKeys owner store recheck (movedUniqueKeys dbName tableName result)
         let publishPrepared rowIds applyRows =
             let operation db =
                 let catalog = setCatalogDatabase dbName db store.Catalog
@@ -13419,7 +13485,7 @@ let private updateRowsCore
         | None ->
             withUpdateLocks owner store dbName tableName (fullScanRowIds store dbName tableName) [] (fun () ->
                 if qualifiedForeignKeys then
-                    withQualifiedUpdatePublishing owner store dbName tableName eventsOf (apply None)
+                    withQualifiedUpdatePublishing owner store dbName recheck tableName eventsOf (apply None)
                 else publishPrepared [] (apply None))
         | Some rows ->
             let rowIds = rows |> List.map fst
@@ -13436,7 +13502,7 @@ let private updateRowsCore
             // Refresh only inside publication locks, retaining the requested row order.
             withUpdateLocks owner store dbName tableName rowIds [] (fun () ->
                 if qualifiedForeignKeys then
-                    withQualifiedUpdatePublishing owner store dbName tableName eventsOf applyRefreshed
+                    withQualifiedUpdatePublishing owner store dbName recheck tableName eventsOf applyRefreshed
                 else
                     publishPrepared rowIds applyRefreshed)
 
@@ -13450,23 +13516,23 @@ let private updateRowsCore
 
 /// Updates matching rows atomically, failing the statement on a constraint violation.
 let updateRows store database table candidates predicate updater =
-    updateRowsCore (fun _ -> false) None store database table candidates (fun _ row -> predicate row) updater
+    updateRowsCore RejectConstraintViolation None store database table candidates (fun _ row -> predicate row) updater
 
 let internal updateRowsWithAssignments store database table candidates predicate assignedColumns updater =
-    updateRowsCore (fun _ -> false) (Some assignedColumns) store database table candidates (fun _ row -> predicate row) updater
+    updateRowsCore RejectConstraintViolation (Some assignedColumns) store database table candidates (fun _ row -> predicate row) updater
 
 let internal updateRowsWithAssignmentsById store database table candidates predicate assignedColumns updater =
-    updateRowsCore (fun _ -> false) (Some assignedColumns) store database table candidates predicate updater
+    updateRowsCore RejectConstraintViolation (Some assignedColumns) store database table candidates predicate updater
 
 /// Skips ignorable constraint failures while retaining accepted rows in one publication.
 let internal updateRowsIgnoringConstraints store database table candidates predicate updater =
-    updateRowsCore tryIgnoreUpdateConstraintError None store database table candidates (fun _ row -> predicate row) updater
+    updateRowsCore SkipConstraintViolation None store database table candidates (fun _ row -> predicate row) updater
 
 let internal updateRowsIgnoringConstraintsWithAssignments store database table candidates predicate assignedColumns updater =
-    updateRowsCore tryIgnoreUpdateConstraintError (Some assignedColumns) store database table candidates (fun _ row -> predicate row) updater
+    updateRowsCore SkipConstraintViolation (Some assignedColumns) store database table candidates (fun _ row -> predicate row) updater
 
 let internal updateRowsIgnoringConstraintsWithAssignmentsById store database table candidates predicate assignedColumns updater =
-    updateRowsCore tryIgnoreUpdateConstraintError (Some assignedColumns) store database table candidates predicate updater
+    updateRowsCore SkipConstraintViolation (Some assignedColumns) store database table candidates predicate updater
 
 /// Per-snapshot memo of `RowsArray` as a `Value[] list`, keyed by the
 /// `Table` instance itself: `Executor`'s row pipeline is list-based and

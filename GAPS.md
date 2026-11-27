@@ -927,9 +927,12 @@ now protect missing keys and the visited range under REPEATABLE READ
 and SERIALIZABLE. READ COMMITTED retains row-only locking for the
 audited reads.
 
-A [unique secondary-key move](torture/findings/2026-11-27-checked-upsert-reused-auto-ids.md#concurrent-secondary-key-moves)
-can let a competing upsert commit first in Fsdb. MySQL makes that upsert
-wait for the UPDATE and then match the newly committed key.
+[Unique secondary-key moves](torture/findings/2026-11-27-unique-secondary-key-moves.md)
+now hold the destination key through commit or rollback, including in a
+cross-database cascade. An ordinary UPDATE waiting for a pending insert
+rechecks the destination after the wait and returns 1062 if the insert
+committed. Batched UPDATE IGNORE can still fail with 1205 instead of
+skipping that newly conflicting row.
 
 A [current write-path control](benchmarks/results/2026-10-14-write-path-control.md)
 measures keyless inserts at one, four, and eight writers with WAL-backed and

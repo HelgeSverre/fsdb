@@ -6967,6 +6967,49 @@ let tests =
               finally
                   run writer "ROLLBACK" 0UL |> ignore
 
+          testCase "an UPDATE reports a duplicate after waiting for a unique secondary key"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              for transactional, transactionEnd in
+                  [ false, "COMMIT"; true, "COMMIT"; false, "ROLLBACK"; true, "ROLLBACK" ] do
+                  let store = Fsdb.Storage.create ()
+                  let setup = create 1 store
+                  run setup "CREATE TABLE moved_key(id INT PRIMARY KEY,k INT UNIQUE,qty INT)" (Affected 0UL) |> ignore
+                  run setup "INSERT INTO moved_key VALUES(1,1,5)" (Affected 1UL) |> ignore
+                  let owner = run (create 2 store) "START TRANSACTION" (Affected 0UL)
+                  let owner = run owner "INSERT INTO moved_key VALUES(9,2,7)" (Affected 1UL)
+                  let waiter = create 3 store
+                  let waiter = if transactional then run waiter "START TRANSACTION" (Affected 0UL) else waiter
+
+                  use started = new Threading.ManualResetEventSlim()
+                  let pending =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter "UPDATE moved_key SET k=2,qty=9 WHERE id=1")
+                  Expect.isTrue (started.Wait 5000) "the UPDATE starts"
+                  let blocked = not (pending.Wait 100)
+                  run owner transactionEnd (Affected 0UL) |> ignore
+                  Expect.isTrue (pending.Wait 5000) "the UPDATE resumes"
+                  let waiter, result = pending.GetAwaiter().GetResult()
+                  let expectedResult =
+                      if transactionEnd = "COMMIT" then
+                          Err(1062, "Duplicate entry '2' for key 'moved_key.k'")
+                      else Affected 1UL
+                  Expect.equal result expectedResult transactionEnd
+                  Expect.isTrue blocked "UPDATE waits for the destination key"
+                  if transactional then run waiter "COMMIT" (Affected 0UL) |> ignore
+                  let expectedRows =
+                      if transactionEnd = "COMMIT" then
+                          [ [ Some "1"; Some "1"; Some "5" ]; [ Some "9"; Some "2"; Some "7" ] ]
+                      else [ [ Some "1"; Some "2"; Some "9" ] ]
+                  match handle setup "SELECT id,k,qty FROM moved_key ORDER BY id" |> snd with
+                  | ResultSet(_, actual) -> Expect.equal actual expectedRows transactionEnd
+                  | actual -> failtestf "expected rows after both transactions, got %A" actual
+
           testCase "a cross-database cascade waits for the destination gap before publishing"
           <| fun _ ->
               let run session sql expected =

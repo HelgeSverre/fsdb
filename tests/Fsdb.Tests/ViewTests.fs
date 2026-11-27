@@ -5015,6 +5015,44 @@ let tests =
                   [ [ Some "1"; Some "2"; Some "8" ]; [ Some "2"; Some "3"; Some "5" ] ]
                   "the next candidate gets the released ID"
 
+          testCase "checked upsert waits for a unique secondary-key move"
+          <| fun _ ->
+              for transactionEnd, affected, expected in
+                  [ "COMMIT", 3UL, [ [ Some "1"; Some "2"; Some "8" ]; [ Some "2"; Some "3"; Some "5" ] ]
+                    "ROLLBACK", 2UL, [ [ Some "1"; Some "1"; Some "5" ]; [ Some "2"; Some "2"; Some "5" ]; [ Some "3"; Some "3"; Some "5" ] ] ] do
+                  let store = Fsdb.Storage.create ()
+                  for sql in
+                      [ "CREATE TABLE ai(id INT AUTO_INCREMENT PRIMARY KEY,k INT UNIQUE,qty INT)"
+                        "CREATE VIEW checked_ai AS SELECT id,k,qty FROM ai WHERE qty>0 WITH CHECK OPTION"
+                        "INSERT INTO ai VALUES(1,1,5)" ] do
+                      expectOk (run store sql) sql
+
+                  let handle = Fsdb.QueryHandler.handle
+                  let waiter, began = handle (Fsdb.Session.create 1 store) "START TRANSACTION"
+                  expectOk began "begin waiter transaction"
+                  let waiter, _ = handle waiter "SELECT k FROM ai"
+                  let owner, began = handle (Fsdb.Session.create 2 store) "START TRANSACTION"
+                  expectOk began "begin owner transaction"
+                  let owner, moved = handle owner "UPDATE ai SET k=2,qty=7 WHERE id=1"
+                  Expect.equal moved (Affected 1UL) "move the destination key"
+
+                  use started = new ManualResetEventSlim()
+                  let waiting =
+                      Task.Run(fun () ->
+                          started.Set()
+                          handle waiter "INSERT IGNORE INTO checked_ai(k,qty) VALUES(2,5),(3,5) ON DUPLICATE KEY UPDATE qty=qty+1")
+                  Expect.isTrue (started.Wait 5000) "the upsert starts"
+                  let blocked = not (waiting.Wait 100)
+                  let _, ended = handle owner transactionEnd
+                  Expect.isTrue (waiting.Wait 5000) "the upsert resumes"
+                  let waiter, result = waiting.GetAwaiter().GetResult()
+                  let _, committed = handle waiter "COMMIT"
+                  Expect.isTrue blocked "the destination key is held until the UPDATE transaction ends"
+                  expectOk ended transactionEnd
+                  Expect.equal result (Affected affected) "the upsert follows the committed version of the key"
+                  expectOk committed "commit the upsert"
+                  Expect.equal (rows store "SELECT id,k,qty FROM ai ORDER BY id") expected transactionEnd
+
           testCase "writable views do not expose unprojected base columns"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
