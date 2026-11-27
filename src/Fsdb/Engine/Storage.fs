@@ -11886,7 +11886,7 @@ and private upsertRowsInTable
                                                     | _ -> Ok applied)
                                                 |> Result.bind (fun applied ->
                                                     match checkChangedRow with
-                                                    | Some check when applied <> existing -> check existing applied
+                                                    | Some check when applied <> existing -> check candidate applied
                                                     | _ -> Ok applied)
                                                 |> Result.bind (validateUpdatedUniqueKeys table uniqueGroups state.UniqueIndex pos)
                                                 |> Result.bind (fun applied ->

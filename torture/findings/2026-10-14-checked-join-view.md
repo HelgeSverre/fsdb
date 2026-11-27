@@ -13,8 +13,10 @@ and `v > 0`. MySQL accepted `UPDATE ... SET n = 11 WHERE id = 1` and an insert
 of `(id, n) = (3, 30)`. It returned 1369 for `n = 0`, `v = 0`, an insert with
 no matching `b` row, and changing `a.id` from 1 to 3. The last update matters:
 the new key matches `b.id = 3`, but MySQL checks the originally selected join
-partner. A plain outer view inherited the checked join restriction, and a
-duplicate-key update through the checked join also returned 1369.
+partner. A plain outer view inherited the checked join restriction. A
+duplicate-key statement with proposed `id = 1` returned 1369 before it
+reached the duplicate update. The [upsert follow-up](2026-11-27-checked-join-upserts.md)
+separates the two checks and covers an accepted insert candidate for `id = 3`.
 
 `ViewTests` now exercises these cases. The write check reuses mutation join
 evaluation for the candidate row and, for updates, compares its join partners

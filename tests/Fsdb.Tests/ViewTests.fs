@@ -1913,17 +1913,92 @@ let tests =
                   [ "UPDATE checked_join SET n = 0 WHERE id = 1"
                     "UPDATE checked_join SET id = 3 WHERE id = 1"
                     "UPDATE checked_join SET v = 0 WHERE id = 1"
-                    "INSERT INTO checked_join(id, n) VALUES (4, 40)"
-                    "INSERT INTO checked_join(id, n) VALUES (1, 11) ON DUPLICATE KEY UPDATE n = 11" ] do
+                    "INSERT INTO checked_join(id, n) VALUES (4, 40)" ] do
                   match run store sql with
                   | Err(1369, "CHECK OPTION failed 'fsdb.checked_join'") -> ()
                   | other -> failtestf "expected CHECK OPTION failure for %s, got %A" sql other
 
               expectOk (run store "INSERT INTO checked_join(id, n) VALUES (3, 30)") "insert with matching partner"
+              TestSupport.Sql.expectError 1369
+                  (run store "INSERT INTO checked_join(id,n) VALUES(3,30) ON DUPLICATE KEY UPDATE n=0") "reject the changed duplicate row"
               Expect.equal
                   (rows store "SELECT id, n FROM checked_join_left ORDER BY id")
                   [ [ Some "1"; Some "11" ]; [ Some "2"; Some "20" ]; [ Some "3"; Some "30" ] ]
                   "rejected writes do not change the base table"
+
+          testCase "checked join upserts reuse the proposed partners for changed duplicates"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable session = Fsdb.Session.create 1 store
+              let runSql sql =
+                  let next, result = Fsdb.QueryHandler.handle session sql
+                  session <- next
+                  result
+              for sql in
+                  [ "CREATE TABLE view_target(id INT PRIMARY KEY,k INT NOT NULL,n VARCHAR(4) NOT NULL)"
+                    "CREATE TABLE view_gate(k INT PRIMARY KEY,ceiling INT NOT NULL)"
+                    "INSERT INTO view_target VALUES(1,1,'5'),(2,7,'8'),(3,1,'15')"
+                    "INSERT INTO view_gate VALUES(1,10)"
+                    "CREATE VIEW checked_gate AS SELECT t.id,t.k,t.n,g.ceiling FROM view_target t JOIN view_gate g ON g.k=t.k WHERE t.n<g.ceiling WITH CHECK OPTION"
+                    "CREATE VIEW outer_gate AS SELECT id AS i,k AS lane,n AS amount FROM checked_gate WHERE n>0 WITH LOCAL CHECK OPTION" ] do
+                  expectOk (runSql sql) sql
+
+              let insert = "INSERT INTO outer_gate(i,lane,amount) VALUES"
+              Expect.equal (runSql (insert + "(1,1,'5') ON DUPLICATE KEY UPDATE amount=5")) (Affected 0UL) "no-op after coercion"
+              Expect.equal (runSql (insert + "(3,1,'2') ON DUPLICATE KEY UPDATE amount=amount")) (Affected 0UL) "skip the check for a hidden unchanged row"
+              Expect.equal (runSql (insert + "(2,1,'2') ON DUPLICATE KEY UPDATE lane=1,amount=9")) (Affected 2UL) "a duplicate can join the proposed partner"
+              TestSupport.Sql.expectError 1369 (runSql (insert + "(1,1,'5') ON DUPLICATE KEY UPDATE lane=7")) "reject the loss of the proposed partner"
+
+              Expect.equal
+                  (runSql "INSERT IGNORE INTO outer_gate(i,lane,amount) VALUES(1,1,'3'),(4,1,'4') ON DUPLICATE KEY UPDATE amount=20")
+                  (Affected 1UL) "retain the valid row after a rejected duplicate"
+              match runSql "SHOW WARNINGS" with
+              | ResultSet(_, warnings) ->
+                  Expect.equal warnings [ [ Some "Warning"; Some "1369"; Some "CHECK OPTION failed 'fsdb.outer_gate'" ] ] "report the layered check"
+              | other -> failtestf "expected CHECK OPTION warning, got %A" other
+
+              Expect.equal (rows store "SELECT * FROM view_target ORDER BY id")
+                  [ [ Some "1"; Some "1"; Some "5" ]; [ Some "2"; Some "1"; Some "9" ]
+                    [ Some "3"; Some "1"; Some "15" ]; [ Some "4"; Some "1"; Some "4" ] ]
+                  "failed and unchanged duplicates leave their original rows intact"
+
+          testCase "checked join upserts rebase autocommit duplicates after a row wait"
+          <| fun _ ->
+              for pending, affected, expected, warnings in
+                  [ 7, 3UL, "8", []
+                    9, 1UL, "9", [ [ Some "Warning"; Some "1369"; Some "CHECK OPTION failed 'fsdb.v'" ] ] ] do
+                  let store = Fsdb.Storage.create ()
+                  for sql in
+                      [ "CREATE TABLE t(id INT PRIMARY KEY,n INT NOT NULL)"
+                        "CREATE TABLE g(k INT PRIMARY KEY)"
+                        "INSERT INTO t VALUES(1,5)"; "INSERT INTO g VALUES(1)"
+                        "CREATE VIEW v AS SELECT t.id,t.n,g.k FROM t CROSS JOIN g WHERE t.n<10 WITH CHECK OPTION" ] do
+                      expectOk (run store sql) sql
+
+                  let handle = Fsdb.QueryHandler.handle
+                  let owner, began = handle (Fsdb.Session.create 1 store) "START TRANSACTION"
+                  expectOk began "begin the competing transaction"
+                  let owner, updated = handle owner $"UPDATE t SET n={pending} WHERE id=1"
+                  Expect.equal updated (Affected 1UL) "hold the duplicate row"
+
+                  let waiter, timeout = handle (Fsdb.Session.create 2 store) "SET innodb_lock_wait_timeout=4"
+                  expectOk timeout "set a bounded lock wait"
+                  use started = new ManualResetEventSlim()
+                  let waiting = Task.Run(fun () ->
+                      started.Set()
+                      handle waiter "INSERT IGNORE INTO v(id,n) VALUES(1,5),(2,6) ON DUPLICATE KEY UPDATE n=n+1")
+                  Expect.isTrue (started.Wait 5000) "start the autocommit upsert"
+                  let blocked = not (waiting.Wait 100)
+                  expectOk (handle owner "COMMIT" |> snd) "release the competing row"
+                  Expect.isTrue blocked "wait for the duplicate row"
+                  Expect.isTrue (waiting.Wait 5000) "resume the upsert"
+                  let waiter, result = waiting.GetAwaiter().GetResult()
+                  Expect.equal result (Affected affected) "check the rebased values"
+                  match handle waiter "SHOW WARNINGS" |> snd with
+                  | ResultSet(_, actual) -> Expect.equal actual warnings "warn only if the rebased update fails visibility"
+                  | other -> failtestf "expected check diagnostics, got %A" other
+                  Expect.equal (rows store "SELECT * FROM t ORDER BY id")
+                      [ [ Some "1"; Some expected ]; [ Some "2"; Some "6" ] ] "publish the valid changes"
 
           testCase "cross using and natural join views retain writable columns"
           <| fun _ ->

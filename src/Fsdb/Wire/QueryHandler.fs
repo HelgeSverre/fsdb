@@ -3468,10 +3468,12 @@ let private primaryLockingSelect isolation (select: SelectStmt) =
     | _ -> None
 
 let private beginDynamicWriteRebaseForStatement (session: Session) (store: Store) statement =
-    // A wrapped autocommit UPDATE also needs the latest keys after a wait.
+    // Wrapped autocommit writes that read a target row need it refreshed after a wait.
     let canRebase =
         match statement with
-        | Update _ -> true
+        | Update _
+        | Insert(_, _, _, _ :: _, _)
+        | InsertSelect(_, _, _, _ :: _, _) -> true
         | _ -> retainsTransactionAfterStatement session
 
     match session.Tx with

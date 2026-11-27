@@ -31,5 +31,6 @@ and candidate and assignment values. Error messages, affected-row
 counts, and the stored table after each case matched in both modes.
 
 The [`INSERT IGNORE` follow-up](2026-11-27-ignored-upsert-view-checks.md)
-adds row skipping with warning 1369. Checked joined views still
-need an audit of duplicate updates that change the join partner.
+adds row skipping with warning 1369. The [checked join follow-up](2026-11-27-checked-join-upserts.md)
+covers unchanged duplicates, changes that preserve the proposed partners,
+and attempts to substitute a different partner.

@@ -946,6 +946,8 @@ now combines duplicates from before and after a wait in row order.
 [`UPDATE IGNORE` assignment coercion](torture/findings/2026-11-27-ignored-update-coercions.md)
 now matches MySQL for the audited invalid values, warning order, and
 NULL handling before and after BEFORE triggers.
+[Wrapped autocommit upserts](torture/findings/2026-11-27-checked-join-upserts.md#waiting-for-a-duplicate-row)
+also refresh the duplicate row after a wait, including checked join views.
 
 A [current write-path control](benchmarks/results/2026-10-14-write-path-control.md)
 measures keyless inserts at one, four, and eight writers with WAL-backed and
@@ -1076,6 +1078,10 @@ view layers inherit the restriction.
 Mergeable component views and simple outer layers preserve the same behavior,
 including inherited CHECK OPTION predicates, when the nested security identity
 is unchanged.
+[Duplicate-key writes through checked join views](torture/findings/2026-11-27-checked-join-upserts.md)
+now accept no-op and valid changed rows. Changed duplicates retain the proposed
+insert's partners. `INSERT IGNORE` warns and skips a failed check. The
+source-buffer limitation for joins with several read-side rows still applies.
 Mergeable [outer layers over an inner-join view](torture/findings/2026-10-14-layered-join-view-security.md) now also retain writable metadata
 and authorize UPDATE at each definer or invoker boundary, including renamed
 columns and column-level grants through three layers. Explicit-column INSERT

@@ -31922,7 +31922,7 @@ let rec private executeAsWithViewSources
         (db: string)
         (table: string)
         (columns: ColumnDef list)
-        (oldRow: Value[] option)
+        (partnerRow: Value[] option)
         (candidate: Value[])
         =
         match viewCheckForTarget runStore db table with
@@ -31976,9 +31976,9 @@ let rec private executeAsWithViewSources
                     rows |> List.map (fun (_, flat) -> partners flat, flat)
 
                 let originalPartners =
-                    match oldRow with
+                    match partnerRow with
                     | None -> Ok None
-                    | Some old -> joined old |> Result.map (fun (sources, rows) -> signatures sources rows |> List.map fst |> Some)
+                    | Some reference -> joined reference |> Result.map (fun (sources, rows) -> signatures sources rows |> List.map fst |> Some)
 
                 originalPartners
                 |> Result.bind (fun original ->
@@ -31995,7 +31995,8 @@ let rec private executeAsWithViewSources
                                 None
 
                         let candidatePartners = signatures sources rows
-                        // Updates preserve every original partner; inserts check every new join row.
+                        // Ordinary updates retain the old row's partners. Duplicate updates
+                        // retain the proposed insert's partners.
                         let retainedPartners =
                             match original with
                             | None -> candidatePartners
@@ -32302,17 +32303,13 @@ let rec private executeAsWithViewSources
                     else
                         None
                 let applyUpdate ordinal existing candidate =
-                    match checkScope with
-                    | Some scope when scope.JoinCheck.IsSome ->
-                        Error(ExpressionError(1369, sprintf "CHECK OPTION failed '%s'" scope.View))
-                    | _ ->
-                        onDuplicateUpdater table tableColumns columnIndex onDuplicateUpdate sourceBindings.[ordinal] existing candidate
-                        |> Result.bind (computeGeneratedRow s registry db table tableColumns)
+                    onDuplicateUpdater table tableColumns columnIndex onDuplicateUpdate sourceBindings.[ordinal] existing candidate
+                    |> Result.bind (computeGeneratedRow s registry db table tableColumns)
 
                 let checkChangedRow =
                     checkScope
-                    |> Option.filter (fun scope -> scope.CheckPredicate.IsSome)
-                    |> Option.map (fun _ -> fun existing -> validateViewCandidate s db table tableColumns (Some existing))
+                    |> Option.filter (fun scope -> scope.CheckPredicate.IsSome || scope.JoinCheck.IsSome)
+                    |> Option.map (fun _ -> fun proposed -> validateViewCandidate s db table tableColumns (Some proposed))
 
                 let assignsAuto =
                     tableColumns
