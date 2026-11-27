@@ -36249,6 +36249,36 @@ let private transactionWriteTargetsIn
         tryInsertLockTargets store database table columns rows
         |> Option.map (fun targets -> database, table, targets)
 
+    let singleTableTargets (source: TableRef) predicate limit =
+        let seeksKey =
+            match limit with
+            | None -> true
+            | Some(LiteralValue(VInt n)) -> n > 0L
+            | Some(LiteralValue(VUInt n)) -> n > 0UL
+            | _ -> false
+
+        let point =
+            if not seeksKey || isCte source then None
+            else
+                physicalFastPathTable store dbName source
+                |> Option.bind (fun table ->
+                    let allowed = indexHintsFor IndexJoin source |> indexAllowedBy
+                    let names, values =
+                        pointLookupEqualities store registry table source predicate
+                        |> List.choose (fun bound -> if bound.Transform.IsNone then Some(bound.Column, bound.Value) else None)
+                        |> List.unzip
+
+                    Storage.equalityIndexMatchesCoveredByColumns table names
+                    |> List.tryPick (fun candidate ->
+                        if candidate.Unique && candidate.UsesWholeStoredValues && allowed candidate.Name then
+                            orderedValuesForColumns table candidate.ColumnIndices names values
+                            |> Option.bind (Storage.tryUniqueWriteLockTargets store table candidate.Index)
+                        else None)
+                    |> Option.map (fun claims -> source.Database |> Option.defaultValue dbName, source.Table, claims))
+
+        // A bound key can become visible after a concurrent insert or key move.
+        point |> Option.orElseWith (fun () -> targets source predicate)
+
     let literalInsertTargets tableName columns rows =
         rows
         |> traverse (traverse (function
@@ -36861,14 +36891,14 @@ let private transactionWriteTargetsIn
                     |> combineViewPredicate view.Predicate
 
                 if view.UpdateJoins.IsEmpty then
-                    targets view.UpdateFrom predicate |> Option.toList
+                    singleTableTargets view.UpdateFrom predicate update.Limit |> Option.toList
                 else
                     joinedUpdateTargets view.UpdateFrom view.UpdateJoins [ target.Qualifier ] predicate
             | _ -> []
         | None ->
             let keys = pendingOrderedInsertKeys update.From update.Where update.OrderBy update.Limit
-            targets update.From update.Where
-            |> Option.map (fun (database, table, target) -> database, table, { target with Keys = keys })
+            singleTableTargets update.From update.Where update.Limit
+            |> Option.map (fun (database, table, target) -> database, table, { target with Keys = target.Keys @ keys })
             |> Option.toList
     | Update update when not update.Joins.IsEmpty ->
         let primaryBounds = lazy (joinedPrimaryBounds (FromTable update.From) update.Joins update.Where)
@@ -37111,11 +37141,11 @@ let private transactionWriteTargetsIn
                 |> Option.map (rewriteViewExpression view)
                 |> combineViewPredicate view.Predicate
 
-            targets view.UpdateFrom predicate |> Option.toList
+            singleTableTargets view.UpdateFrom predicate delete.Limit |> Option.toList
         | _ ->
             let keys = pendingOrderedInsertKeys source delete.Where delete.OrderBy delete.Limit
-            targets source delete.Where
-            |> Option.map (fun (database, table, target) -> database, table, { target with Keys = keys })
+            singleTableTargets source delete.Where delete.Limit
+            |> Option.map (fun (database, table, target) -> database, table, { target with Keys = target.Keys @ keys })
             |> Option.toList
     | Delete ({ Source = MultiDeleteSource _ } as delete) ->
         let primaryBounds = lazy (joinedPrimaryBounds delete.From delete.Joins delete.Where)

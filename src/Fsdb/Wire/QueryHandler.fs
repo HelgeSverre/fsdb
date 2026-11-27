@@ -3150,6 +3150,15 @@ let private prepareTransactionWrite (temporaryCatalog: Catalog option) (statemen
                     else transaction
                 { session with Tx = Some snapshot }
         | _ ->
+            let pendingProbes =
+                match statement with
+                | (Update _ | Delete _) when canRefresh ->
+                    targets |> List.choose (fun (database, table, target) ->
+                        match target.RowIds, target.Keys with
+                        | [], [ key ] -> Storage.prepareUniqueProbeRelease transaction.Snapshot database table key
+                        | _ -> None)
+                | _ -> []
+
             readTargets
             |> List.iter (fun (database, table, claims) ->
                 acquireScanOffset timeout transaction database table claims.Materialized |> ignore
@@ -3164,7 +3173,25 @@ let private prepareTransactionWrite (temporaryCatalog: Catalog option) (statemen
                     table
                     target.RowIds
                     target.Keys)
-            if canRefresh then { session with Tx = Some(refreshReadRows transaction) } else session
+
+            match statement with
+            | (Update _ | Delete _) when canRefresh ->
+                for database, table, target in targets do
+                    // The protected key may now name a row absent from the
+                    // old write view. Wait for that row before refreshing its image.
+                    match Storage.rowsAtClaimedUniqueKeys session.Store database table target.Keys with
+                    | [] -> ()
+                    | rows ->
+                        let held = Set.ofList target.RowIds
+                        let unclaimed = rows |> List.filter (fun row -> not (Set.contains row held))
+                        if not unclaimed.IsEmpty then
+                            Storage.acquireTransactionWriteTargets timeout transaction.Snapshot database table unclaimed []
+            | _ -> ()
+            if canRefresh then
+                let refreshed = refreshReadRows transaction
+                pendingProbes |> List.iter (fun release -> release refreshed.Snapshot)
+                { session with Tx = Some refreshed }
+            else session
 
 /// Rolls an abandoned connection's transaction back.
 let closeSession (session: Session) : unit =

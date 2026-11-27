@@ -6065,10 +6065,9 @@ let internal isExactPrimaryKeyPrefix store table (values: Value list) =
         group.Name = "PRIMARY" && indexesWholeColumns group && values.Length <= group.Indices.Length
         && (exactPrimaryValues store table (List.take values.Length group.Indices) values).IsSome)
 
-/// Claims an exact primary key even before its row appears in the snapshot.
-let internal tryPrimaryWriteLockTargets (store: Store) (table: Table) (values: Value list) : WriteLockTargets option =
+let private tryExactWriteLockTargets (store: Store) (table: Table) name (values: Value list) =
     uniqueKeyGroups table
-    |> List.tryFind (fun group -> group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase))
+    |> List.tryFind (fun group -> group.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
     |> Option.filter (fun group -> sameLength group.Indices values)
     |> Option.bind (fun group ->
         exactPrimaryValues store table group.Indices values
@@ -6078,6 +6077,52 @@ let internal tryPrimaryWriteLockTargets (store: Store) (table: Table) (values: V
 
             { RowIds = Option.toList rowId
               Keys = [ uniqueKeyLockName group key ] }))
+
+/// Claims an exact primary key even before its row appears in the snapshot.
+let internal tryPrimaryWriteLockTargets store table values =
+    tryExactWriteLockTargets store table "PRIMARY" values
+
+let internal tryUniqueWriteLockTargets store table (index: EqualityIndex) values =
+    if index.Unique && index.UsesWholeStoredValues then tryExactWriteLockTargets store table index.Name values
+    else None
+
+let internal rowsAtClaimedUniqueKeys store database tableName keys =
+    match keys with
+    | [] -> []
+    | _ ->
+        tableAt store database tableName
+        |> Option.map (fun table ->
+            keys |> List.choose (fun (key: string) ->
+                let separator = key.IndexOf '\u0000'
+                if separator <= 0 then None
+                else
+                    let group = key.Substring(0, separator)
+                    let value = key.Substring(separator + 1)
+                    Map.tryFind group table.UniqueIndex |> Option.bind (Map.tryFind value)))
+        |> Option.defaultValue []
+
+/// A point probe can release a new key claim when the refreshed view has no
+/// matching row. Keep claims already held by earlier statements.
+let internal prepareUniqueProbeRelease (snapshot: Store) (database: string) tableName key =
+    snapshot.TransactionLocks
+    |> Option.bind (fun context ->
+        let database = database.ToLowerInvariant()
+        let tableName = normalizeTableName tableName
+        let claim = ExclusiveKeyLock(database, tableName, key)
+        let alreadyClaimed = lock context.LockClaims (fun () -> context.LockClaims.Contains claim)
+        if alreadyClaimed then None
+        else
+            Some(fun current ->
+                if (rowsAtClaimedUniqueKeys current database tableName [ key ]).IsEmpty then
+                    let cache = keyLockCache snapshot (lockNamespaceKey database tableName)
+                    match cache.Entries.TryGetValue key with
+                    | true, weak ->
+                        match weak.TryGetTarget() with
+                        | true, stripe ->
+                            releaseLockStripes context [ stripe ]
+                            lock context.LockClaims (fun () -> context.LockClaims.Remove claim |> ignore)
+                        | _ -> ()
+                    | _ -> ()))
 
 let private exactRangeProbeValue (store: Store) (table: Table) (index: int) (value: Value) : Value option =
     match table.Columns.[index].Type, value with

@@ -32,8 +32,6 @@ as the first read, a write before the first read, and a READ COMMITTED
 control. Both modes matched all 58 result lines. A further join with a
 temporary table kept the same permanent-table view.
 
-A related write-planning gap remains. A point UPDATE targeting a key
-that was moved into existence after the read view opened can affect
-zero rows if its first write plan searches only the old key map. The
-indexed overlay regression first refreshes the write view with a no-op
-on an existing key, then tests visibility of the moved row.
+The [current point-write follow-up](2026-11-27-current-point-writes.md)
+fixes an UPDATE targeting a key moved after the read view opened. The
+indexed overlay regression reaches the moved row directly.

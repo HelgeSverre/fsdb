@@ -8249,7 +8249,6 @@ let tests =
               TestSupport.Sql.expectOk (execute "UPDATE t SET u=30 WHERE id=1") "move the secondary key"
               TestSupport.Sql.expectOk (execute "UPDATE t SET id=4 WHERE id=2") "move another clustered key"
               TestSupport.Sql.expectOk (run "SAVEPOINT before_change") "save the original write state"
-              Expect.equal (run "UPDATE t SET u=u WHERE id=1") (Affected 0UL) "refresh the write view without changing the old secondary key"
               Expect.equal (run "UPDATE t SET u=41 WHERE id=4") (Affected 1UL) "the write sees the moved row"
               Expect.equal (run "INSERT INTO t VALUES(0,10)") (Affected 1UL) "the write sees the freed secondary key"
               read "SELECT id,u FROM t ORDER BY id" [ pair "0" "10"; pair "1" "10"; pair "2" "20"; pair "4" "41" ]
@@ -8260,4 +8259,66 @@ let tests =
               TestSupport.Sql.expectOk (run "ROLLBACK TO SAVEPOINT before_change") "discard own writes"
               read "SELECT id,u FROM t ORDER BY id" [ pair "1" "10"; pair "2" "20" ]
               TestSupport.Sql.expectOk (run "COMMIT") "close the original view"
-              read "SELECT id,u FROM t ORDER BY id" [ pair "1" "30"; pair "4" "20" ] ]
+              read "SELECT id,u FROM t ORDER BY id" [ pair "1" "30"; pair "4" "20" ]
+
+          testCase "point writes wait for keys absent from the repeatable read snapshot"
+          <| fun _ ->
+              let pair id value = [ Some id; Some value ]
+              for priorMove, holdSql, write, committed, rolledBack in
+                  [ None, "UPDATE t SET id=4 WHERE id=1 AND lane=1",
+                    "UPDATE t SET n=n+1 WHERE id=4 AND lane=1", [ pair "4" "6" ], [ pair "1" "5" ]
+                    None, "UPDATE t SET uk=40 WHERE id=1 AND lane=1",
+                    "DELETE FROM v WHERE u=40", [], [ pair "1" "5" ]
+                    Some "UPDATE t SET uk=40 WHERE id=1 AND lane=1", "UPDATE t SET n=8 WHERE id=1 AND lane=1",
+                    "UPDATE t SET n=n+1 WHERE uk=40", [ pair "1" "9" ], [ pair "1" "6" ] ] do
+                  for outcome in [ "COMMIT"; "ROLLBACK" ] do
+                      let store = Fsdb.Storage.create ()
+                      let execute sql = handle (create 3 store) sql |> snd
+                      let expectOk = TestSupport.Sql.expectOk
+                      for sql in
+                          [ "CREATE TABLE t(id INT,lane INT,uk INT UNIQUE,n INT,PRIMARY KEY(id,lane))"
+                            "INSERT INTO t VALUES(1,1,10,5)"
+                            "CREATE VIEW v AS SELECT uk AS u,n FROM t WHERE n>0 WITH CHECK OPTION" ] do
+                          expectOk (execute sql) sql
+
+                      let waiter, began = handle (create 2 store) "START TRANSACTION"
+                      expectOk began "open the writer's transaction"
+                      let waiter, _ = handle waiter "SELECT id,n FROM t"
+                      priorMove |> Option.iter (fun sql -> Expect.equal (execute sql) (Affected 1UL) sql)
+                      let holder, began = handle (create 1 store) "START TRANSACTION"
+                      expectOk began "open the key holder's transaction"
+                      let holder, affected = handle holder holdSql
+                      Expect.equal affected (Affected 1UL) holdSql
+
+                      use started = new Threading.ManualResetEventSlim()
+                      let pending = Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter write)
+                      Expect.isTrue (started.Wait 5000) "start the point write"
+                      let blocked = not (pending.Wait 100)
+                      expectOk (handle holder outcome |> snd) outcome
+                      Expect.isTrue blocked "wait for the newly claimed key"
+                      Expect.isTrue (pending.Wait 5000) "resume after the holder exits"
+                      let waiter, result = pending.GetAwaiter().GetResult()
+                      let matched = outcome = "COMMIT" || priorMove.IsSome
+                      Expect.equal result (Affected(if matched then 1UL else 0UL)) write
+                      expectOk (handle waiter "COMMIT" |> snd) "publish the point write"
+                      match execute "SELECT id,n FROM t ORDER BY id" with
+                      | ResultSet(_, actual) -> Expect.equal actual (if outcome = "COMMIT" then committed else rolledBack) write
+                      | other -> failtestf "expected final rows after %s, got %A" write other
+
+          testCase "two transactions can write to the same absent point key"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup, _ = handle (create 3 store) "CREATE TABLE t(id INT PRIMARY KEY,n INT)"
+              let _, _ = handle setup "INSERT INTO t VALUES(1,1),(9,9)"
+              let first, _ = handle (create 1 store) "BEGIN"
+              let first, missed = handle first "UPDATE t SET n=n+1 WHERE id=4"
+              Expect.equal missed (Affected 0UL) "the first write misses"
+
+              let second, _ = handle (create 2 store) "SET innodb_lock_wait_timeout=1"
+              let second, _ = handle second "BEGIN"
+              let second, missed = handle second "UPDATE t SET n=n+1 WHERE id=4"
+              (handle first "ROLLBACK" |> snd) |> ignore
+              (handle second "ROLLBACK" |> snd) |> ignore
+              Expect.equal missed (Affected 0UL) "a completed miss does not retain the exclusive probe key" ]
