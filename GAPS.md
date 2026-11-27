@@ -3120,6 +3120,9 @@ implementation effort:
    [NULL-safe equality prefixes](torture/findings/2026-11-27-correlated-null-safe-top-n.md)
    include nullable integer and text keys and direct `IS NULL` key parts.
    The lateral fixture examines 46 rows, down from 1,159.
+   [Exact decimal prefixes and suffixes](torture/findings/2026-11-27-correlated-decimal-top-n.md)
+   also stream the ordered slice for audited DECIMAL and integer comparisons.
+   The lateral fixture examines 19 rows, down from 1,310.
    [`EXPLAIN ANALYZE`](torture/findings/2026-11-27-explain-analyze-correlated-top-n.md)
    reports the observed ordered index, rows per loop, and fallback
    invocations. [Static `EXPLAIN`](torture/findings/2026-11-27-explain-analyze-correlated-top-n.md#static-explain)

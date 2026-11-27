@@ -14,7 +14,44 @@ let private newStore () = create ()
 let tests =
     testList
         "correlated subqueries"
-        [ testCase "correlated top-N streams a composite index slice before applying its limit"
+        [ testCase "correlated top-N seeks exact decimal keys before applying its limit"
+          <| fun _ ->
+              let store = newStore ()
+              for sql in
+                  [ "CREATE TABLE digit(d INT PRIMARY KEY)"
+                    "INSERT INTO digit VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)"
+                    "CREATE TABLE requests(id INT PRIMARY KEY,k DECIMAL(24,3),cutoff INT)"
+                    "INSERT INTO requests VALUES(1,9007199254740992.010,19),(2,9007199254740992.020,19),(3,NULL,19),(4,9007199254740992.011,19)"
+                    "CREATE TABLE events(id INT PRIMARY KEY,k DECIMAL(23,2),stamp INT,amount DECIMAL(9,2),KEY recent(k,stamp DESC,id))"
+                    "INSERT INTO events SELECT t.d*100+x.d*10+y.d,CASE t.d WHEN 0 THEN 9007199254740992.01 WHEN 1 THEN 9007199254740992.02 WHEN 2 THEN NULL ELSE t.d END,x.d*10+y.d,y.d/10 FROM digit t CROSS JOIN digit x CROSS JOIN digit y" ] do
+                  match runDefault store sql with
+                  | Affected _ -> ()
+                  | other -> failtestf "%s: %A" sql other
+
+              let lateral hint =
+                  "SELECT o.id,q.id,q.stamp FROM requests o LEFT JOIN LATERAL (SELECT e.id,e.stamp FROM events e "
+                  + hint + " WHERE e.k<=>o.k AND e.stamp<=o.cutoff AND e.amount>=0.20 "
+                  + "ORDER BY e.stamp DESC,e.id LIMIT 2 OFFSET 1) q ON TRUE ORDER BY o.id,q.stamp DESC,q.id"
+              let expected =
+                  [ [ 1; 18; 18 ]; [ 1; 17; 17 ]; [ 2; 118; 18 ]; [ 2; 117; 17 ]; [ 3; 218; 18 ]; [ 3; 217; 17 ] ]
+                  |> List.map (List.map (string >> Some))
+                  |> fun rows -> rows @ [ [ Some "4"; None; None ] ]
+              let indexed, examined = withExaminedRows (fun () -> runDefault store (lateral ""))
+              Expect.equal indexed (ResultSet([ "id"; "id"; "stamp" ], expected)) "MySQL results above the DOUBLE precision boundary"
+              Expect.equal (runDefault store (lateral "IGNORE INDEX (recent)")) indexed "scan results agree"
+              Expect.isLessThan examined 100L "exact prefix hits and a fractional miss avoid full scans"
+
+              let scalar =
+                  "SELECT o.id,(SELECT e.id FROM events e WHERE e.k<=>o.k AND e.stamp<=o.cutoff AND e.amount>=0.20 "
+                  + "ORDER BY e.stamp DESC,e.id LIMIT 1 OFFSET 1) FROM requests o ORDER BY o.id"
+              let access =
+                  runDefault store ("EXPLAIN " + scalar)
+                  |> TestSupport.Sql.explainRows
+                  |> List.find (fun row -> row.Table = Some "e")
+              Expect.equal (access.SelectType, access.AccessType) (Some "DEPENDENT SUBQUERY", Some "ref") "dependent prefix lookup"
+              Expect.equal (access.Key, access.KeyLength, access.Reference) (Some "recent", Some "12", Some "fsdb.o.k") "packed DECIMAL prefix metadata"
+
+          testCase "correlated top-N streams a composite index slice before applying its limit"
           <| fun _ ->
               let store = newStore ()
               for setup in

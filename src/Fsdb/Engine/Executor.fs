@@ -16607,6 +16607,10 @@ and private isExactIntegerIndexType = function
     | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ -> true
     | _ -> false
 
+and private isExactNumericIndexType = function
+    | TDecimal _ -> true
+    | ty -> isExactIntegerIndexType ty
+
 /// For exact integer keys, inequality is the union of the two strict ranges.
 /// Keep the source expression for filtering; this form only chooses candidates.
 and private normalizeIndexedInequality registry (table: Table) tref expression =
@@ -21328,8 +21332,8 @@ and private bindCorrelatedTopOrder store registry dbName (tref: TableRef) (selec
                 | None -> tryColumnDefForExpr context expression
             let unsupported = function
                 | (Col _ | QualifiedCol _) as expression ->
-                    columnOf expression |> Option.exists (_.Type >> isExactIntegerIndexType) |> not
-                | LiteralValue(VInt _ | VUInt _ | VNull) -> false
+                    columnOf expression |> Option.exists (_.Type >> isExactNumericIndexType) |> not
+                | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VNull) -> false
                 | Lit _ | IntroducedLiteral _ | ConnectionLiteral _ | ApproximateLiteral _ -> true
                 | _ -> false
 
@@ -21348,18 +21352,19 @@ and private bindCorrelatedTopOrder store registry dbName (tref: TableRef) (selec
                     match bound with
                     | LiteralValue VNull when comparison = NullSafeEq -> Some(key column VNull, None)
                     | LiteralValue(VString _ as value) when usesStoredTextCollation None -> Some(key column value, None)
+                    | LiteralValue(VDecimal _ as value) when isExactNumericIndexType column.Type -> Some(key column value, None)
                     | Col _ | QualifiedCol _ ->
                         let boundColumn = tryColumnDefForExpr context bound
-                        let integerKey =
-                            isExactIntegerIndexType column.Type
-                            && (boundColumn |> Option.exists (_.Type >> isExactIntegerIndexType))
+                        let numericKey =
+                            isExactNumericIndexType column.Type
+                            && (boundColumn |> Option.exists (_.Type >> isExactNumericIndexType))
                         let textKey () =
                             isTextColumn boundColumn && usesStoredTextCollation boundColumn
 
                         match readOuter source context bound boundColumn with
-                        | Some(VInt _ | VUInt _ as value) when integerKey -> Some(key column value, Some bound)
+                        | Some(VInt _ | VUInt _ | VDecimal _ as value) when numericKey -> Some(key column value, Some bound)
                         | Some(VString _ as value) when textKey () -> Some(key column value, Some bound)
-                        | Some VNull when comparison = NullSafeEq && (integerKey || textKey ()) ->
+                        | Some VNull when comparison = NullSafeEq && (numericKey || textKey ()) ->
                             Some(key column VNull, Some bound)
                         | _ -> None
                     | _ -> None)
@@ -21385,7 +21390,7 @@ and private bindCorrelatedTopOrder store registry dbName (tref: TableRef) (selec
                         isTextColumn (Some column)
                         || (match column.Type with
                             | TDate | TDateTime _ -> true
-                            | ty -> isExactIntegerIndexType ty)))
+                            | ty -> isExactNumericIndexType ty)))
 
                 if correlatedPins.IsEmpty then None
                 else
@@ -28581,6 +28586,7 @@ let private explainKeyLen (col: ColumnDef) : int option =
         | TVarBinary n -> Some(n + 2)
         | TFloat _ -> Some 4
         | TDouble _ -> Some 8
+        | TDecimal(precision, scale, _) -> Some(Storage.decimalKeyBytes precision scale)
         | TDate -> Some 3
         | TEnum values -> Some(if List.length values <= 255 then 1 else 2)
         | _ -> None
@@ -29053,9 +29059,11 @@ let private explainCorrelatedOrder store registry dbName outer tref select =
         explainOuterReference outer expression
         |> Option.bind (fun _ ->
             column |> Option.bind (fun definition ->
-                if isExactIntegerIndexType definition.Type then Some(VInt 0L)
-                elif isTextColumn (Some definition) then Some(VString "")
-                else None))
+                match definition.Type with
+                | TDecimal _ -> Some(VDecimal 0M)
+                | ty when isExactIntegerIndexType ty -> Some(VInt 0L)
+                | _ when isTextColumn (Some definition) -> Some(VString "")
+                | _ -> None))
 
     let allowed = indexAllowedForOrderedAccess IndexOrderBy tref
     bindCorrelatedTopOrder store registry dbName tref select (outer |> Option.map _.Context) readOuter

@@ -4024,6 +4024,9 @@ let private decimalPartialBytes digits =
 let private decimalPartBytes digits =
     digits / 9 * 4 + decimalPartialBytes (digits % 9)
 
+let internal decimalKeyBytes precision scale =
+    decimalPartBytes (precision - scale) + decimalPartBytes scale
+
 let private foreignKeyDecimalBytes (column: ColumnDef) value =
     match column.Type, value with
     | TDecimal(precision, scale, _), VDecimal number ->
@@ -4065,7 +4068,7 @@ let private foreignKeyDecimalBytes (column: ColumnDef) value =
 
 let private foreignKeyDecimalValue (column: ColumnDef) (packed: byte[]) =
     match column.Type with
-    | TDecimal(precision, scale, _) when packed.Length = decimalPartBytes (precision - scale) + decimalPartBytes scale ->
+    | TDecimal(precision, scale, _) when packed.Length = decimalKeyBytes precision scale ->
         let bytes = Array.copy packed
         let negative = bytes.[0] &&& 0x80uy = 0uy
         bytes.[0] <- bytes.[0] ^^^ 0x80uy
@@ -8305,12 +8308,23 @@ let private tryOrderedIndexWithPrefix
         |> Option.bind (fun indices ->
             tryOrderedKeyTraversal allowed table terms indices
             |> Option.bind (fun (group, traversal) ->
+                let normalizeValue index prefixLength transform value =
+                    let column = table.Columns.[index]
+                    let exact =
+                        // Keep the comparison boundary, including fractions a stored key cannot represent.
+                        match prefixLength, transform, column.Type, value with
+                        | None, None, TDecimal _, (VDecimal _ | VInt _ | VUInt _)
+                        | None, None, (TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _), VDecimal _ ->
+                            Some value
+                        | _ -> exactProbeValue store table index value
+
+                    exact |> Option.map (projectIndexValue group.Name None column prefixLength transform)
+
                 let rec normalizePrefix values columnIndices prefixLengths transforms =
                     match values, columnIndices, prefixLengths, transforms with
                     | [], _, _, _ -> Some []
                     | value :: rest, index :: indices, prefixLength :: lengths, transform :: remainingTransforms ->
-                        exactProbeValue store table index value
-                        |> Option.map (projectIndexValue group.Name None table.Columns.[index] prefixLength transform)
+                        normalizeValue index prefixLength transform value
                         |> Option.bind (fun normalized ->
                             normalizePrefix rest indices lengths remainingTransforms
                             |> Option.map (fun normalizedRest -> normalized :: normalizedRest))
@@ -8328,14 +8342,7 @@ let private tryOrderedIndexWithPrefix
                         if position >= indices.Length then
                             None
                         else
-                            exactProbeValue store table indices.[position] value
-                            |> Option.map
-                                (projectIndexValue
-                                    group.Name
-                                    None
-                                    table.Columns.[indices.[position]]
-                                    group.PrefixLengths.[position]
-                                    group.Transforms.[position])
+                            normalizeValue indices.[position] group.PrefixLengths.[position] group.Transforms.[position] value
                             |> Option.map (fun value -> Some(value, inclusive))
 
                 match Map.tryFind group.Name table.SecondaryOrder, normalizedPrefix, normalizeBound lower, normalizeBound upper with
