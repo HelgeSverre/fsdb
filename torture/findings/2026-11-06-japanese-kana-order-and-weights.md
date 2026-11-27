@@ -49,10 +49,12 @@ written before the change reopened with the corrected prefix result.
 
 The four-level weights reduced the same corpus with the default word parser
 from 1,306 differences to 288. Keeping modified punctuation-split words in
-their own Boolean list removed another 114 differences. All 19,767 searches
-before deletion matched, including cached, flushed, and mixed postings.
-The 174 differences in the deletion stage affect relevance only.
+their own Boolean list removed another 114 differences. Retaining deleted
+word postings until full-text optimize removed the final 174 score
+differences. All 26,356 searches match across cached, flushed, mixed, and
+mixed postings after deletion.
 [Default UTF-8 word parser](2026-10-16-ngram-boolean-unicode-ctype.md#default-utf-8-word-parser).
+The same corpus also matches under `utf8mb4_bin` and `utf8mb4_0900_ai_ci`.
 
 An isolated MySQL 8.4.11 fixture confirms that the word parser counts
 retained postings in modified and compound Boolean queries. With seven
@@ -60,6 +62,12 @@ live rows and one deleted `東京駅` posting, `東京駅` weighs three live
 postings, while `+東京駅` and `東京駅 never` weigh four. The same fixture
 has four live `東*` matches and two retained postings, one cached and
 one flushed. `東*` weighs four postings and `+東*` weighs six.
+[MySQL single-term ranking](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L3119-L3169).
+
+The smaller fixture matched in Boolean, natural-language, and query-expansion
+modes across two deletion stages and full-text optimize. A durable regression
+checks that checkpoint loading and WAL replay preserve the same retained
+frequency through automatic cache sync.
 
 The embedded weight table comes from pinned MySQL 8.4.11. Its
 generator captures every Unicode scalar and 1,160 Kana context pairs

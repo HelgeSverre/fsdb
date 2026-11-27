@@ -634,7 +634,7 @@ let private removeDocumentCore retainPosting (id: 'id) (index: Index<'id>) : Ind
             Postings = postings
             PrefixPostings = prefixPostings
             Deleted =
-                if retainPosting && index.FlushedThrough.IsSome && tracksNgramPostingSources index then
+                if retainPosting && index.FlushedThrough.IsSome then
                     addDeletedDocument indexed.Order tokens words prefixes index.Deleted
                 else index.Deleted }
 
@@ -1955,14 +1955,17 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
             | op, BWordList terms -> terms |> Seq.map (fun term -> op, term)
             | leaf -> Seq.singleton leaf)
 
-    match view.Rules.Tokenizer with
-    | Words _ when not hasGroups && not hasWordLists
-                   && not (leaves nodes |> Seq.exists (function _, BWord(_, true) -> true | _ -> false)) -> None
-    | tokenizer ->
-        let isNgram =
-            match tokenizer with
-            | Ngrams _ -> true
-            | Words _ -> false
+    let tokenizer = view.Rules.Tokenizer
+    let isNgram =
+        match tokenizer with
+        | Ngrams _ -> true
+        | Words _ -> false
+    let flatWordQuery =
+        not isNgram && not hasGroups && not hasWordLists
+        && not (nodes |> List.exists (function _, BWord(_, true) -> true | _ -> false))
+
+    if flatWordQuery && view.Deleted.Words.IsEmpty then None
+    else
         let wordGroups = not isNgram && hasGroups
 
         let keys = function
@@ -2010,7 +2013,8 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
             && (leaves nodes |> Seq.exists (snd >> isPhrase))
         let deletedSensitive =
             match nodes with
-            | [ Optional, BWord(_, true) ] -> false
+            // The single-word result path subtracts deleted documents.
+            | [ Optional, BWord(_, prefix) ] when prefix || not isNgram -> false
             | _ ->
                 not view.Deleted.Documents.IsEmpty
                 && (frequencies |> Map.exists (fun key _ ->
@@ -2018,8 +2022,9 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
                     | ExactLookup word -> view.Deleted.Words.ContainsKey word
                     | PrefixLookup prefix -> orderedPrefixes || view.Deleted.Prefixes.ContainsKey prefix))
 
-        if not wordGroups && not hasWordLists && not tracksPostingBounds && not repeated && not weighted
-           && not cacheSensitive && not deletedSensitive then
+        if not deletedSensitive
+           && (flatWordQuery
+               || not wordGroups && not hasWordLists && not tracksPostingBounds && not repeated && not weighted && not cacheSensitive) then
             None
         else
             // An exclusion can skip its postings when the group has no matches.

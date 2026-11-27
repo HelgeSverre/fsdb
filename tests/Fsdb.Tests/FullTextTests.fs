@@ -705,6 +705,39 @@ let tests =
               assertScore flushed "東京" [ 1 ] 0.3624762296676636
               assertScore flushed "+東*" [ 1; 2 ] 0.0906190574169159
 
+          testCase "Boolean word relevance retains deleted postings for compound and modified searches"
+          <| fun _ ->
+              for collationName in [ "utf8mb4_0900_ai_ci"; "utf8mb4_bin"; "utf8mb4_ja_0900_as_cs_ks" ] do
+                  let collation = tryFind collationName |> Option.get
+                  let removed =
+                      buildIndexWithTokenizer defaultTokenizer collation
+                          [ 1, "cobalt"; 2, "quartz"; 3, "cobalt quartz"; 4, "東京駅"
+                            5, "cobalt 東京駅"; 6, "quartz 東京駅"; 7, "zzzz"; 8, "cobalt quartz 東京駅" ]
+                      |> flushPostings
+                      |> addDocument 9 "東京湾 quartz"
+                      |> addDocument 10 "東京港 zzzz"
+                      |> removeDocument 1
+                      |> removeDocument 4
+                      |> removeDocument 9
+
+                  for query, id, expected in
+                      [ "東京駅", 5, 0.13540691
+                        "(東京駅)", 5, 0.05906749
+                        "東京駅 never", 5, 0.05906749
+                        "+東京駅", 5, 0.05906749
+                        "東*", 5, 0.05906749
+                        "+東*", 5, 0.00448187
+                        "東* never", 10, 0.00448187
+                        "東* quartz", 6, 0.02583528
+                        "\"quartz 東京駅\" 東*", 6, 0.13948838
+                        "quartz quartz", 2, 0.02399462
+                        "quartz", 2, 0.05906749 ] do
+                      let scores = booleanScores removed query
+                      closeTo expected scores.[id] (sprintf "%s / %s" collationName query)
+                      Expect.isFalse (scores.ContainsKey 9) "a retained posting cannot match a deleted row"
+                  closeTo 0.13540691 (booleanScores (flushPostings removed) "+東京駅").[5] "optimize purges word frequencies"
+                  closeTo 0.00448187 (booleanScores (syncCachedPostings removed) "+東*").[5] "sync retains word frequencies"
+
           testCase "ngram natural relevance counts deleted postings in compound and expanded searches"
           <| fun _ ->
               let collation = tryFind "utf8mb4_bin" |> Option.get

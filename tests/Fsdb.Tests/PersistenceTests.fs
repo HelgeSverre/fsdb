@@ -2767,6 +2767,11 @@ let tests =
               let index (current: Store) = current.Catalog.[defaultDatabase].["docs"].FullTextIndexes.["ft"]
               let budget = index >> Fsdb.FullText.cacheBudget
               let tail spelling current = index current |> Fsdb.FullText.cachedPostingTail spelling |> Option.get
+              let checkRelevance current =
+                  let scores query =
+                      Fsdb.FullText.booleanScores (index current) query |> Map.values |> Seq.exactlyOne
+                  Expect.floatClose Accuracy.high (scores "archived") 0.0906190574169159 "the bare search counts the live posting"
+                  Expect.floatClose Accuracy.high (scores "+archived") 1.885928302414186e-9 "the modified search counts the retained posting"
               let read current =
                   handle (Fsdb.Session.create 2 current) "SELECT id FROM docs WHERE MATCH(title,body) AGAINST('réseau' IN BOOLEAN MODE) ORDER BY id"
                   |> snd
@@ -2783,6 +2788,7 @@ let tests =
               for current in [ store; checkpoint ] do
                   execute current "INSERT INTO docs VALUES(4,'réseau','archived')"
                   Expect.equal (tail "réseau" current).LastDocument 4L "even a deleted row without words consumed a document ID"
+                  checkRelevance current
               Expect.equal (budget (load dir)) (budget checkpoint) "WAL replay appends at the checkpoint's next document ID"
 
               let expected = ResultSet([ "id" ], [ [ Some "1" ]; [ Some "4" ] ])
@@ -2793,6 +2799,7 @@ let tests =
               let recovered = load dir
               Expect.equal (budget recovered).Bytes 0L "WAL replay clears the same cache"
               Expect.equal (read recovered) expected "the word query sees both rows after replay"
+              checkRelevance recovered
 
           testCase "committed deleted ngram frequencies survive replay and clean close until optimize"
           <| fun _ ->

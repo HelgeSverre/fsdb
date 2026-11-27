@@ -2066,7 +2066,9 @@ folding and queries after folding. The pinned Unicode 9 lowercase map
 also preserves boundaries for later capitals. Boolean modifiers preserve the
 visit order and rank adjustments of punctuation-split word lists.
 [Default word-parser relevance after deletes](torture/findings/2026-11-06-japanese-kana-order-and-weights.md#kana-sensitive-full-text-cursors)
-still differs when modified or compound queries count retained postings.
+now counts retained postings for the audited modified and compound Boolean
+queries. Single-term queries use live frequency for an exact match and
+subtract each deleted document once for a prefix match.
 
 The [legacy vertical-punctuation follow-up](torture/findings/2026-10-15-legacy-ngram-punctuation.md#vertical-punctuation-block-follow-up)
 also distinguishes all U+FE10–U+FE19 forms under `utf8mb4_unicode_ci` and
