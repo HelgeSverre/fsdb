@@ -50,7 +50,8 @@ let private fullTextDeletedSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x55uy |] 
 let private fullTextCacheBudgetSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x56uy |] // "FSNV" (format 31)
 let private fullTextOrderHighWatermarkSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x57uy |] // "FSNW" (format 32)
 let private fullTextCacheSegmentEndsSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x58uy |] // "FSNX" (format 33)
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x59uy |] // "FSNY" (format 34)
+let private fullTextNgramGroupingSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x59uy |] // "FSNY" (format 34)
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x5Auy |] // "FSNZ" (format 35)
 
 type private SnapshotFormat =
     { GeneratedForeignKeyIndexes: bool
@@ -80,7 +81,7 @@ type private SnapshotFormat =
       FullTextCacheBudget: bool
       FullTextOrderHighWatermark: bool
       FullTextCacheSegmentEnds: bool
-      FullTextNgramStopwordGrouping: bool
+      FullTextDocumentIndexing: bool
       FullTextStopwordSources: bool
       TableStatistics: bool
       IndexCardinality: bool }
@@ -113,7 +114,7 @@ let private legacySnapshotFormat =
       FullTextCacheBudget = false
       FullTextOrderHighWatermark = false
       FullTextCacheSegmentEnds = false
-      FullTextNgramStopwordGrouping = false
+      FullTextDocumentIndexing = false
       FullTextStopwordSources = false
       TableStatistics = false
       IndexCardinality = false }
@@ -203,14 +204,14 @@ let private fullTextCacheSegmentEndsSnapshotFormat =
     { fullTextOrderHighWatermarkSnapshotFormat with FullTextCacheSegmentEnds = true }
 
 let private currentSnapshotFormat =
-    { fullTextCacheSegmentEndsSnapshotFormat with FullTextNgramStopwordGrouping = true }
+    { fullTextCacheSegmentEndsSnapshotFormat with FullTextDocumentIndexing = true }
 
 /// Snapshot trailer: `[int64 payload length][uint32 crc32]`. The incremental
 /// CRC avoids materializing a multi-gigabyte payload.
 let private snapshotTrailerSize = 12
 
 let private snapshotFormat (header: byte[]) : SnapshotFormat option =
-    if header = snapshotMagic then
+    if header = snapshotMagic || header = fullTextNgramGroupingSnapshotMagic then
         Some currentSnapshotFormat
     elif header = fullTextCacheSegmentEndsSnapshotMagic then
         Some fullTextCacheSegmentEndsSnapshotFormat
@@ -2029,7 +2030,10 @@ let private encodeRuleTables (w: Writer) indexes =
         rules |> Array.iter (fun rules ->
             encodeTokenizer w rules.Tokenizer
             encodeStopwordPolicy w rules.Stopwords
-            writeBool w rules.UseFirstNgramSpelling)
+            match rules.DocumentIndexing with
+            | FullText.DocumentIndexing.Legacy -> w.WriteByte 0uy
+            | FullText.DocumentIndexing.IncrementalNgram -> w.WriteByte 1uy
+            | FullText.DocumentIndexing.Bulk -> w.WriteByte 2uy)
         rules |> Array.mapi (fun id rules -> rules, uint64 id) |> Map.ofArray)
 
 let private decodeRuleTable format rowCount (r: #IReader) =
@@ -2039,8 +2043,15 @@ let private decodeRuleTable format rowCount (r: #IReader) =
     Array.init count (fun _ ->
         let tokenizer = decodeTokenizer r
         let stopwords = decodeStopwordPolicy r
-        { FullText.indexingRules tokenizer stopwords with
-            UseFirstNgramSpelling = format.FullTextNgramStopwordGrouping && readBool r })
+        let documentIndexing =
+            if not format.FullTextDocumentIndexing then FullText.DocumentIndexing.Legacy
+            else
+                match r.ReadByte() with
+                | 0uy -> FullText.DocumentIndexing.Legacy
+                | 1uy -> FullText.DocumentIndexing.IncrementalNgram
+                | 2uy -> FullText.DocumentIndexing.Bulk
+                | _ -> failwith "Persistence: invalid full-text document indexing mode"
+        { FullText.indexingRules tokenizer stopwords with DocumentIndexing = documentIndexing })
 
 let private encodeFullTextDocuments (w: Writer) rowId indexes =
     for index, ruleIds in indexes do

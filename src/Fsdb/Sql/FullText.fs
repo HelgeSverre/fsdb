@@ -53,20 +53,29 @@ let internal customStopwords (collation: Collation) words =
 
 let internal customStopwordContents words = words.CollationName, Set.toList words.Words
 
+[<RequireQualifiedAccess>]
+type internal DocumentIndexing =
+    | Legacy
+    | IncrementalNgram
+    | Bulk
+
 /// Rules captured by a document when its postings are built.
 type internal IndexingRules =
     { Tokenizer: Tokenizer
       Stopwords: StopwordPolicy
-      UseFirstNgramSpelling: bool }
+      DocumentIndexing: DocumentIndexing }
 
 let internal indexingRules tokenizer stopwords =
-    { Tokenizer = tokenizer; Stopwords = stopwords; UseFirstNgramSpelling = false }
+    { Tokenizer = tokenizer; Stopwords = stopwords; DocumentIndexing = DocumentIndexing.Legacy }
 
 let internal rulesForDocumentWrite rules =
     match rules.Tokenizer, rules.Stopwords with
     | Ngrams _, (StopwordPolicy.BuiltIn | StopwordPolicy.Custom _) ->
-        { rules with UseFirstNgramSpelling = true }
+        { rules with DocumentIndexing = DocumentIndexing.IncrementalNgram }
     | _ -> rules
+
+let internal rulesForBulkBuild rules =
+    { rules with DocumentIndexing = DocumentIndexing.Bulk }
 
 let tryTokenizer = function
     | None -> Some defaultTokenizer
@@ -157,7 +166,8 @@ type private Token =
 
 type private Document =
     { Fields: Token[][]
-      Rules: IndexingRules }
+      Rules: IndexingRules
+      BulkPostings: Token[] option }
 
 [<Struct>]
 type private IndexedDocument =
@@ -383,7 +393,9 @@ let private isExactLookup rules token =
     | Ngrams _ -> isBooleanSearchable rules token
 
 let private searchableTokens (document: Document) =
-    Array.concat document.Fields |> Array.filter (isSearchable document.Rules)
+    match document.BulkPostings with
+    | Some postings -> postings
+    | None -> Array.concat document.Fields |> Array.filter (isSearchable document.Rules)
 
 let private wordsWithFirstSpelling (document: Document) =
     // The write cache groups equivalent grams across fields before
@@ -393,15 +405,15 @@ let private wordsWithFirstSpelling (document: Document) =
     |> Array.filter (fun (_, tokens) -> isSearchable document.Rules tokens.[0])
 
 let private indexedWords (document: Document) =
-    if document.Rules.UseFirstNgramSpelling then wordsWithFirstSpelling document
+    if document.Rules.DocumentIndexing = DocumentIndexing.IncrementalNgram then wordsWithFirstSpelling document
     else searchableTokens document |> Array.groupBy _.Key
 
 let private indexedTokens (document: Document) =
-    if document.Rules.UseFirstNgramSpelling then wordsWithFirstSpelling document |> Array.collect snd
+    if document.Rules.DocumentIndexing = DocumentIndexing.IncrementalNgram then wordsWithFirstSpelling document |> Array.collect snd
     else searchableTokens document
 
 let private documentPostings (document: Document) =
-    if document.Rules.UseFirstNgramSpelling then
+    if document.Rules.DocumentIndexing = DocumentIndexing.IncrementalNgram then
         let words = wordsWithFirstSpelling document
         Array.collect snd words, words
     else
@@ -671,25 +683,40 @@ let private addDocumentData id (document: Document) (index: Index<'id>) =
 let internal addDocumentFieldsWithRules rules id texts (index: Index<'id>) =
     // Phrase positions retain tokens omitted from ngram postings.
     let byteCount = postingByteCount rules.Tokenizer index.Collation
+    let bulkPostings =
+        if rules.DocumentIndexing = DocumentIndexing.Bulk then Some(ResizeArray()) else None
+    let binary = isBinaryCollation index.Collation
+    let makeToken position spelling =
+        let token = { tokenWith index.Collation spelling with ByteOffset = position }
+        bulkPostings |> Option.iter (fun postings ->
+            // The bulk sort key is lowercased even for binary collations.
+            // Stopword comparison uses the original token from the parser.
+            if isSearchable rules { token with Text = spelling } then
+                let text = if binary then Collation.lowercaseForFullText index.Collation.Name spelling else token.Text
+                let posting = if text = token.Text then token else { tokenOfFolded index.Collation text with ByteOffset = position }
+                postings.Add posting)
+        token
     let tokensAt start (text: string) =
         match rules.Tokenizer with
         | Ngrams size ->
-            positionedNgrams size text |> Array.map (fun (gram, offset) ->
-                { tokenWith index.Collation gram with ByteOffset = start + offset })
+            positionedNgrams size text |> Array.map (fun (gram, offset) -> makeToken (start + offset) gram)
         | Words _ ->
             let mutable previous = 0
             let mutable position = start
             collectWordTokens rules.Tokenizer index.Collation (fun word offset ->
                 position <- position + int64 (byteCount text previous (offset - previous))
                 previous <- offset
-                { tokenWith index.Collation word with ByteOffset = position }) text
+                makeToken position word) text
 
     let mutable start = 0L
     let fields =
         [| for text in texts do
                yield tokensAt start text
                if text.Length > 0 then start <- start + int64 (byteCount text 0 text.Length) + 1L |]
-    addDocumentData id { Fields = fields; Rules = rules } index
+    addDocumentData id
+        { Fields = fields
+          Rules = rules
+          BulkPostings = bulkPostings |> Option.map (fun postings -> postings.ToArray()) } index
 
 let internal sameDocument id (left: Index<'id>) (right: Index<'id>) =
     match Map.tryFind id left.Documents, Map.tryFind id right.Documents with
@@ -1026,22 +1053,38 @@ let private booleanPostingRows (view: ReadView<'id>) (token: Token) =
                 | Words _ -> true
                 | Ngrams size -> length >= size))
 
-let private exactPhraseMatches collation (doc: Token[]) (words: Token[]) =
+let private exactPhraseMatches collation (document: Document) (words: Token[]) =
     if words.Length = 0 then
         false
     else
         // InnoDB verifies multi-token phrases against lowercased document text,
         // but finds their starting positions through the original first token.
-        let foldDocument = words.Length > 1 && isBinaryCollation collation
-        seq { 0 .. doc.Length - words.Length }
-        |> Seq.exists (fun start ->
-            doc.[start].Key = words.[0].Key
-            && (words
-                |> Array.indexed
-                |> Array.forall (fun (offset, word) ->
-                    let token = doc.[start + offset]
-                    let key = if foldDocument then collation.FullTextKeyOf(token.Text.ToLowerInvariant()) else token.Key
-                    key = word.Key)))
+        let binary = isBinaryCollation collation
+        let bulkBinary = binary && document.Rules.DocumentIndexing = DocumentIndexing.Bulk
+        let firstKey = words.[0].Key
+        let matchesAnchor =
+            match document.BulkPostings with
+            | Some postings ->
+                // Both lists follow document byte order. A stopped bulk
+                // occurrence cannot anchor a phrase at its position.
+                let mutable index = 0
+                fun (token: Token) ->
+                    while index < postings.Length && postings.[index].ByteOffset < token.ByteOffset do
+                        index <- index + 1
+                    index < postings.Length
+                    && postings.[index].ByteOffset = token.ByteOffset
+                    && postings.[index].Key = firstKey
+            | None -> fun token -> token.Key = firstKey
+        let verificationKey (token: Token) =
+            if bulkBinary then collation.FullTextKeyOf(Collation.lowercaseForFullText collation.Name token.Text)
+            elif words.Length > 1 && binary then collation.FullTextKeyOf(token.Text.ToLowerInvariant())
+            else token.Key
+        document.Fields |> Array.exists (fun tokens ->
+            seq { 0 .. tokens.Length - words.Length }
+            |> Seq.exists (fun start ->
+                matchesAnchor tokens.[start]
+                && (words |> Array.indexed |> Array.forall (fun (offset, word) ->
+                    verificationKey tokens.[start + offset] = word.Key))))
 
 let private phraseCandidates (view: ReadView<'id>) (words: Token[]) =
     words
@@ -1157,7 +1200,7 @@ let private naturalClauseDocuments (view: ReadView<'id>) = function
     | NaturalPhrase words ->
         phraseCandidates view words
         |> Set.filter (fun id ->
-            view.Documents.[id].Content.Fields |> Array.exists (fun field -> exactPhraseMatches view.Collation field words))
+            exactPhraseMatches view.Collation view.Documents.[id].Content words)
 
 /// Matching terms retain their row sets separately from query occurrence counts.
 /// Repeated query words increase MySQL's document frequency, not a row's TF.
@@ -1794,11 +1837,11 @@ let rec private evalTerm
 
         candidates
         |> Seq.choose (fun id ->
-            let fields = view.Documents.[id].Content.Fields
+            let document = view.Documents.[id].Content
             let matches =
                 match proximity with
-                | None -> fields |> Array.exists (fun tokens -> exactPhraseMatches view.Collation tokens words)
-                | Some distance -> proximityMatches (Array.concat fields) words distance
+                | None -> exactPhraseMatches view.Collation document words
+                | Some distance -> proximityMatches (Array.concat document.Fields) words distance
 
             if matches then
                 terms
@@ -2476,12 +2519,18 @@ let internal expansionScoresInView candidateIds (view: ReadView<'id>) (query: st
         |> Map.toArray
         |> Array.collect (fun (id, _) ->
             let document = view.Documents.[id].Content
-            // Seed words are extracted again using the current length settings.
-            let rules =
-                match view.Rules.Tokenizer with
-                | Words _ -> { document.Rules with Tokenizer = view.Rules.Tokenizer }
-                | Ngrams _ -> document.Rules
-            indexedTokens { document with Rules = rules })
+            // InnoDB re-reads the original document for feedback. In
+            // particular a lowercase bulk posting does not supply a seed
+            // for an uppercase binary token.
+            match document.Rules.DocumentIndexing, view.Rules.Tokenizer with
+            | DocumentIndexing.Bulk, Words lengths ->
+                Array.concat document.Fields |> Array.filter (hasSearchableWordLength lengths)
+            | DocumentIndexing.Bulk, Ngrams _
+            | DocumentIndexing.IncrementalNgram, Ngrams _ -> Array.concat document.Fields
+            | _, Words _ ->
+                let rules = { document.Rules with Tokenizer = view.Rules.Tokenizer }
+                indexedTokens { document with Rules = rules }
+            | _, Ngrams _ -> indexedTokens document)
         |> Array.map _.Key
 
     match clauseQuery with

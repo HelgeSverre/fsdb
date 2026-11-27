@@ -859,7 +859,7 @@ let tests =
               let target = baseline |> addDocument 2 "ab"
               let merged = mergeDocuments Map.empty baseline source target target
               Expect.equal (documentRules 1 merged) (Some unfiltered) "merged document keeps source indexing rules"
-              Expect.equal (documentRules 2 merged) (Some { filtered with UseFirstNgramSpelling = true })
+              Expect.equal (documentRules 2 merged) (Some { filtered with DocumentIndexing = DocumentIndexing.IncrementalNgram })
                   "concurrent document keeps the target's write-time stopword grouping"
               Expect.equal (activeRules merged) filtered "publication does not replace the target's active rules"
               Expect.equal (naturalScores merged "ab" |> Map.keys |> Seq.toList) [ 1 ] "only the unfiltered source document has the posting"

@@ -410,6 +410,56 @@ let tests =
               | Err(1231, _) -> ()
               | result -> failtestf "invalid boolean setting: %A" result
 
+          testCase "bulk fulltext filtering uses source spelling and stores lowercase postings"
+          <| fun _ ->
+              let connection = Db.connect (Db.create ())
+              let run sql = connection.Query sql |> ignore
+              run "SET SESSION innodb_ft_enable_stopword=OFF"
+              run "CREATE TABLE kana(id INT PRIMARY KEY,a TEXT,b TEXT) COLLATE utf8mb4_bin"
+              run "INSERT INTO kana VALUES(1,'京Ａ花','他語'),(2,'京ａ花','雑音')"
+              run "ALTER TABLE kana ADD FULLTEXT(a,b) WITH PARSER ngram"
+              run "INSERT INTO kana VALUES(3,'京Ａ花','別文')"
+              let kana predicate = connection.Query ($"SELECT id FROM kana WHERE MATCH(a,b) AGAINST({predicate}) ORDER BY id") |> rows
+              Expect.equal (kana "'京ａ'") [ [ Some "1" ]; [ Some "2" ] ] "bulk rows are searchable with lowercase text"
+              Expect.equal (kana "'京Ａ'") [ [ Some "3" ] ] "incremental binary tokens retain their case"
+              Expect.equal (kana "'\"京ａ花\"' IN BOOLEAN MODE") [ [ Some "1" ]; [ Some "2" ] ] "the phrase starts at the lowercase bulk posting"
+
+              run "CREATE TABLE feedback(id INT PRIMARY KEY,a TEXT,b TEXT) COLLATE utf8mb4_bin"
+              run "INSERT INTO feedback VALUES(1,'東京','京Ａ'),(2,'京ａ','雑音'),(3,'京都','韓国')"
+              run "ALTER TABLE feedback ADD FULLTEXT(a,b) WITH PARSER ngram"
+              run "INSERT INTO feedback VALUES(4,'別文','京Ａ')"
+              Expect.equal
+                  (connection.Query "SELECT id FROM feedback WHERE MATCH(a,b) AGAINST('東京' WITH QUERY EXPANSION) ORDER BY id" |> rows)
+                  [ [ Some "1" ]; [ Some "4" ] ] "feedback parses the original uppercase spelling in the bulk row"
+
+              run "CREATE TABLE stops(value VARCHAR(30) COLLATE utf8mb4_bin)"
+              run "INSERT INTO stops VALUES ('A'),('Orchard')"
+              run "SET SESSION innodb_ft_enable_stopword=ON"
+              run $"SET SESSION innodb_ft_user_stopword_table='{Storage.defaultDatabase}/stops'"
+              run "CREATE TABLE raw_case(id INT PRIMARY KEY,a TEXT,b TEXT) COLLATE utf8mb4_0900_as_cs"
+              run "INSERT INTO raw_case VALUES(1,'京A花','別文'),(2,'京a花','雑音')"
+              run "ALTER TABLE raw_case ADD FULLTEXT(a,b) WITH PARSER ngram"
+              run "INSERT INTO raw_case VALUES(3,'京A花','他語')"
+              Expect.equal
+                  (connection.Query "SELECT id FROM raw_case WHERE MATCH(a,b) AGAINST('京a') ORDER BY id" |> rows)
+                  [ [ Some "2" ]; [ Some "3" ] ] "the original uppercase gram is a bulk stopword"
+
+              run "CREATE TABLE words(id INT PRIMARY KEY,t TEXT) COLLATE utf8mb4_0900_bin"
+              run "INSERT INTO words VALUES(1,'ORCHARD GARDEN'),(2,'Orchard garden'),(3,'orchard garden')"
+              run "ALTER TABLE words ADD FULLTEXT(t)"
+              run "INSERT INTO words VALUES(4,'Orchard garden')"
+              Expect.equal
+                  (connection.Query "SELECT id FROM words WHERE MATCH(t) AGAINST('orchard') ORDER BY id" |> rows)
+                  [ [ Some "1" ]; [ Some "3" ] ] "bulk word builds check the original spelling too"
+
+              run "SET SESSION innodb_ft_user_stopword_table=NULL"
+              run "CREATE TABLE phrases(id INT PRIMARY KEY,a TEXT,b TEXT) COLLATE utf8mb4_0900_ai_ci"
+              run "INSERT INTO phrases VALUES(1,'京Ａ花樹','京a花鳥'),(2,'京ａ花鳥','別文'),(3,'雑音','他語')"
+              run "ALTER TABLE phrases ADD FULLTEXT(a,b) WITH PARSER ngram"
+              Expect.equal
+                  (connection.Query "SELECT id FROM phrases WHERE MATCH(a,b) AGAINST('\"京ａ花鳥\"' IN BOOLEAN MODE) ORDER BY id" |> rows)
+                  [ [ Some "2" ] ] "the phrase must start at a position retained in its posting"
+
           testCase "metadata ALTER preserves each document's indexing rules"
           <| fun _ ->
               let store = Storage.create ()
@@ -630,7 +680,7 @@ let tests =
               Persistence.snapshotNow dir store
               let path = System.IO.Path.Combine(dir, "snapshot.fsdb")
               let bytes = System.IO.File.ReadAllBytes path
-              Expect.equal (System.Text.Encoding.ASCII.GetString(bytes, 0, 4)) "FSNY" "rule references use the current snapshot format"
+              Expect.equal (System.Text.Encoding.ASCII.GetString(bytes, 0, 4)) "FSNZ" "rule references use the current snapshot format"
               let trailerSize, preparedCountSize = 12, 4
               let documentOrderSize = 1 // One length-encoded position for the single row.
               let lastRuleReference = bytes.Length - trailerSize - preparedCountSize - documentOrderSize - 1

@@ -1533,7 +1533,8 @@ let private legacySquaredCjkExceptionWeights unicode520 codepoint =
 let private legacyFullTextCase name =
     match name with
     | "utf8mb4_general_ci" | "utf8mb4_unicode_ci"
-    | "utf8mb3_general_ci" | "utf8mb3_unicode_ci" -> Some LegacyFullTextCaseData.unicode400
+    | "utf8mb3_general_ci" | "utf8mb3_unicode_ci"
+    | "utf8mb4_bin" | "utf8mb3_bin" -> Some LegacyFullTextCaseData.unicode400
     | "utf8mb4_unicode_520_ci" -> Some LegacyFullTextCaseData.unicode520
     | _ -> None
 

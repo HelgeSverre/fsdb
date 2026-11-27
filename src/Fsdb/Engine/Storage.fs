@@ -3616,7 +3616,7 @@ let private reindexTableWithFullTextSettings size lengths (settings: FullText.St
             match rules.Tokenizer with
             | FullText.Words _ -> FullText.Words lengths
             | FullText.Ngrams _ -> FullText.Ngrams size
-        { rules with Tokenizer = tokenizer }
+        FullText.rulesForBulkBuild { rules with Tokenizer = tokenizer }
     let indexes =
         buildFullTextIndexesWithStopwords (fun _ -> settings.Policy) rulesFor table
         |> Map.map (fun _ index -> index |> FullText.withNgramTokenSize size |> FullText.withWordLengths lengths |> FullText.withStopwordSource settings.Source)
@@ -10567,7 +10567,7 @@ let private reindexAfterAlter size lengths settings actions preserveFullText bef
             |> Map.ofList
 
         let rulesFor name rowId (fallback: FullText.IndexingRules) =
-            let fallback = { fallback with Tokenizer = tokenizerAtSize fallback.Tokenizer }
+            let fallback = FullText.rulesForBulkBuild { fallback with Tokenizer = tokenizerAtSize fallback.Tokenizer }
             match sourceNames |> Map.tryFind name with
             | Some sourceName -> documentRulesFrom before Map.empty sourceName rowId fallback
             | None -> fallback

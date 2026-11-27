@@ -1608,8 +1608,11 @@ match MySQL across the binary, UCA 9.0, and UCA 5.2 test collations.
 [Ngram stopword filtering during writes](torture/findings/2026-11-27-ngram-stopword-first-spelling.md)
 now checks the first collation-equivalent spelling for each document
 posting. Bulk index builds filter individual occurrences. Snapshots
-preserve the rule used by each document. Some short wildcard results
-under custom stopword lists and binary-collation bulk builds remain open.
+preserve the rule used by each document. [Bulk full-text builds](torture/findings/2026-11-27-fulltext-bulk-spelling.md)
+check the original spelling against stopwords and store lowercase postings
+for both parsers, including under binary collations. Phrase anchors use
+retained posting positions and query expansion reads the document spelling.
+Some short wildcard searches and legacy collation keys remain open.
 
 [Exact legacy `WEIGHT_STRING` bytes](torture/findings/2026-11-04-extension-a-exact-weights.md#implicit-ideograph-encoder-follow-up)
 now match all 137,910 adjacent-pair oracle cases across Extension A and the
