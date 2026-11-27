@@ -3632,7 +3632,8 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
         let lockingReadView () =
             match session.Tx with
             | Some transaction when statementContainsLockingRead stmt ->
-                Some(fun () -> rebaseTransactionSnapshot session transaction |> snd)
+                let releaseOffset = transaction.Isolation = ReadCommitted || transaction.Isolation = ReadUncommitted
+                Some((fun () -> rebaseTransactionSnapshot session transaction |> snd), releaseOffset)
             | _ -> None
 
         match access with
@@ -3850,7 +3851,9 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
             try
                 withSelectDeadline (fun () ->
                     match lockingReadView () with
-                    | Some current -> Executor.withLockingReadStore current (lockWaitTimeout session) evaluate
+                    | Some(current, releaseOffset) ->
+                        Executor.withLockingReadStore current (lockWaitTimeout session) (fun () ->
+                            Executor.withLockingReadOffsetRelease releaseOffset evaluate)
                     | None -> evaluate ())
             with
             | Limits.SelectTimeoutExpired ->

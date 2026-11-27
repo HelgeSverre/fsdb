@@ -1142,6 +1142,7 @@ let private suppressReadRowLocks = new System.Threading.ThreadLocal<bool>()
 let private committedFullTextStore = System.Threading.AsyncLocal<Store option>()
 let private lockingReadStore = System.Threading.AsyncLocal<(unit -> Store) option>()
 let private lockingReadTimeout = System.Threading.AsyncLocal<System.TimeSpan option>()
+let private releaseLockingReadOffsetRows = System.Threading.AsyncLocal<bool>()
 let private examinedRows = System.Threading.AsyncLocal<int64 ref option>()
 
 type private AnalyzedIndexLookup =
@@ -1308,6 +1309,9 @@ let private withTriggerRowScope (scope: TriggerRowScope) (body: unit -> 'a) : 'a
 let withLockingReadStore (store: unit -> Store) (timeout: System.TimeSpan) (body: unit -> 'a) : 'a =
     DynamicScope.withValue lockingReadStore (Some store) (fun () ->
         DynamicScope.withValue lockingReadTimeout (Some timeout) body)
+
+let internal withLockingReadOffsetRelease release body =
+    DynamicScope.withValue releaseLockingReadOffsetRows release body
 
 type private StoredView =
     { Name: string
@@ -15786,12 +15790,71 @@ and private tryIndexedSemiJoin
                                 Ok(Some(table.Columns, rows, select)))
     | None -> Ok None
 
+and private tryOrderedSecondaryLockingRead store registry dbName (select: SelectStmt) (source: LockingReadSource) (locking: LockingRead) =
+    let literalCount = function
+        | Lit(VInt value) when value >= 0L -> Some(min value (int64 System.Int32.MaxValue) |> int)
+        | Lit(VUInt value) -> Some(min value (uint64 System.Int32.MaxValue) |> int)
+        | _ -> None
+
+    let simpleProjection (projection: Projection) =
+        match projection.Expression with
+        | Lit _ | Star None -> true
+        | Star(Some qualifier) -> equalsIgnoreCase qualifier source.Qualifier
+        | expression ->
+            tryCorrelatedInnerColumn (correlatedProbeSource source.Qualifier source.Table.Columns) expression |> Option.isSome
+
+    let tref = source.Reference
+    match select.Limit |> Option.bind literalCount with
+    | Some limit
+        when limit > 0
+             && (locking.Wait = NoWait || locking.Wait = SkipLocked)
+             && store.TransactionLocks.IsSome && not select.OrderBy.IsEmpty
+             && not select.Distinct && not select.CalculateFoundRows
+             && select.Joins.IsEmpty && select.GroupBy.IsEmpty && select.Having.IsNone && select.Windows.IsEmpty
+             && not (SelectStmt.hasDestination select)
+             && List.forall simpleProjection select.Projections ->
+        let database = tref.Database |> Option.defaultValue dbName
+        let qualifiers = singleQualifier source.Qualifier source.Table.Columns
+        let projections = expandOrderProjections source.Table.Columns qualifiers select.Projections
+        let columns = columnIndexOf source.Table.Columns
+        let offset = select.Offset |> Option.map literalCount |> Option.defaultValue (Some 0)
+        let refresh = lockingReadStore.Value |> Option.defaultValue (fun () -> store)
+
+        let selectedIndex () =
+            match tref.IndexHints with
+            | [] ->
+                tryEqualityAccess store registry dbName tref select.Where
+                |> tryEqualityPrefixOrder store registry dbName tref select
+                |> Option.map _.KeyName
+            | [ { Kind = ForceIndex; Scope = (None | Some IndexJoin); Indexes = [ name ] } ] -> Some name
+            | _ -> None
+
+        if not (validateOrderAliases columns qualifiers projections select.OrderBy |> Result.isOk) then None
+        else
+            let secondary = selectedIndex () |> Option.filter (equalsIgnoreCase "PRIMARY" >> not)
+            Option.map3 (fun index offset terms -> index, offset, terms) secondary offset (indexOrderTerms registry tref select)
+            |> Option.bind (fun (name, offset, terms) ->
+                orderedIndexPrefixMatches IndexJoin store registry dbName tref select.Where terms []
+                |> List.tryPick (fun resolved ->
+                    let matched = resolved.Match
+                    if not resolved.PredicateCovered || matched.PinnedCount <> (optionalConjuncts select.Where).Length then None
+                    else
+                        fixedPrefixOrderDirections terms Set.empty matched
+                        |> Option.bind (fun directions ->
+                            let keyTerms =
+                                List.map2 (fun (term: IndexOrderTerm) direction -> { term with Direction = direction }) matched.Terms directions
+                                |> storageOrderTerms
+                            let count = min (int64 System.Int32.MaxValue) (int64 offset + int64 limit) |> int
+                            Storage.tryLockOrderedSecondaryRead store refresh database tref.Table name keyTerms resolved.PinnedValues
+                                locking.Strength locking.Wait releaseLockingReadOffsetRows.Value offset count)))
+    | _ -> None
+
 and private prepareLockingRead
     (store: Store)
     (registry: Registry)
     (dbName: string)
     (select: SelectStmt)
-    : Result<Map<string, Set<RowId>>, QueryResult> =
+    : Result<Map<string, Set<RowId>> * (Store * int) option, QueryResult> =
     let sourceItems =
         (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
         |> List.collect FromItem.leaves
@@ -15840,7 +15903,7 @@ and private prepareLockingRead
                 |> List.tryFind (fun (_, count) -> count > 1)
             with
             | Some(name, _) -> Error(Err(3569, sprintf "Table `%s` appears in multiple locking clauses." name))
-            | None when suppressReadRowLocks.Value -> Ok Map.empty
+            | None when suppressReadRowLocks.Value -> Ok(Map.empty, None)
             | None ->
                 let rowIdsFor (source: LockingReadSource) =
                     if sources.Length = 1 && select.Joins.IsEmpty then
@@ -15850,25 +15913,36 @@ and private prepareLockingRead
                     else
                         source.Table.RowsArray.Indexed |> Seq.map fst |> List.ofSeq
 
-                Storage.withTransactionLockCheckpoint store (fun () ->
-                    targets
-                    |> traverse (fun (name, locking) ->
-                        let source = byQualifier.[name.ToLowerInvariant()]
-                        let database = source.Reference.Database |> Option.defaultValue dbName
-                        let rowIds = rowIdsFor source
+                let ordered =
+                    match sources, targets with
+                    | [ source ], [ _, locking ] ->
+                        tryOrderedSecondaryLockingRead store registry dbName select source locking
+                        |> Option.map (fun (current, rows, offset) ->
+                            Map.ofList [ source.Qualifier.ToLowerInvariant(), rows ], Some(current, offset))
+                    | _ -> None
 
-                        let acquired =
-                            Storage.acquireTransactionReadTargets
-                                (lockingReadTimeout.Value |> Option.defaultValue (Limits.lockWaitTimeout ()))
-                                store
-                                database
-                                source.Reference.Table
-                                locking.Strength
-                                locking.Wait
-                                rowIds
+                match ordered with
+                | Some rows -> Ok rows
+                | None ->
+                    Storage.withTransactionLockCheckpoint store (fun () ->
+                        targets
+                        |> traverse (fun (name, locking) ->
+                            let source = byQualifier.[name.ToLowerInvariant()]
+                            let database = source.Reference.Database |> Option.defaultValue dbName
+                            let rowIds = rowIdsFor source
 
-                        Ok(source.Qualifier.ToLowerInvariant(), Set.ofList acquired))
-                    |> Result.map Map.ofList))
+                            let acquired =
+                                Storage.acquireTransactionReadTargets
+                                    (lockingReadTimeout.Value |> Option.defaultValue (Limits.lockWaitTimeout ()))
+                                    store
+                                    database
+                                    source.Reference.Table
+                                    locking.Strength
+                                    locking.Wait
+                                    rowIds
+
+                            Ok(source.Qualifier.ToLowerInvariant(), Set.ofList acquired))
+                        |> Result.map (fun rows -> Map.ofList rows, None)))
 
 and private runSelectStmt
     (store: Store)
@@ -15956,11 +16030,18 @@ and private runUnmergedSelectStmt
 
             match prepareLockingRead initial registry dbName select with
             | Error error -> error, [], []
-            | Ok rows ->
-                let current = lockingReadStore.Value |> Option.map (fun refresh -> refresh ()) |> Option.defaultValue initial
+            | Ok(rows, orderedRead) ->
+                let current, selected =
+                    match orderedRead with
+                    | Some(current, offset) ->
+                        recordConsumedOffset select.Offset offset
+                        current, { select with Offset = None }
+                    | None ->
+                        let current = lockingReadStore.Value |> Option.map (fun refresh -> refresh ()) |> Option.defaultValue initial
+                        current, select
 
                 DynamicScope.withValue lockingReadRows rows (fun () ->
-                    runUnlockedSelectStmt current registry dbName select outer))
+                    runUnlockedSelectStmt current registry dbName selected outer))
 
 /// SQL comparison negation preserves NULL, so its inverse range is safe for
 /// index planning while the original predicate remains the row-level filter.

@@ -959,6 +959,11 @@ under REPEATABLE READ and SERIALIZABLE.
 stop at the limit and keep the visited locks after a conflict. The
 corresponding `SKIP LOCKED` ranges count unlocked rows toward the limit
 and preserve the gaps at the records they visit successfully.
+[Ordered exact-numeric secondary seeks](torture/findings/2026-11-27-ordered-secondary-locking.md)
+also check pending insertion order before filling OFFSET and LIMIT. Audited
+FOR UPDATE reads retain only visited row locks, with lower isolation
+releasing OFFSET rows. Secondary next-key gaps and covering FOR SHARE
+record ownership remain open.
 [Locking reads with `LIMIT 0` and no offset](torture/findings/2026-11-27-missing-primary-write-gaps.md#locking-reads-with-limit-0)
 validate the statement and retain table metadata without claiming rows,
 including when the locking read is inside a subquery, CTE, or UNION.

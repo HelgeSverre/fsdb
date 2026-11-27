@@ -8583,6 +8583,119 @@ let internal tryOrderedIndexPrefixLookupWith
 let internal tryOrderedIndexPrefixLookup store dbName tableName terms prefixValues =
     tryOrderedIndexPrefixLookupWith (fun _ -> true) store dbName tableName terms prefixValues
 
+exception private ReopenOrderedSecondaryRead of Store
+
+let internal tryLockOrderedSecondaryRead
+    (store: Store) refresh database tableName indexName terms prefixValues strength wait releaseOffset offset limit =
+    let exactNumeric = function TDecimal _ -> true | kind -> isIntegerKeyType kind
+    let keyPart = function
+        | VNull -> Some OrderedNull
+        | VInt value -> Some(OrderedNumber(decimal value))
+        | VUInt value -> Some(OrderedNumber(decimal value))
+        | VDecimal value -> Some(OrderedNumber value)
+        | _ -> None
+
+    let tryAcquire snapshot =
+        Limits.checkQueryInterruption queryCancellation.Value
+        tableAt snapshot database tableName
+        |> Option.filter (fun _ ->
+            not (Map.containsKey (database.ToLowerInvariant(), normalizeTableName tableName) snapshot.TableShadows))
+        |> Option.bind (fun table ->
+            let primary =
+                primaryKeyColumns table
+                |> List.choose (resolveColumn table.Columns >> Result.toOption)
+            insertOrderKeyGroups table
+            |> List.tryFind (fun group ->
+                group.Name.Equals(indexName, StringComparison.OrdinalIgnoreCase)
+                && group.Indices.Length = List.length terms
+                && not (List.isEmpty primary)
+                && List.forall (fun index -> List.contains index group.Indices) primary
+                && List.forall (fun index -> exactNumeric table.Columns.[index].Type) group.Indices)
+            |> Option.bind (fun group ->
+                let allowed (name: string) = name.Equals(group.Name, StringComparison.OrdinalIgnoreCase)
+                tryOrderedIndexWithPrefix allowed snapshot (Some table) terms prefixValues None None
+                |> Option.bind (fun (_, entries, prefix, slice, traversal) ->
+                    prefix |> List.map keyPart |> tryAllSome
+                    |> Option.bind (fun claimPrefix ->
+                        let compareKeys left right =
+                            List.zip3 group.Directions left right
+                            |> List.tryPick (fun (direction, left, right) ->
+                                let order = Operators.compare left right
+                                if order = 0 then None
+                                elif (direction = Desc) <> (traversal = Backward) then Some(-order)
+                                else Some order)
+                            |> Option.defaultValue 0
+
+                        let nextPending =
+                            if wait <> NoWait then None
+                            else
+                                let types = group.Indices |> List.map (fun index -> table.Columns.[index].Type)
+                                let primaryTypes = primary |> List.map (fun index -> table.Columns.[index].Type)
+                                activeOrderedKeyClaims snapshot database tableName group.Name types primaryTypes
+                                |> List.fold (fun first (key, _, _) ->
+                                    if List.take claimPrefix.Length key = claimPrefix
+                                       && (first |> Option.forall (fun current -> compareKeys key current < 0)) then Some key
+                                    else first) None
+
+                        let unchanged current =
+                            tableAt current database tableName
+                            |> Option.exists (fun latest ->
+                                latest.SchemaRevision = table.SchemaRevision
+                                && (Map.tryFind group.Name latest.SecondaryOrder
+                                    |> Option.exists (fun order -> obj.ReferenceEquals(order, entries) || order.SetEquals entries)))
+
+                        let scan current =
+                            let ids = ResizeArray<RowId>()
+                            use rows = (orderedEntries traversal (slice (orderedPrefixBounds entries prefix))).GetEnumerator()
+                            while ids.Count < limit && rows.MoveNext() do
+                                Limits.checkQueryInterruption queryCancellation.Value
+                                let entry = rows.Current
+                                match nextPending with
+                                | Some pending when
+                                    (entry.Values |> List.map keyPart |> tryAllSome
+                                     |> Option.exists (fun key -> compareKeys pending key <= 0)) ->
+                                    raise (LockNowait database)
+                                | _ -> ()
+                                // At lower isolation an OFFSET record checks
+                                // ownership but does not retain a row lock.
+                                if releaseOffset && ids.Count < offset then
+                                    try
+                                        checkTransactionReadTarget current database tableName strength entry.RowId
+                                        ids.Add entry.RowId
+                                    with LockNowait _ when wait = SkipLocked -> ()
+                                else
+                                    let locked =
+                                        acquireTransactionReadTargets TimeSpan.Zero current database tableName strength wait [ entry.RowId ]
+                                    ids.AddRange locked
+                            if ids.Count < limit && nextPending.IsSome then raise (LockNowait database)
+                            let consumedOffset = min offset ids.Count
+                            ids |> Seq.skip consumedOffset |> Set.ofSeq, consumedOffset
+
+                        let current = refresh ()
+                        if not (unchanged current) then Some(Error current)
+                        else
+                            try
+                                withTransactionLockCheckpoint current (fun () ->
+                                    // A completed seek must survive a concurrent
+                                    // delete or key move. A genuine NOWAIT
+                                    // conflict retains the earlier row locks.
+                                    match (try Ok(scan current) with LockNowait _ as conflict -> Error conflict) with
+                                    | Error conflict -> Error conflict
+                                    | Ok(rows, offset) ->
+                                        let latest = refresh ()
+                                        if not (unchanged latest) then raise (ReopenOrderedSecondaryRead latest)
+                                        Ok(latest, rows, offset))
+                                |> function Ok selection -> Some(Ok selection) | Error conflict -> raise conflict
+                            with ReopenOrderedSecondaryRead latest -> Some(Error latest)))))
+
+    let rec acquire snapshot =
+        match tryAcquire snapshot with
+        | Some(Error latest) -> acquire latest
+        | Some(Ok selection) -> Some selection
+        | None -> None
+
+    acquire store
+
 let private tryOrderedIndexPrefixRangeSliceInTableWith
     (allowed: string -> bool)
     (store: Store)

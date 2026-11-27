@@ -8634,6 +8634,97 @@ let tests =
                       run writer insert (Affected 1UL) |> ignore
                   else Expect.equal gap (Affected 1UL) "the neighboring insert can proceed"
 
+          testCase "ordered secondary NOWAIT visits pending inserts before the limit"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              for isolation, order, pending, first in
+                  [ "READ COMMITTED", "ASC", 5, 10
+                    "READ COMMITTED", "DESC", 40, 30
+                    "REPEATABLE READ", "ASC", 5, 10
+                    "REPEATABLE READ", "DESC", 40, 30 ] do
+                  let store = Fsdb.Storage.create ()
+                  let owner = create 1 store
+                  run owner "CREATE TABLE jobs(id INT PRIMARY KEY,project_id INT NOT NULL,stamp INT NOT NULL,INDEX ix(project_id,stamp,id))" (Affected 0UL) |> ignore
+                  run owner "INSERT INTO jobs VALUES (10,7,10),(30,7,30),(50,8,50)" (Affected 3UL) |> ignore
+                  let holder = run owner "BEGIN" (Affected 0UL)
+                  let holder = run holder $"INSERT INTO jobs VALUES (20,7,{pending})" (Affected 1UL)
+                  let reader = run (create 2 store) $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                  let hint = if order = "ASC" then "FORCE INDEX(ix)" else ""
+                  let query offset mode =
+                      $"SELECT id FROM jobs {hint} WHERE project_id=7 ORDER BY stamp {order},id {order} LIMIT 1 OFFSET {offset} FOR UPDATE {mode}"
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  let reader, result = handle reader (query 0 "NOWAIT")
+                  TestSupport.Sql.expectError 3572 result "the pending insert is the first record in index order"
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  let reader = run reader (query 0 "SKIP LOCKED") (ResultSet([ "id" ], [ [ Some(string first) ] ]))
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+                  run holder "ROLLBACK" (Affected 0UL) |> ignore
+
+                  let holder = run owner "BEGIN" (Affected 0UL)
+                  let holder = run holder "INSERT INTO jobs VALUES (20,7,20)" (Affected 1UL)
+                  let other = if first = 10 then 30 else 10
+                  let row id = ResultSet([ "id" ], [ [ Some(string id) ] ])
+                  let observer = create 3 store
+                  let probe id = handle observer $"SELECT id FROM jobs WHERE id={id} FOR UPDATE NOWAIT" |> snd
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  let reader = run reader (query 0 "NOWAIT") (row first)
+                  TestSupport.Sql.expectError 3572 (probe first) "the selected record is locked"
+                  Expect.equal (probe other) (row other) "the scan stops when the limit is filled"
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  let reader, result = handle reader (query 1 "NOWAIT")
+                  TestSupport.Sql.expectError 3572 result "the OFFSET advances the seek to the pending insert"
+                  if isolation = "READ COMMITTED" then Expect.equal (probe first) (row first) "the offset row was released"
+                  else TestSupport.Sql.expectError 3572 (probe first) "the offset row remains locked"
+                  Expect.equal (probe other) (row other) "the scan did not reach the next record"
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  let reader = run reader (query 1 "SKIP LOCKED") (row other)
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+                  run holder "ROLLBACK" (Affected 0UL) |> ignore
+
+          testCase "ordered secondary NOWAIT reopens when a visited row disappears"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let owner = create 1 store
+              let run sql expected = Expect.equal (handle owner sql |> snd) expected sql
+              run "CREATE TABLE jobs(id INT PRIMARY KEY,project_id INT NOT NULL,stamp INT NOT NULL,INDEX ix(project_id,stamp,id))" (Affected 0UL)
+              run "INSERT INTO jobs VALUES (10,7,10),(30,7,30)" (Affected 2UL)
+              let _, initial = Fsdb.Storage.beginTransactionWithBase store
+              run "DELETE FROM jobs WHERE id=10" (Affected 1UL)
+              let _, refreshed = Fsdb.Storage.beginTransactionSnapshotWithBase store
+              let latest = Fsdb.Storage.carryTransactionLocks initial refreshed
+              let mutable refreshes = 0
+              let refresh () =
+                  refreshes <- refreshes + 1
+                  if refreshes = 1 then initial else latest
+              let terms: Fsdb.Storage.OrderedKeyTerm list =
+                  [ "project_id"; "stamp"; "id" ]
+                  |> List.map (fun name -> { OrderedColumnName = name; OrderedTransform = None; OrderedDirection = Asc })
+              let db = Fsdb.Storage.defaultDatabase
+              try
+                  let selection =
+                      Fsdb.Storage.tryLockOrderedSecondaryRead initial refresh db "jobs" "ix" terms [ VInt 7L ]
+                          UpdateLock NoWait true 0 1
+                  let table = Fsdb.Storage.tableSnapshot latest db "jobs" |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let remainingId, _ = table.RowsArray.Indexed |> Seq.exactlyOne
+                  match selection with
+                  | Some(_, rows, 0) -> Expect.equal rows (Set.singleton remainingId) "the reopened seek fills the limit"
+                  | other -> failtestf "unexpected reopened selection %A" other
+                  Expect.equal
+                      (initial.TransactionLocks.Value.LockClaims |> Set.ofSeq)
+                      (Set.singleton (Fsdb.Storage.ExclusiveRowLock(db, "jobs", remainingId)))
+                      "the stale scan released its row claim"
+              finally
+                  Fsdb.Storage.releaseTransactionLocks initial
+
           testCase "ordered primary NOWAIT stops at LIMIT and keeps the visited prefix on conflict"
           <| fun _ ->
               let run session sql expected =
