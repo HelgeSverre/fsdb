@@ -162,6 +162,53 @@ let tests =
               Expect.stringContains emptyPlan "rows=0 loops=1" "the root returns no rows"
               Expect.isFalse (emptyPlan.Contains "Ordered index lookup") "binding an empty lateral source does not record a lookup"
 
+          testCase "correlated top-N explains references to materialized derived columns"
+          <| fun _ ->
+              let store = newStore ()
+              for sql in
+                  [ "CREATE TABLE owners(id INT PRIMARY KEY,tenant INT)"
+                    "CREATE TABLE events(id INT PRIMARY KEY,tenant INT,state INT,stamp INT,KEY recent(tenant,state,stamp DESC,id))"
+                    "INSERT INTO owners VALUES(1,1),(2,2),(3,5)"
+                    "INSERT INTO events VALUES(1,1,1,2),(2,1,1,1),(3,2,1,8),(4,2,2,99)" ] do
+                  match runDefault store sql with
+                  | Affected _ -> ()
+                  | other -> failtestf "%s: %A" sql other
+
+              let lookup bound hint =
+                  "SELECT e.id FROM events e " + hint + " WHERE e.tenant=" + bound
+                  + " AND e.state=1 ORDER BY e.stamp DESC,e.id LIMIT 1"
+
+              for from, bound, column in
+                  [ "(SELECT id,tenant FROM owners LIMIT 2) o", "o.tenant", "tenant"
+                    "(SELECT id,tenant+1 AS outer_key FROM owners LIMIT 2) o", "outer_key", "outer_key"
+                    "(SELECT id,tenant FROM owners WHERE id=1 UNION ALL SELECT id,tenant FROM owners WHERE id=2) o", "o.tenant", "tenant"
+                    "owners p JOIN LATERAL (SELECT p.id,p.tenant AS outer_key LIMIT 1) o ON TRUE", "o.outer_key", "outer_key" ] do
+                  let query = lookup bound "FORCE INDEX(recent)"
+                  let expected selectType =
+                      [ Some selectType, Some "ref", Some "recent", Some "10", Some("o." + column + ",const") ]
+                  let innerAccess sql =
+                      match runDefault store ("EXPLAIN " + sql) with
+                      | ResultSet(_, rows) ->
+                          rows |> List.choose (function
+                              | _ :: kind :: Some "e" :: _ :: access :: _ :: key :: length :: reference :: _ ->
+                                  Some(kind, access, key, length, reference)
+                              | _ -> None)
+                      | other -> failtestf "expected a static plan, got %A" other
+
+                  Expect.equal
+                      (innerAccess ("SELECT o.id,(" + query + ") FROM " + from))
+                      (expected "DEPENDENT SUBQUERY") from
+                  Expect.equal
+                      (innerAccess ("SELECT o.id,q.id FROM " + from + " LEFT JOIN LATERAL (" + query + ") q ON TRUE"))
+                      (expected "DEPENDENT DERIVED") from
+                  let ignored = lookup bound "IGNORE INDEX(recent)"
+                  Expect.equal
+                      (innerAccess ("SELECT o.id,(" + ignored + ") FROM " + from))
+                      [ Some "DEPENDENT SUBQUERY", Some "ALL", None, None, None ] from
+                  Expect.equal
+                      (innerAccess ("SELECT o.id,q.id FROM " + from + " LEFT JOIN LATERAL (" + ignored + ") q ON TRUE"))
+                      [ Some "DEPENDENT DERIVED", Some "ALL", None, None, None ] from
+
           testCase "correlated top-N seeks nullable equality prefixes"
           <| fun _ ->
               let store = newStore ()

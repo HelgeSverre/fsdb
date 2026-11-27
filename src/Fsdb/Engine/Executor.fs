@@ -28944,29 +28944,45 @@ let private indexedJoinExplainPlans
 
 type private ExplainOuterScope =
     { Context: EvalContext
-      Sources: (string * string * ColumnDef list) list
+      Sources: (string option * string * ColumnDef list) list
       Outer: ExplainOuterScope option }
 
 let private explainOuterScope store registry dbName outer items =
-    let describeSource = function
-        | FromTable tref ->
-            physicalFastPathTable store dbName tref
-            |> Option.map (fun table ->
-                tref.Database |> Option.defaultValue dbName,
-                tref.Alias |> Option.defaultValue tref.Table,
-                table.Columns)
-        | _ -> None
+    let makeScope sources =
+        match sources with
+        | [] -> outer
+        | _ ->
+            let bindings = sources |> List.map (fun (_, alias, columns) -> alias, columns)
+            let columns = bindings |> List.collect snd
+            let context =
+                contextFactory store registry dbName (columnIndexOf columns) (qualifierRanges bindings)
+                    (outer |> Option.map _.Context) (probeRow columns)
+            Some { Context = context; Sources = sources; Outer = outer }
 
-    match items |> List.collect FromItem.leaves |> List.map describeSource |> tryAllSome with
-    | Some [] -> outer
-    | Some sources ->
-        let bindings = sources |> List.map (fun (_, alias, columns) -> alias, columns)
-        let columns = bindings |> List.collect snd
-        let context =
-            contextFactory store registry dbName (columnIndexOf columns) (qualifierRanges bindings)
-                (outer |> Option.map _.Context) (probeRow columns)
-        Some { Context = context; Sources = sources; Outer = outer }
-    | None -> None
+    let describeDerived scope alias item =
+        describeQueryColumnsInScope store registry dbName (SourceBody item) (scope |> Option.map _.Context) (fun _ -> Ok())
+        |> Result.toOption
+        |> Option.map (fun columns -> None, alias, columns)
+
+    let addSource preceding item =
+        preceding |> Option.bind (fun sources ->
+            let description =
+                match item with
+                | FromTable tref ->
+                    physicalFastPathTable store dbName tref
+                    |> Option.map (fun table ->
+                        Some(tref.Database |> Option.defaultValue dbName),
+                        tref.Alias |> Option.defaultValue tref.Table,
+                        table.Columns)
+                | FromSubquery(_, alias) -> describeDerived outer alias item
+                | FromLateral(_, alias) -> describeDerived (makeScope (List.rev sources)) alias item
+                | _ -> None
+            description |> Option.map (fun source -> source :: sources))
+
+    items
+    |> List.collect FromItem.leaves
+    |> List.fold addSource (Some [])
+    |> Option.bind (List.rev >> makeScope)
 
 let rec private explainOuterReference scope expression =
     scope |> Option.bind (fun current ->
@@ -28981,7 +28997,8 @@ let rec private explainOuterReference scope expression =
             candidates |> List.collect (fun (schema, alias, name, columns) ->
                 columns
                 |> List.choose (fun column ->
-                    if equalsIgnoreCase column.Name name then Some(String.concat "." [ schema; alias; column.Name ])
+                    if equalsIgnoreCase column.Name name then
+                        Some(String.concat "." (Option.toList schema @ [ alias; column.Name ]))
                     else None))
 
         match matches, expression with
@@ -29345,11 +29362,26 @@ and private explainSelectBlock
         | Some(FromTable tref), [], Some _ -> explainCorrelatedOrder store registry dbName outer tref select
         | _ -> None
 
+    let hasBareOuterFilter () =
+        match select.From, joins, outer, select.Where with
+        | Some(FromTable tref), [], Some _, Some predicate ->
+            physicalFastPathTable store dbName tref
+            |> Option.exists (fun table ->
+                let source = correlatedProbeSource (tref.Alias |> Option.defaultValue tref.Table) table.Columns
+                predicate |> Expression.exists (function
+                    | Col _ as expression ->
+                        (tryCorrelatedInnerColumn source expression).IsNone
+                        && (explainOuterReference outer expression).IsSome
+                    | _ -> false))
+        | _ -> false
+
     let selectType =
         match correlatedOrder, selectType with
         | Some _, "DERIVED" -> "DEPENDENT DERIVED"
         | Some _, "SUBQUERY" -> "DEPENDENT SUBQUERY"
-        | None, "DERIVED" when outer.IsSome && Expression.hasQualifiedOuterReference select -> "DEPENDENT DERIVED"
+        | None, "DERIVED" when outer.IsSome && (Expression.hasQualifiedOuterReference select || hasBareOuterFilter ()) ->
+            "DEPENDENT DERIVED"
+        | None, "SUBQUERY" when hasBareOuterFilter () -> "DEPENDENT SUBQUERY"
         | _ -> selectType
 
     let indexOrderPlan =

@@ -51,6 +51,27 @@ index hints.
 JSON renders the references as separate entries and shows the access under
 the dependent lateral input. TREE names the selected key. The runtime plan
 remains responsible for reporting how many invocations seek or fall back for
-individual values. Estimates for those probes, outer scopes containing
-materialized sources, and nested zero-limit prepared plan details remain
-open. [MySQL EXPLAIN output](https://dev.mysql.com/doc/refman/8.4/en/explain-output.html)
+individual values. Estimates for those probes and nested zero-limit prepared
+plan details remain open. [MySQL EXPLAIN output](https://dev.mysql.com/doc/refman/8.4/en/explain-output.html)
+
+### Materialized derived sources
+
+Static `EXPLAIN` binds correlated keys from the output column definitions
+of a derived source. A lateral source's output columns can depend on
+preceding sources. The reference label uses the derived alias and
+output column, such as `o.tenant`, and retains the schema prefix for a
+physical source. A bare reference in the inner filter marks the
+subquery dependent when only the outer scope supplies the column,
+including when `IGNORE INDEX` forces an inner scan.
+
+The wire comparison matched pinned MySQL 8.4.11 on select type, access
+type, key, key length, and references in all 192 cases in memory and
+with WAL. The baseline at `b977850b` matched 24. The cases combined
+integer and collated text keys, scalar and lateral subqueries, bare
+and qualified outer names, both index directions, and force and ignore
+hints. Outer sources were limited projections, computed projections,
+unions, nested derived tables, grouped queries, or a preceding
+lateral source. JSON and TREE named the derived reference, and
+ANALYZE reported the actual ordered lookups. The separate static
+`EXPLAIN WITH` path still fails to resolve the audited materialized
+CTE name.
