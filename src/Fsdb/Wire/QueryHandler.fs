@@ -4518,6 +4518,14 @@ let private executeParsedWithTemporaryActionCore (action: TemporaryAction option
 
                 executeWithStatementAccess session (statementAccesses session) executeAutocommit
 
+    let executed =
+        match stmt, result with
+        | DropDatabase(name, _), Affected _ when executed.Database |> Option.exists (fun selected -> selected.Equals(name, StringComparison.OrdinalIgnoreCase)) ->
+            { executed with Database = None } |> Session.refreshDatabaseCharacterVariables
+        | AlterDatabase(target, _, _), Affected _ when
+            executed.Database |> Option.exists (fun selected -> target |> Option.forall (fun name -> selected.Equals(name, StringComparison.OrdinalIgnoreCase))) ->
+            Session.refreshDatabaseCharacterVariables executed
+        | _ -> executed
     TableHandler.invalidate session stmt executed result, result
 
 let private executeParsedWithTemporaryActionInFunctionDatabase database action session stmt =
@@ -5491,7 +5499,8 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             |> Map.tryFind (dbName.ToLowerInvariant())
             |> Option.defaultValue Map.empty
             |> Map.toList
-            |> List.map (snd >> _.OriginalName)
+            |> List.choose (fun (name, table) ->
+                if Storage.isDatabaseDefaultsTable dbName name then None else Some table.OriginalName)
             |> List.filter matches
             |> List.filter (canSessionSeeTable session (Session.currentStore session) dbName)
             |> List.sort
@@ -5507,12 +5516,20 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             session, Err(1044, sprintf "Access denied for user '%s'@'%s' to database '%s'" session.User session.AccountHost name)
         else
             let quotedName = SqlText.quoteIdentifier name
+            let collation = (Storage.databaseCollation store.Catalog name).Name
+            let charset = Collation.charsetOfCollation collation
+            let primaryCollation =
+                if charset = "utf8mb4" then "utf8mb4_general_ci"
+                else Collation.defaultNameForCharset charset
+            let collationClause =
+                if collation = primaryCollation then ""
+                else " COLLATE " + collation
 
             session,
             ResultSet(
                 [ "Database"; "Create Database" ],
                 [ [ Some name
-                    Some(sprintf "CREATE DATABASE %s /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci */" quotedName) ] ]
+                    Some(sprintf "CREATE DATABASE %s /*!40100 DEFAULT CHARACTER SET %s%s */ /*!80016 DEFAULT ENCRYPTION='N' */" quotedName charset collationClause) ] ]
             )
     | ShowCharset -> session, InformationSchema.showCharacterSet (likeSuffix sql) |> showResult
     | ShowPrivileges -> session, InformationSchema.showPrivileges () |> showResult

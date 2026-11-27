@@ -60,7 +60,8 @@ let defaultVariables: Map<string, string option> =
           "character_set_server", "utf8mb4"
           "collation_connection", "utf8mb4_general_ci"
           "collation_server", "utf8mb4_general_ci"
-          "collation_database", "utf8mb4_general_ci"
+          "character_set_database", "utf8mb4"
+          "collation_database", "utf8mb4_0900_ai_ci"
           "lc_time_names", "en_US"
           "autocommit", "1"
           "completion_type", "NO_CHAIN"
@@ -628,6 +629,17 @@ let trackSystemVariableAssignments stateChanged (names: string list) (session: S
                 None)
         |> fun changes -> appendSessionStateChanges stateChanged changes session
 
+let internal refreshDatabaseCharacterVariables (session: Session) =
+    let collation =
+        session.Database
+        |> Option.map (Storage.databaseCollation session.Store.Catalog)
+        |> Option.defaultValue Collation.defaultCollation
+    let variables =
+        session.Variables
+        |> Map.add "character_set_database" (Some(Collation.charsetOfCollation collation.Name))
+        |> Map.add "collation_database" (Some collation.Name)
+    { session with Variables = variables }
+
 let trackSchemaAssignment (schema: string) (session: Session) =
     let changes =
         if trackingIsEnabled "session_track_schema" session then
@@ -635,7 +647,7 @@ let trackSchemaAssignment (schema: string) (session: Session) =
         else
             []
 
-    appendSessionStateChanges true changes session
+    session |> refreshDatabaseCharacterVariables |> appendSessionStateChanges true changes
 
 type TransactionTrackingLevel =
     | TransactionTrackingOff

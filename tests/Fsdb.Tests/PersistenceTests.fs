@@ -332,6 +332,37 @@ let tests =
                       | ResultSet(_, [ [ Some "2" ] ]) -> ()
                       | result -> failtestf "expected live count after recovery, got %A" result)
 
+          testCase "database character defaults survive WAL recovery and checkpoints"
+          <| fun _ ->
+              for checkpoint in [ false; true ] do
+                  TestSupport.withDirectory "database-character-defaults" (fun directory ->
+                      let store = load directory
+                      attach directory store
+                      let run store sql =
+                          let _, result = handle (Fsdb.Session.create 1 store) sql
+                          TestSupport.Sql.expectOk result sql
+                          result
+                      for sql in
+                          [ "CREATE DATABASE writing COLLATE utf8mb4_unicode_ci"
+                            "CREATE TABLE writing.original(v VARCHAR(12))"
+                            "ALTER DATABASE writing CHARSET latin1"
+                            "CREATE DATABASE discarded CHARSET latin1"
+                            "DROP DATABASE discarded"
+                            "CREATE DATABASE discarded" ] do
+                          run store sql |> ignore
+
+                      if checkpoint then snapshotNow directory store
+                      let recovered = load directory
+                      run recovered "CREATE TABLE writing.after_recovery(v VARCHAR(12))" |> ignore
+                      let original = recovered.Catalog.["writing"].["original"].Columns.Head
+                      let created = recovered.Catalog.["writing"].["after_recovery"].Columns.Head
+                      Expect.equal original.Collation (Some "utf8mb4_unicode_ci") "old tables keep their collation"
+                      Expect.equal created.Collation (Some "latin1_swedish_ci") "new tables inherit the recovered setting"
+
+                      let sql = "SELECT DEFAULT_COLLATION_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='discarded'"
+                      Expect.equal (run recovered sql) (ResultSet([ "DEFAULT_COLLATION_NAME" ], [ [ Some "utf8mb4_0900_ai_ci" ] ]))
+                          "recreated schemas do not keep old defaults")
+
           testCase "renamed foreign-key columns retain enforcement across schemas and recovery"
           <| fun _ ->
               for checkpoint in [ false; true ] do
@@ -3842,7 +3873,7 @@ let tests =
               for suffix, tableComment in [ "before", None; "after", Some "V3 table" ] do
                   let dir = tempDataDir ()
                   let table = "v3_" + suffix
-                  let following = encodeWalRecord (SchemaChanged(defaultDatabase, CreateDatabase("after_v3", false, [])))
+                  let following = encodeWalRecord (SchemaChanged(defaultDatabase, CreateDatabase("after_v3", false, DatabaseCharacterOptions.Empty, [])))
                   File.WriteAllBytes(walPath dir, Array.append (v3CreateTableWalRecord table tableComment) following)
 
                   let recovered = load dir

@@ -36,3 +36,5 @@ still reports `utf8mb4_0900_ai_ci` as its default in Fsdb. An inherited
 `VARCHAR` column then treats `'CAFÉ'` and `'cafe '` as unequal,
 while a column explicitly declared `COLLATE utf8mb4_unicode_ci`
 matches MySQL. Both `=` and `<=>` show the difference on a table scan.
+The [database character defaults follow-up](2026-11-27-database-character-defaults.md)
+fixes the inheritance gap.

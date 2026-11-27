@@ -836,9 +836,9 @@ DDL, write coercion, introducers, `LOAD DATA`, `CONVERT`, binary keys, and byte
 functions are charset-aware. Comparisons apply PAD SPACE semantics, connection
 collations, and symmetric MySQL coercibility precedence across scalar, row,
 subquery, quantified, conditional, pattern, and join expressions.
-Database-level charset and collation declarations are parsed without
-becoming catalog defaults. Inherited columns can therefore use a
-[different collation than MySQL](torture/findings/2026-11-27-correlated-null-safe-top-n.md).
+[`CREATE DATABASE` and `ALTER DATABASE`](torture/findings/2026-11-27-database-character-defaults.md)
+persist charset and collation defaults for new tables, report them in
+schema metadata, and keep the settings of existing columns.
 
 String-result policies live beside their scalar implementations. The executor
 composes them through aggregates, subqueries, windows, fixed-binary values, and

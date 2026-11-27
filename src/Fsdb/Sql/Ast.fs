@@ -1334,13 +1334,19 @@ type RoutineAlteration =
       SecurityType: string option
       SqlDataAccess: string option }
 
+type DatabaseCharacterOptions =
+    { Charset: string option
+      Collation: string option }
+
+    static member Empty = { Charset = None; Collation = None }
+
 type Statement =
     | AlterRoutine of RoutineAlteration
-    | CreateDatabase of name: string * ifNotExists: bool * deprecations: SyntaxDeprecation list
+    | CreateDatabase of name: string * ifNotExists: bool * character: DatabaseCharacterOptions * deprecations: SyntaxDeprecation list
     | DropDatabase of name: string * ifExists: bool
     /// `ALTER DATABASE [name] [CHARACTER SET x] [COLLATE y]`; an omitted
     /// name targets the current database.
-    | AlterDatabase of name: string option * deprecations: SyntaxDeprecation list
+    | AlterDatabase of name: string option * character: DatabaseCharacterOptions * deprecations: SyntaxDeprecation list
     | CreateTable of CreateTableSpec
     | CreateTableLike of name: string * source: string * ifNotExists: bool
     | CreateTableAs of name: string * query: Statement * ifNotExists: bool * requestedEngine: string option

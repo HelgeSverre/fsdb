@@ -41,7 +41,10 @@ let private requiredCol name ty = { col name ty with Nullable = false }
 let private allTables (catalog: Catalog) : (string * Table) list =
     catalog
     |> Map.toList
-    |> List.collect (fun (dbName, db) -> db |> Map.toList |> List.map (fun (_, table) -> dbName, table))
+    |> List.collect (fun (dbName, db) ->
+        db |> Map.toList
+        |> List.choose (fun (name, table) ->
+            if isDatabaseDefaultsTable dbName name then None else Some(dbName, table)))
 
 let private mysqlTable (catalog: Catalog) table =
     catalog |> Map.tryFind "mysql" |> Option.bind (Map.tryFind table)
@@ -811,7 +814,9 @@ let private schemataRows (catalog: Catalog) : Value[] list =
 
     "information_schema" :: real
     |> List.distinct
-    |> List.map (fun dbName -> [| vs "def"; vs dbName; vs "utf8mb4"; vs "utf8mb4_unicode_ci"; VNull; vs "NO" |])
+    |> List.map (fun dbName ->
+        let collation = (databaseCollation catalog dbName).Name
+        [| vs "def"; vs dbName; vs (Collation.charsetOfCollation collation); vs collation; VNull; vs "NO" |])
 
 let private collationCharacterSetApplicabilityColumns =
     [ strCol "COLLATION_NAME"; strCol "CHARACTER_SET_NAME" ]
@@ -4207,12 +4212,14 @@ let private likeFilter (likeOpt: string option) (name: string) : bool =
 /// `Storage.Table` — indexes and foreign keys included, not just its column
 /// list.
 let findTable (catalog: Catalog) (dbName: string) (tableName: string) : Result<Table, int * string> =
-    match Map.tryFind dbName catalog with
-    | None -> Error(1049, sprintf "Unknown database '%s'" dbName)
-    | Some db ->
-        match Map.tryFind (tableName.ToLowerInvariant()) db with
-        | Some t -> Ok t
-        | None -> Error(toMySqlError (NoSuchTable(dbName, tableName)))
+    if isDatabaseDefaultsTable dbName tableName then Error databaseDefaultsAccessError
+    else
+        match Map.tryFind dbName catalog with
+        | None -> Error(1049, sprintf "Unknown database '%s'" dbName)
+        | Some db ->
+            match Map.tryFind (tableName.ToLowerInvariant()) db with
+            | Some t -> Ok t
+            | None -> Error(toMySqlError (NoSuchTable(dbName, tableName)))
 
 /// `SHOW [FULL] TABLES [FROM db] [LIKE 'pattern']`.
 /// `fsdbTables` is the host-extension overlay's table names (empty when
@@ -4241,7 +4248,9 @@ let showTables (catalog: Catalog) (fsdbTables: string list) (dbName: string) (fu
         match Map.tryFind dbName catalog with
         | None -> None
         | Some db ->
-            let tables = db |> Map.toList |> List.map (fun (_, table) -> table.OriginalName, "BASE TABLE")
+            let tables =
+                db |> Map.toList |> List.choose (fun (name, table) ->
+                    if isDatabaseDefaultsTable dbName name then None else Some(table.OriginalName, "BASE TABLE"))
 
             let views =
                 viewCatalogEntries catalog
@@ -4778,6 +4787,7 @@ let showTableStatusWithStatisticsExpiry
         let tableRows =
             db
             |> Map.toList
+            |> List.filter (fun (name, _) -> not (isDatabaseDefaultsTable dbName name))
             |> List.map snd
             |> List.filter (fun t -> likeFilter likeOpt t.OriginalName)
             |> List.sortBy (fun t -> t.OriginalName)

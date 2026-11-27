@@ -158,8 +158,8 @@ let reportStatement statement =
 
     match statement with
     | (Select _ | Union _) as statement -> reportQuery statement
-    | CreateDatabase(_, _, deprecations)
-    | AlterDatabase(_, deprecations) -> reportSyntax deprecations
+    | CreateDatabase(_, _, _, deprecations)
+    | AlterDatabase(_, _, deprecations) -> reportSyntax deprecations
     | CreateTable table ->
         reportSyntax table.Deprecations
         reportCharsetConversions (CreateTable table)

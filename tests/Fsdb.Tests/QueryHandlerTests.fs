@@ -5510,6 +5510,50 @@ let tests =
                       [ TypeDouble, 23u, BinaryFlag; TypeGeometry, UInt32.MaxValue, BinaryFlag ] "prepared getter and setter results"
               | Error error -> failtestf "expected coordinates to prepare, got %A" error
 
+          testCase "database character defaults govern new table columns and metadata"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable session = create 1 store
+              let run sql =
+                  let next, result = handle session sql
+                  session <- next
+                  result
+              let exec sql = TestSupport.Sql.expectOk (run sql) sql
+              let result sql expected =
+                  match run sql with
+                  | ResultSet(_, rows) -> Expect.equal rows expected sql
+                  | other -> failtestf "%s returned %A" sql other
+
+              exec "CREATE DATABASE collation_probe CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+              exec "USE collation_probe"
+              exec "CREATE TABLE before_change(id INT PRIMARY KEY, v VARCHAR(12), explicit_v VARCHAR(12) COLLATE utf8mb4_0900_bin)"
+              exec "INSERT INTO before_change VALUES(1,'CAFÉ','CAFÉ'),(2,'cafe ','cafe ')"
+              result "SELECT a.v <=> b.v,a.explicit_v <=> b.explicit_v FROM before_change a JOIN before_change b ON a.id=1 AND b.id=2"
+                  [ [ Some "1"; Some "0" ] ]
+              let variables = "SELECT @@character_set_database,@@collation_database"
+              result variables
+                  [ [ Some "utf8mb4"; Some "utf8mb4_unicode_ci" ] ]
+
+              let observer, _ = handle (create 2 store) "USE collation_probe"
+              exec "ALTER DATABASE CHARACTER SET latin1"
+              result variables [ [ Some "latin1"; Some "latin1_swedish_ci" ] ]
+              match handle observer variables |> snd with
+              | ResultSet(_, [ [ Some "utf8mb4"; Some "utf8mb4_unicode_ci" ] ]) -> ()
+              | other -> failtestf "another session must retain its selected defaults, got %A" other
+              exec "CREATE TABLE collation_probe.after_change(v VARCHAR(12))"
+              exec "CREATE TABLE explicit_table(v VARCHAR(12)) DEFAULT CHARSET=utf8mb4"
+              result "SELECT DEFAULT_CHARACTER_SET_NAME,DEFAULT_COLLATION_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='collation_probe'"
+                  [ [ Some "latin1"; Some "latin1_swedish_ci" ] ]
+              result "SELECT TABLE_NAME,COLLATION_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='collation_probe' AND COLUMN_NAME='v' ORDER BY TABLE_NAME"
+                  [ [ Some "after_change"; Some "latin1_swedish_ci" ]
+                    [ Some "before_change"; Some "utf8mb4_unicode_ci" ]
+                    [ Some "explicit_table"; Some "utf8mb4_0900_ai_ci" ] ]
+              TestSupport.Sql.expectError 1253 (run "ALTER DATABASE collation_probe CHARSET latin1 COLLATE utf8mb4_0900_ai_ci") "mismatched charset and collation"
+              exec "DROP DATABASE collation_probe"
+              exec "CREATE DATABASE collation_probe"
+              result "SELECT DEFAULT_COLLATION_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='collation_probe'"
+                  [ [ Some "utf8mb4_0900_ai_ci" ] ]
+
           testCase "POINT constructs typed Cartesian geometry from numeric arguments"
           <| fun _ ->
               let run = queryFixture [ "USE fsdb" ]
@@ -12303,23 +12347,23 @@ let tests =
               | Affected 0UL -> ()
               | other -> failtestf "expected the newly-created database to be usable, got %A" other
 
-          testCase "ALTER DATABASE succeeds on an existing database and 1049s on a missing one"
+          testCase "ALTER DATABASE succeeds on an existing database and reports a missing schema"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               let session, _ = handle session "CREATE DATABASE shop"
 
               match handle session "ALTER DATABASE shop CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci" |> snd with
-              | Affected 0UL -> ()
+              | Affected 1UL -> ()
               | other -> failtestf "expected ALTER DATABASE to succeed, got %A" other
 
               match handle session "ALTER DATABASE nope_does_not_exist CHARACTER SET utf8mb4" |> snd with
-              | Err(1049, _) -> ()
-              | other -> failtestf "expected a 1049 error, got %A" other
+              | Err(3503, _) -> ()
+              | other -> failtestf "expected a 3503 error, got %A" other
 
               let session, _ = handle session "USE shop"
 
               match handle session "ALTER DATABASE CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs" |> snd with
-              | Affected 0UL -> ()
+              | Affected 1UL -> ()
               | other -> failtestf "expected ALTER DATABASE to target the current database, got %A" other
 
           testCase "SHOW DATABASES returns a resultset"

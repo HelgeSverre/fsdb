@@ -3205,16 +3205,15 @@ let private applyTableCharacterDefaults (options: ParsedTableOptions) column =
 
         let collation =
             column.Collation
-            |> Option.defaultWith (fun () ->
+            |> Option.orElseWith (fun () ->
                 match column.Charset with
-                | Some declared -> Collation.defaultNameForCharset declared
+                | Some declared -> Some(Collation.defaultNameForCharset declared)
                 | None ->
                     options.Collation
-                    |> Option.orElseWith (fun () -> charset |> Option.map Collation.defaultNameForCharset)
-                    |> Option.defaultValue Collation.defaultCollation.Name)
+                    |> Option.orElseWith (fun () -> charset |> Option.map Collation.defaultNameForCharset))
 
         { column with
-            Collation = Some collation
+            Collation = collation
             Charset = charset }
 
 let private createTable: Parser<Statement, unit> =
@@ -3370,13 +3369,8 @@ let private checksumTableStmt: Parser<Statement, unit> =
     |>> fun (tables, quick) -> ChecksumTables(tables, quick |> Option.defaultValue false)
 
 /// `[DEFAULT] CHARACTER SET [=] x` / `[DEFAULT] COLLATE [=] y`, in either
-/// order, either/both/neither present — `CREATE`/`ALTER DATABASE`'s own
-/// tail. The catalog still discards the effective setting, while deprecated
-/// charset spellings remain available to the diagnostics pass. `COLLATE`
-/// also takes the `DEFAULT` prefix Laravel emits (`MySqlGrammar::compileCreateDatabase`, what
-/// `Illuminate\Testing\Concerns\TestDatabases` calls to build each parallel
-/// worker's own database) which `tableOption` doesn't need to.
-let private databaseOption: Parser<SyntaxDeprecation list, unit> =
+/// order. Retain original spellings for diagnostics and resolve defaults at execution.
+let private databaseOption: Parser<DatabaseCharacterOptions * SyntaxDeprecation list, unit> =
     choice
         [ attempt (
               optional (keyword "DEFAULT")
@@ -3384,17 +3378,23 @@ let private databaseOption: Parser<SyntaxDeprecation list, unit> =
           )
           >>. opt (sym "=")
           >>. identOrString
-          |>> charsetDeprecations
-          optional (keyword "DEFAULT") >>. keyword "COLLATE" >>. opt (sym "=") >>. identOrString >>% [] ]
+          |>> fun charset -> { DatabaseCharacterOptions.Empty with Charset = Some charset }, charsetDeprecations charset
+          optional (keyword "DEFAULT") >>. keyword "COLLATE" >>. opt (sym "=") >>. identOrString
+          |>> fun collation -> { DatabaseCharacterOptions.Empty with Collation = Some collation }, [] ]
 
-let private databaseOptions: Parser<SyntaxDeprecation list, unit> = many databaseOption |>> List.concat
+let private combineDatabaseOptions options =
+    options
+    |> List.fold (fun (current: DatabaseCharacterOptions, deprecations) (option: DatabaseCharacterOptions, next) ->
+        { Charset = option.Charset |> Option.orElse current.Charset
+          Collation = option.Collation |> Option.orElse current.Collation }, deprecations @ next)
+        (DatabaseCharacterOptions.Empty, [])
 
 let private createDatabaseStmt: Parser<Statement, unit> =
     (keyword "CREATE" >>. (keyword "DATABASE" <|> keyword "SCHEMA")
      >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
      .>>. identifier
-     .>>. databaseOptions)
-    |>> fun ((ifNotExists, name), deprecations) -> CreateDatabase(name, ifNotExists, deprecations)
+     .>>. (many databaseOption |>> combineDatabaseOptions))
+    |>> fun ((ifNotExists, name), (character, deprecations)) -> CreateDatabase(name, ifNotExists, character, deprecations)
 
 let private dropDatabaseStmt: Parser<Statement, unit> =
     (keyword "DROP" >>. (keyword "DATABASE" <|> keyword "SCHEMA")
@@ -3435,8 +3435,8 @@ let private alterDatabaseStmt: Parser<Statement, unit> =
     (keyword "ALTER"
      >>. (keyword "DATABASE" <|> keyword "SCHEMA")
      >>. opt (notFollowedBy optionStart >>. identifier)
-     .>>. databaseOptions)
-    |>> fun (name, deprecations) -> AlterDatabase(name, deprecations)
+     .>>. (many1 databaseOption |>> combineDatabaseOptions))
+    |>> fun (name, (character, deprecations)) -> AlterDatabase(name, character, deprecations)
 
 // ---------------------------------------------------------------------------
 // ALTER TABLE / RENAME TABLE

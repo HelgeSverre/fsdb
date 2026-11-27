@@ -3173,9 +3173,9 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         @ onTables "INSERT" destinations
     | CreateIndex(_, table, _, _, _, _) -> onTables "INDEX" [ split table ]
     | DropIndexStmt(_, table, _) -> onTables "INDEX" [ split table ]
-    | CreateDatabase(name, _, _) -> [ "CREATE", OnDb name ]
+    | CreateDatabase(name, _, _, _) -> [ "CREATE", OnDb name ]
     | DropDatabase(name, _) -> [ "DROP", OnDb name ]
-    | AlterDatabase(name, _) -> [ "ALTER", OnDb(name |> Option.defaultValue defaultDb) ]
+    | AlterDatabase(name, _, _) -> [ "ALTER", OnDb(name |> Option.defaultValue defaultDb) ]
     | AlterRoutine alteration -> [ "ALTER ROUTINE", OnDb(fst (split alteration.Name)) ]
     | CreateServer _
     | AlterServer _
@@ -3515,12 +3515,15 @@ let checkForAccountWithRoles
 
     required
     |> traverse (fun requirement ->
-        let direct = checkForAccount store wanted [ requirement ]
-
-        if Result.isOk direct || roles |> List.exists (fun role -> checkForAccount store role [ requirement ] |> Result.isOk) then
-            Ok()
-        else
-            direct)
+        match snd requirement with
+        | (OnTable(database, table) | OnAllColumns(database, table) | OnColumn(database, table, _))
+            when Storage.isDatabaseDefaultsTable database table -> Error Storage.databaseDefaultsAccessError
+        | _ ->
+            let direct = checkForAccount store wanted [ requirement ]
+            if Result.isOk direct || roles |> List.exists (fun role -> checkForAccount store role [ requirement ] |> Result.isOk) then
+                Ok()
+            else
+                direct)
     |> Result.map ignore
 
 let checkDynamicGrantOptionsForAccount

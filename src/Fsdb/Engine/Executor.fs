@@ -32912,8 +32912,8 @@ let rec private executeAsWithViewSources
         | Ok _ -> executeWithMutationCtes (referencedDeleteCtes delete) (Delete { delete with Ctes = [] })
     | SetTriggerNew _ -> ids, Err(1064, "SET NEW is only valid in a trigger body")
 
-    | CreateDatabase(name, ifNotExists, _) ->
-        match Storage.createDatabase store name with
+    | CreateDatabase(name, ifNotExists, character, _) ->
+        match Storage.resolveDatabaseCollation character |> Result.bind (Storage.createDatabaseWithCollation store name) with
         | Ok() -> ids, Affected 1UL
         | Error(DatabaseExists _) when ifNotExists ->
             Diagnostics.note 1007 (sprintf "Can't create database '%s'; database exists" name)
@@ -32921,27 +32921,25 @@ let rec private executeAsWithViewSources
         | Error e -> ids, storageErr e
 
     | DropDatabase(name, ifExists) ->
-        let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
+        Storage.withDatabaseDdlLock store (fun () ->
+            let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
+            match Storage.dropDatabase snapshot name with
+            | Ok() ->
+                let belongsToDatabase (row: Value[]) =
+                    let schema = toText row.[1] |> Option.defaultValue ""
+                    Ok(System.String.Equals(schema, name, System.StringComparison.OrdinalIgnoreCase))
 
-        match Storage.dropDatabase snapshot name with
-        | Ok() ->
-            let belongsToDatabase schemaIndex (row: Value[]) =
-                let schema = toText row.[schemaIndex] |> Option.defaultValue ""
-                Ok(System.String.Equals(schema, name, System.StringComparison.OrdinalIgnoreCase))
-
-            match
-                deleteRows snapshot "mysql" "views" (belongsToDatabase 1),
-                deleteRows snapshot "mysql" "triggers" (belongsToDatabase 1),
-                deleteRows snapshot "mysql" "check_constraints" (belongsToDatabase 1)
-            with
-            | Ok _, Ok _, Ok _ ->
-                Storage.commitCatalogInto store baseCatalog snapshot
-                ids, Affected 0UL
-            | Error error, _, _
-            | _, Error error, _
-            | _, _, Error error -> ids, storageErr error
-        | Error(NoSuchDatabase _) when ifExists -> ids, Affected 0UL
-        | Error e -> ids, storageErr e
+                match
+                    [ "views"; "triggers"; "check_constraints" ]
+                    |> traverse (fun table -> deleteRows snapshot "mysql" table belongsToDatabase)
+                    |> Result.bind (fun _ -> Storage.deleteDatabaseDefaults snapshot name)
+                with
+                | Ok() ->
+                    Storage.commitCatalogInto store baseCatalog snapshot
+                    ids, Affected 0UL
+                | Error error -> ids, storageErr error
+            | Error(NoSuchDatabase _) when ifExists -> ids, Affected 0UL
+            | Error e -> ids, storageErr e)
 
     | AlterRoutine alteration ->
         let database, name = splitQualified dbName alteration.Name
@@ -32969,15 +32967,15 @@ let rec private executeAsWithViewSources
             | Ok _ -> ids, Affected 0UL
             | Error error -> ids, storageErr error
 
-    | AlterDatabase(requestedName, _) ->
-        // Database charset and collation are server-wide in the current
-        // catalog model, so ALTER DATABASE only validates the target.
-        let name = requestedName |> Option.defaultValue dbName
-
-        if Storage.databaseExists store name then
-            ids, Affected 0UL
-        else
-            ids, storageErr (NoSuchDatabase name)
+    | AlterDatabase(requestedName, character, _) ->
+        match requestedName |> Option.orElseWith (fun () -> currentFunctionDatabase dbName) with
+        | None -> ids, Err(1046, "No database selected")
+        | Some name when equalsIgnoreCase name "information_schema" ->
+            ids, Err(1044, sprintf "Access denied for user '%s'@'localhost' to database 'information_schema'" currentAccount.Name)
+        | Some name ->
+            match Storage.resolveDatabaseCollation character |> Result.bind (Storage.alterDatabaseCollation store name) with
+            | Ok() -> ids, Affected 1UL
+            | Error error -> ids, storageErr error
 
     | CreateServer(name, wrapper, options) ->
         match Storage.createForeignServer store name wrapper options with
@@ -33027,9 +33025,10 @@ let rec private executeAsWithViewSources
                     let columns = deriveColumns names collations metadata
                     let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
                     Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
+                    let charset, collation, columns = Storage.resolveTableCharacterDefaults snapshot destinationDb None None columns
 
                     let created =
-                        createTableSeeded snapshot destinationDb destinationName columns [] [] None None None None None
+                        createTableSeeded snapshot destinationDb destinationName columns [] [] charset collation None None None
                         |> Result.bind (fun () ->
                             rows
                             |> List.map Array.toList
@@ -33074,6 +33073,12 @@ let rec private executeAsWithViewSources
                 match storedChecks store sourceDb sourceName |> traverse decodeCheck with
                 | Error error -> ids, storageErr error
                 | Ok checks ->
+                    let inheritedCollation = Storage.databaseCollation store.Catalog destinationDb
+                    let sourceCollation =
+                        match table.TableCharset, table.TableCollation with
+                        | None, None when inheritedCollation.Name <> Collation.defaultCollation.Name ->
+                            Some Collation.defaultCollation.Name
+                        | _ -> table.TableCollation
                     executeAs
                         store
                         registry
@@ -33090,7 +33095,7 @@ let rec private executeAsWithViewSources
                               IfNotExists = ifNotExists
                               RequestedEngine = None
                               Charset = table.TableCharset
-                              Collation = table.TableCollation
+                              Collation = sourceCollation
                               AutoIncrementSeed = None
                               Comment = if table.TableComment = "" then None else Some table.TableComment
                               DataDirectory = None
@@ -33105,6 +33110,9 @@ let rec private executeAsWithViewSources
         | false, _ -> ids, storageErr (NoSuchDatabase db)
         | true, Some error -> ids, error
         | true, None ->
+            let charset, collation, columns =
+                Storage.resolveTableCharacterDefaults store db table.Charset table.Collation table.Columns
+            let table = { table with Charset = charset; Collation = collation; Columns = columns }
             let table, partitionEngineError =
                 match resolvePartitioningEngineRequests store table.Partitioning with
                 | Ok partitioning -> { table with Partitioning = partitioning }, None
@@ -33139,7 +33147,6 @@ let rec private executeAsWithViewSources
                     | None, Ok partitioning ->
                         let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
                         Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
-
                         let created =
                             createTableSeeded
                                 snapshot

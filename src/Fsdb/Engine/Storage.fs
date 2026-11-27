@@ -347,6 +347,50 @@ type Database = Map<string, Table>
 /// database rather than stored in one `Catalog` value.
 type Catalog = Map<string, Database>
 
+let internal databaseDefaultsTable = "schemata"
+
+let internal isDatabaseDefaultsTable (database: string) (table: string) =
+    database.Equals("mysql", StringComparison.OrdinalIgnoreCase)
+    && table.Equals(databaseDefaultsTable, StringComparison.OrdinalIgnoreCase)
+
+let internal databaseDefaultsAccessError =
+    3554, "Access to data dictionary table 'mysql.schemata' is rejected."
+
+let private databaseDefaultsRowMatches (database: string) (row: Value[]) =
+    match row.[0] with
+    | VString name -> name.Equals(database, StringComparison.OrdinalIgnoreCase)
+    | _ -> false
+
+let internal databaseCollation (catalog: Catalog) database =
+    catalog
+    |> Map.tryFind "mysql"
+    |> Option.bind (Map.tryFind databaseDefaultsTable)
+    |> Option.bind (fun table ->
+        table.RowsArray
+        |> Seq.tryPick (fun row ->
+            if databaseDefaultsRowMatches database row then
+                row.[1] |> toText |> Option.bind Collation.tryFind
+            else None))
+    |> Option.defaultValue Collation.defaultCollation
+
+let internal resolveDatabaseCollation (options: DatabaseCharacterOptions) =
+    let charset = options.Charset |> Option.map Charset.canonicalName
+    match options.Charset, charset |> Option.bind Charset.tryFind with
+    | Some name, None -> Error(ExpressionError(1115, sprintf "Unknown character set: '%s'" name))
+    | _ ->
+        match options.Collation with
+        | None ->
+            charset |> Option.map (Collation.defaultNameForCharset >> Some >> Collation.findOrDefault)
+            |> Option.defaultValue Collation.defaultCollation |> Ok
+        | Some name ->
+            match Collation.tryFind name with
+            | None -> Error(ExpressionError(1273, sprintf "Unknown collation: '%s'" name))
+            | Some collation ->
+                match charset with
+                | Some charset when not (Collation.belongsToCharset charset collation.Name) ->
+                    Error(ExpressionError(1253, sprintf "COLLATION '%s' is not valid for CHARACTER SET '%s'" name charset))
+                | _ -> Ok collation
+
 /// One committed change to the catalog, for a physical WAL. Data changes carry
 /// the actual `Value`s written, never SQL text — `INSERT ... VALUES (NOW(),
 /// UUID())` replayed as SQL would produce different values the second time.
@@ -584,6 +628,8 @@ type Store =
       mutable PendingEvents: ResizeArray<CommitEvent> option
       /// Serializes catalog membership and serializable publication.
       Lock: obj
+      /// Serializes CREATE, ALTER, and DROP of database definitions.
+      DatabaseDdlLock: obj
       /// Whole-catalog readers share this gate with the brief immutable-root
       /// publication step. Statement work remains coordinated per database.
       CatalogPublication: CatalogPublicationGate
@@ -913,6 +959,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       // Nested statement snapshots inherit the outer transaction's buffering.
       PendingEvents = if collectsCommitEvents store then Some(ResizeArray()) else None
       Lock = obj ()
+      DatabaseDdlLock = store.DatabaseDdlLock
       CatalogPublication = CatalogPublicationGate()
       ReferentialSchemaLock = store.ReferentialSchemaLock
       CommitLock = store.CommitLock
@@ -1298,6 +1345,9 @@ let private databaseSlots (store: Store) =
     |> Seq.sortBy fst
     |> List.ofSeq
 
+let internal withDatabaseDdlLock (store: Store) action =
+    lock store.DatabaseDdlLock action
+
 let rec private withLockedDatabaseSlots slots body =
     match slots with
     | [] -> body ()
@@ -1315,7 +1365,7 @@ let createDatabase (store: Store) (dbName: string) : Result<unit, StorageError> 
                 lock slot (fun () ->
                     if publishCatalogRoots store (fun () -> store.Databases.TryAdd(dbName, slot)) then
                         invalidateDatabaseAutoIncrementCounters store dbName
-                        Ok(prepareEvents store [ SchemaChanged(dbName, CreateDatabase(dbName, false, [])) ])
+                        Ok(prepareEvents store [ SchemaChanged(dbName, CreateDatabase(dbName, false, DatabaseCharacterOptions.Empty, [])) ])
                     else
                         Error(DatabaseExists dbName))))
 
@@ -4814,6 +4864,10 @@ let private privCol (name: string) = sysCol name (TEnum [ "N"; "Y" ]) false (Som
 let private keyCol (name: string) (len: int) =
     { sysCol name (TChar len) false (Some(VString "")) with PrimaryKey = true }
 
+let private databaseDefaultsColumns =
+    [ { sysCol "name" (TVarchar 64) false None with PrimaryKey = true; Collation = Some "utf8mb4_0900_bin" }
+      sysCol "collation_name" (TVarchar 64) false None ]
+
 /// mysql.user columns in MySQL 8.4 order.
 let private mysqlUserColumns: ColumnDef list =
     [ keyCol "Host" 255; keyCol "User" 32 ]
@@ -5482,7 +5536,8 @@ let private mysqlSystemDatabase () : Database =
        "routines", sysTable "routines" mysqlRoutinesColumns []
        "functions", sysTable "functions" mysqlStoredFunctionsColumns []
        "events", sysTable "events" mysqlEventsColumns []
-       "check_constraints", sysTable "check_constraints" mysqlCheckConstraintsColumns [] ]
+       "check_constraints", sysTable "check_constraints" mysqlCheckConstraintsColumns []
+       databaseDefaultsTable, sysTable databaseDefaultsTable databaseDefaultsColumns [] ]
      @ (mysqlCompatibilityTableDefs
         |> List.map (fun (name, columns) ->
             name,
@@ -5548,6 +5603,7 @@ let ensureMysqlSchema (store: Store) : unit =
       "functions", mysqlStoredFunctionsColumns
       "events", mysqlEventsColumns
       "check_constraints", mysqlCheckConstraintsColumns
+      databaseDefaultsTable, databaseDefaultsColumns
       "global_grants", mysqlGlobalGrantsColumns
       "role_edges", mysqlRoleEdgesColumns
       "default_roles", mysqlDefaultRolesColumns ]
@@ -5635,6 +5691,7 @@ let create () : Store =
       Durability = { Sink = None }
       PendingEvents = None
       Lock = obj ()
+      DatabaseDdlLock = obj ()
       CatalogPublication = CatalogPublicationGate()
       ReferentialSchemaLock = new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion)
       CommitLock = obj ()
@@ -8800,6 +8857,28 @@ let private renamedForeignKeyName oldTableName newTableName (foreignKey: Foreign
         newTableName + foreignKey.Name.Substring(oldTableName.Length)
     else
         foreignKey.Name
+
+let internal resolveTableCharacterDefaults (store: Store) dbName tableCharset tableCollation columns =
+    let tableCharset, tableCollation =
+        match tableCharset, tableCollation with
+        | None, None ->
+            let collation = databaseCollation store.Catalog dbName
+            if collation.Name = Collation.defaultCollation.Name then None, None
+            else Some(Collation.charsetOfCollation collation.Name), Some collation.Name
+        | specified -> specified
+
+    let withCharacterDefaults (column: ColumnDef) =
+        match column.Type, column.Collation with
+        | (TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText | TEnum _ | TSet _), None ->
+            let collation =
+                column.Charset |> Option.map Collation.defaultNameForCharset
+                |> Option.orElse tableCollation
+                |> Option.orElseWith (fun () -> tableCharset |> Option.map Collation.defaultNameForCharset)
+                |> Option.defaultValue Collation.defaultCollation.Name
+            { column with Collation = Some collation; Charset = column.Charset |> Option.orElse tableCharset }
+        | _ -> column
+
+    tableCharset, tableCollation, List.map withCharacterDefaults columns
 
 let createTableSeeded
     (store: Store)
@@ -13307,6 +13386,37 @@ let dropForeignServer store name =
     |> Result.bind (function
         | 0 -> Error(foreignServerMissing requestedName)
         | _ -> Ok())
+
+let internal deleteDatabaseDefaults store name =
+    deleteRows store "mysql" databaseDefaultsTable (databaseDefaultsRowMatches name >> Ok)
+    |> Result.map ignore
+
+let private insertDatabaseDefaults store (name: string) (collation: Collation.Collation) =
+    insertRows store "mysql" databaseDefaultsTable None [ [ VString(name.ToLowerInvariant()); VString collation.Name ] ]
+    |> Result.map ignore
+
+let internal createDatabaseWithCollation store name (collation: Collation.Collation) =
+    withDatabaseDdlLock store (fun () ->
+        if databaseExists store name then Error(DatabaseExists name)
+        elif collation.Name = Collation.defaultCollation.Name then createDatabase store name
+        else
+            let baseCatalog, snapshot = beginTransactionSnapshotWithBase store
+            createDatabase snapshot name
+            |> Result.bind (fun () -> insertDatabaseDefaults snapshot name collation)
+            |> Result.map (fun () -> commitCatalogInto store baseCatalog snapshot))
+
+let internal alterDatabaseCollation store name (collation: Collation.Collation) =
+    withDatabaseDdlLock store (fun () ->
+        let baseCatalog, snapshot = beginTransactionSnapshotWithBase store
+        if String.Equals(name, "mysql", StringComparison.OrdinalIgnoreCase) then Error(SystemSchemaAccess "mysql")
+        elif not (databaseExists snapshot name) then Error(ExpressionError(3503, sprintf "Database '%s' doesn't exist" name))
+        elif (databaseCollation baseCatalog name).Name = collation.Name then Ok()
+        else
+            deleteDatabaseDefaults snapshot name
+            |> Result.bind (fun () ->
+                if collation.Name = Collation.defaultCollation.Name then Ok()
+                else insertDatabaseDefaults snapshot name collation)
+            |> Result.map (fun () -> commitCatalogInto store baseCatalog snapshot))
 
 /// WAL replay runs before live traffic can observe the store, so replay can
 /// publish directly without the checked write paths or their synchronization.

@@ -1641,6 +1641,7 @@ let private handleConnection
                         TlsCipher = tlsCipher
                         AuthenticationRsaPublicKeys = authenticationRsaPublicKeys
                         TransportMetrics = metrics }
+                    |> Session.refreshDatabaseCharacterVariables
 
                 let session = createSessionFor selectedAccount resp.Username passwordExpired resp.Database
 

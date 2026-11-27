@@ -1166,7 +1166,7 @@ let tests =
                                 Unique = false
                                 Generated = None
                                 Comment = ""
-                                Collation = Some "utf8mb4_0900_ai_ci"
+                                Collation = None
                                 Charset = None
                                 ExpressionCollation = None
                                 Srid = None
@@ -1295,7 +1295,7 @@ let tests =
                                     Unique = false
                                     Generated = None
                                     Comment = ""
-                                    Collation = Some "utf8mb4_0900_ai_ci"
+                                    Collation = None
                                     Charset = None
                                     ExpressionCollation = None
                                     Srid = None
@@ -1825,17 +1825,17 @@ let tests =
           testList
               "DATABASE"
               [ testCase "CREATE DATABASE"
-                <| fun _ -> Expect.equal (parseOk "CREATE DATABASE foo") (CreateDatabase("foo", false, [])) "create database"
+                <| fun _ -> Expect.equal (parseOk "CREATE DATABASE foo") (CreateDatabase("foo", false, DatabaseCharacterOptions.Empty, [])) "create database"
 
                 testCase "CREATE DATABASE IF NOT EXISTS"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "CREATE DATABASE IF NOT EXISTS foo")
-                        (CreateDatabase("foo", true, []))
+                        (CreateDatabase("foo", true, DatabaseCharacterOptions.Empty, []))
                         "create database if not exists"
 
                 testCase "CREATE SCHEMA"
-                <| fun _ -> Expect.equal (parseOk "CREATE SCHEMA foo") (CreateDatabase("foo", false, [])) "create schema"
+                <| fun _ -> Expect.equal (parseOk "CREATE SCHEMA foo") (CreateDatabase("foo", false, DatabaseCharacterOptions.Empty, [])) "create schema"
 
                 testCase "DROP DATABASE"
                 <| fun _ -> Expect.equal (parseOk "DROP DATABASE foo") (DropDatabase("foo", false)) "drop database"
@@ -1847,12 +1847,12 @@ let tests =
                         (DropDatabase("foo", true))
                         "drop database if exists"
 
-                testCase "CREATE DATABASE with a trailing CHARACTER SET/COLLATE tail is accepted and discarded"
+                testCase "CREATE DATABASE retains a trailing CHARACTER SET and COLLATE"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "CREATE DATABASE IF NOT EXISTS crescat_testing CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
-                        (CreateDatabase("crescat_testing", true, []))
-                        "charset/collate tail parses and is ignored"
+                        (CreateDatabase("crescat_testing", true, { Charset = Some "utf8mb4"; Collation = Some "utf8mb4_unicode_ci" }, []))
+                        "charset and collation are preserved"
 
                 testCase "CREATE DATABASE with Laravel's exact DEFAULT CHARACTER SET/DEFAULT COLLATE, backticked, form"
                 <| fun _ ->
@@ -1861,24 +1861,24 @@ let tests =
                     // to build each parallel worker's own database.
                     Expect.equal
                         (parseOk "create database `x` default character set `utf8mb4` default collate `utf8mb4_unicode_ci`")
-                        (CreateDatabase("x", false, []))
-                        "backticked default charset/collate tail parses and is ignored"
+                        (CreateDatabase("x", false, { Charset = Some "utf8mb4"; Collation = Some "utf8mb4_unicode_ci" }, []))
+                        "backticked defaults are preserved"
 
                 testCase "ALTER DATABASE with a CHARACTER SET/COLLATE tail parses"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "ALTER DATABASE x CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
-                        (AlterDatabase(Some "x", []))
+                        (AlterDatabase(Some "x", { Charset = Some "utf8mb4"; Collation = Some "utf8mb4_unicode_ci" }, []))
                         "named database"
 
                     Expect.equal
                         (parseOk "ALTER DATABASE CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs")
-                        (AlterDatabase(None, []))
+                        (AlterDatabase(None, { Charset = Some "utf8mb4"; Collation = Some "utf8mb4_0900_as_cs" }, []))
                         "current database"
 
                     Expect.equal
                         (parseOk "ALTER DATABASE CHARACTER SET utf8")
-                        (AlterDatabase(None, [ Utf8CharsetAlias ]))
+                        (AlterDatabase(None, { DatabaseCharacterOptions.Empty with Charset = Some "utf8" }, [ Utf8CharsetAlias ]))
                         "deprecated charset spelling" ]
 
           testList
