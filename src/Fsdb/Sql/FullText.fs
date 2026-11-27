@@ -383,9 +383,8 @@ let private usesAccentSensitivePrefixes (collation: Collation) = function
     | Ngrams _ -> collation.Name = "utf8mb4_0900_as_ci"
     | Words _ -> false
 
-let private addFlushedAccentTerm (collation: Collation) terms spelling =
-    let key = Uca0900Weights.accentSensitiveKey spelling
-    FullTextCache.add key (collation.FullTextKeyOf spelling) terms
+let private addTermSpelling (collation: Collation) terms spelling =
+    FullTextCache.add (collation.FullTextKeyOf spelling) spelling terms
 
 let private rebuildFlushedAccentTerms (index: Index<'id>) =
     if not (usesAccentSensitivePrefixes index.Collation index.Rules.Tokenizer) then index
@@ -405,7 +404,7 @@ let private rebuildFlushedAccentTerms (index: Index<'id>) =
             FlushedAccentTerms =
                 spellings
                 |> Seq.distinct
-                |> Seq.fold (addFlushedAccentTerm index.Collation) FullTextCache.empty }
+                |> Seq.fold (addTermSpelling index.Collation) FullTextCache.empty }
 
 let private postingByteCount tokenizer (collation: Collation) =
     let utf8 (text: string) start length = Text.Encoding.UTF8.GetByteCount(text.AsSpan(start, length))
@@ -429,14 +428,14 @@ let private chargeDocument tokenizer collation order (words: (string * Token[])[
             key, byteCount spelling 0 spelling.Length, bytes)
     FullTextCache.addDocument order postings budget
 
-let private prefixKeysFor forCache (collation: Collation) (token: Token) =
+let private prefixKeys (collation: Collation) (token: Token) =
     let mutable length = 0
     [| for rune in token.Text.EnumerateRunes() do
            let start = length
            length <- length + rune.Utf16SequenceLength
            yield collation.FullTextKeyOf(token.Text.Substring(0, length))
            if rune.Value > 0x7F then
-               match Collation.fullTextPrefixExpansion forCache collation.Name rune with
+               match Collation.fullTextPrefixExpansion collation.Name rune with
                | Some expansion ->
                    let leading = token.Text.Substring(0, start)
                    let mutable offset = 0
@@ -447,25 +446,26 @@ let private prefixKeysFor forCache (collation: Collation) (token: Token) =
                | None -> () |]
     |> Array.distinct
 
-let private prefixKeys collation token = prefixKeysFor false collation token
+let private ngramDocumentPrefixes (collation: Collation) (words: (string * Token[])[]) =
+    // Accent-sensitive searches visit the ordered gram postings directly.
+    if collation.Name = "utf8mb4_0900_as_ci" then [||]
+    else
+        // InnoDB keeps the first matching gram's TF but tallies every gram's posting.
+        let prefixes = Collections.Generic.Dictionary<string, int * int64>()
 
-let private ngramDocumentPrefixes collation (words: (string * Token[])[]) =
-    // InnoDB keeps the first matching gram's TF but tallies every gram's posting.
-    let prefixes = Collections.Generic.Dictionary<string, int * int64>()
+        for _, grams in Array.sortBy fst words do
+            let keys =
+                grams
+                |> Array.distinctBy _.Text
+                |> Array.collect (prefixKeys collation)
+                |> Array.distinct
 
-    for _, grams in Array.sortBy fst words do
-        let keys =
-            grams
-            |> Array.distinctBy _.Text
-            |> Array.collect (prefixKeys collation)
-            |> Array.distinct
+            for key in keys do
+                match prefixes.TryGetValue key with
+                | true, (frequency, count) -> prefixes.[key] <- frequency, count + 1L
+                | false, _ -> prefixes.Add(key, (grams.Length, 1L))
 
-        for key in keys do
-            match prefixes.TryGetValue key with
-            | true, (frequency, count) -> prefixes.[key] <- frequency, count + 1L
-            | false, _ -> prefixes.Add(key, (grams.Length, 1L))
-
-    prefixes |> Seq.map (fun (KeyValue(key, counts)) -> key, counts) |> Seq.toArray
+        prefixes |> Seq.map (fun (KeyValue(key, counts)) -> key, counts) |> Seq.toArray
 
 let private documentPrefixes collation tokenizer tokens words =
     match tokenizer with
@@ -743,7 +743,7 @@ let internal syncCachedPostings (index: Index<'id>) =
             FlushedAccentTerms =
                 if usesAccentSensitivePrefixes index.Collation index.Rules.Tokenizer then
                     FullTextCache.inInsertionOrder index.CachedTerms
-                    |> List.fold (addFlushedAccentTerm index.Collation) index.FlushedAccentTerms
+                    |> List.fold (addTermSpelling index.Collation) index.FlushedAccentTerms
                 else index.FlushedAccentTerms
             CacheBudget = FullTextCache.emptyBudget
             CacheCycle = obj () }
@@ -816,6 +816,23 @@ let private cacheDocumentsAfter through (index: Index<'id>) initial =
         let words = indexedTokens document.Content |> Array.groupBy _.Key
         cacheDocumentTerms words terms, chargeDocument document.Content.Rules.Tokenizer index.Collation document.Order words budget) initial
 
+let private restoreAccentCacheTerms through (index: Index<'id>) =
+    // A checkpoint written with ICU keys can have a different insertion order.
+    // Document order and retained deletes reproduce the cache using the pinned keys.
+    let live =
+        index.Documents |> Map.values |> Seq.choose (fun document ->
+            if document.Order > through then
+                Some(document.Order, indexedTokens document.Content)
+            else None)
+    let deleted =
+        index.Deleted.Documents |> Map.toSeq |> Seq.choose (fun (order, words) ->
+            if order > through then Some(order, deletedTokens index.Collation words)
+            else None)
+    Seq.append live deleted
+    |> Seq.sortBy fst
+    |> Seq.fold (fun terms (_, tokens) ->
+        cacheDocumentTerms (Array.groupBy _.Key tokens) terms) FullTextCache.empty
+
 let internal restoreCache nextOrder through saved savedBudget hasSegmentEnds (index: Index<'id>) =
     let next = nextOrder |> Option.defaultValue index.NextDocumentOrder
     if next < index.NextDocumentOrder then
@@ -833,8 +850,10 @@ let internal restoreCache nextOrder through saved savedBudget hasSegmentEnds (in
         let rebuilt = lazy (cacheDocumentsAfter through index (FullTextCache.empty, FullTextCache.emptyBudget))
         let terms =
             match saved with
+            | _ when usesAccentSensitivePrefixes index.Collation index.Rules.Tokenizer ->
+                restoreAccentCacheTerms through index
             | Some spellings ->
-                spellings |> Seq.fold (fun terms text -> FullTextCache.add (index.Collation.FullTextKeyOf text) text terms) FullTextCache.empty
+                spellings |> Seq.fold (addTermSpelling index.Collation) FullTextCache.empty
             | None ->
                 // Older snapshots can reproduce the insertion order of live documents.
                 fst rebuilt.Value
@@ -1585,33 +1604,9 @@ let private restrictScores (candidateIds: Set<'id> option) (scores: Map<'id, 'va
         |> Seq.choose (fun id -> Map.tryFind id scores |> Option.map (fun score -> id, score))
         |> Map.ofSeq
 
-let private cachedAccentPrefixGrams (key: string) (view: ReadView<'id>) =
-    // Hex-encoded ICU sort keys delimit primary and secondary weights with 01.
-    let primaryLength (key: string) =
-        let mutable endOfPrimary = 0
-        while endOfPrimary + 1 < key.Length
-              && (key.[endOfPrimary] <> '0' || key.[endOfPrimary + 1] <> '1') do
-            endOfPrimary <- endOfPrimary + 2
-        endOfPrimary
-    let primary = key.Substring(0, primaryLength key)
-    let comparePrefix gram spelling =
-        let prefixes = prefixKeysFor true view.Collation { Key = gram; Text = spelling; ByteOffset = 0L }
-        if Array.contains key prefixes then 0
-        else
-            prefixes
-            |> Array.fold (fun matching candidate ->
-                if primaryLength candidate = primary.Length
-                   && candidate.StartsWith(primary, StringComparison.Ordinal)
-                   && (matching |> Option.forall (fun previous -> String.CompareOrdinal(candidate, previous) > 0)) then
-                    Some candidate
-                else matching) None
-            |> Option.defaultValue gram
-            |> fun prefix -> String.CompareOrdinal(key, prefix)
-
-    FullTextCache.contiguousPrefixOrder comparePrefix view.CachedTerms
-
 let private accentPrefixPosting diskOnly (term: Token) (view: ReadView<'id>) =
     let through = defaultArg view.FlushedThrough Int64.MaxValue
+    let comparePrefix = Uca0900Weights.accentSensitivePrefixCompare term.Key
     let readGram cache gram =
         let rows = view.Postings |> Map.tryFind gram |> Option.defaultValue Map.empty
         let deleted = view.Deleted.Words |> Map.tryFind gram |> Option.defaultValue Map.empty
@@ -1625,38 +1620,26 @@ let private accentPrefixPosting diskOnly (term: Token) (view: ReadView<'id>) =
     let cached =
         if diskOnly || view.FlushedThrough.IsNone then Seq.empty
         else
-            cachedAccentPrefixGrams term.Key view
+            FullTextCache.contiguousPrefixOrder (fun key _ -> comparePrefix key) view.CachedTerms
             |> Seq.map (readGram true)
 
     let flushed =
         if through = 0L || FullTextCache.isEmpty view.FlushedAccentTerms then Seq.empty
         else
-            let delimiter (key: string) =
-                let mutable i = 0
-                while not (key.AsSpan(i, 4).SequenceEqual("0000".AsSpan())) do
-                    i <- i + 4
-                i
-
-            let query = Uca0900Weights.accentSensitiveKey term.Text
-            let split = delimiter query
-            let primary = query.Substring(0, split)
-            let secondary = query.Substring(split + 4)
+            let hasPrimaryWeight = not (term.Key.StartsWith("0000", StringComparison.Ordinal))
             let firstPartitionEnd = "41"
             let matches (key: string) =
-                let split = delimiter key
                 // With no primary weight, the query seeks the first auxiliary
                 // partition and cannot match terms in later partitions.
-                (primary.Length > 0 || split = 0
-                 || String.CompareOrdinal(key, 0, firstPartitionEnd, 0, 2) < 0)
-                && key.AsSpan(0, split).StartsWith(primary.AsSpan(), StringComparison.Ordinal)
-                && key.AsSpan(split + 4).StartsWith(secondary.AsSpan(), StringComparison.Ordinal)
+                (hasPrimaryWeight || String.CompareOrdinal(key, 0, firstPartitionEnd, 0, 2) < 0)
+                && comparePrefix key = 0
 
             // The disk cursor seeks by the whole key and stops on the first
             // posting outside the prefix on either collation level.
             view.FlushedAccentTerms
-            |> FullTextCache.startingAt query
-            |> Seq.choose (fun (key, gram) ->
-                let rows, deleted = readGram false gram
+            |> FullTextCache.startingAt term.Key
+            |> Seq.choose (fun (key, _) ->
+                let rows, deleted = readGram false key
                 if rows.IsEmpty && deleted.IsEmpty then None else Some(key, (rows, deleted)))
             |> Seq.takeWhile (fst >> matches)
             |> Seq.map snd
@@ -2104,8 +2087,13 @@ let private tryNgramRanking candidateIds (view: ReadView<'id>) nodes =
             let adjustmentSteps term id =
                 match term with
                 | BWord(word, true) ->
+                    let matches =
+                        if accentSensitive then
+                            let compare = Uca0900Weights.accentSensitivePrefixCompare word.Key
+                            fun token -> compare token.Key = 0
+                        else prefixKeys view.Collation >> Array.contains word.Key
                     indexedTokens view.Documents.[id].Content
-                    |> Seq.filter (prefixKeysFor (accentSensitive && view.FlushedThrough = Some 0L) view.Collation >> Array.contains word.Key)
+                    |> Seq.filter matches
                     |> Seq.distinctBy _.Key
                     |> Seq.truncate 2
                     |> Seq.length

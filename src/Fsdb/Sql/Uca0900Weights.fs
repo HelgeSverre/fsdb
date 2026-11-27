@@ -148,3 +148,21 @@ let compareChinese a b =
 let accentSensitiveKey value =
     let weight = weightOf accentSensitiveTable.Value value
     Convert.ToHexString(weight.Bytes, 0, weight.SecondaryEnd)
+
+let accentSensitivePrefixCompare (prefix: string) =
+    let primaryEnd (key: string) =
+        let mutable index = 0
+        while not (key.AsSpan(index, 4).SequenceEqual("0000".AsSpan())) do
+            index <- index + 4
+        index
+
+    let prefixEnd = primaryEnd prefix
+    let compareLevel start length (key: string) keyStart keyLength =
+        let result = String.CompareOrdinal(prefix, start, key, keyStart, min length keyLength)
+        if result = 0 && length > keyLength then 1 else result
+
+    fun (key: string) ->
+        let keyEnd = primaryEnd key
+        let primary = compareLevel 0 prefixEnd key 0 keyEnd
+        if primary <> 0 then primary
+        else compareLevel (prefixEnd + 4) (prefix.Length - prefixEnd - 4) key (keyEnd + 4) (key.Length - keyEnd - 4)

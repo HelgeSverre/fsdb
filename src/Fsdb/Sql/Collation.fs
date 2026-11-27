@@ -1577,15 +1577,14 @@ let internal lowercaseForFullText (name: string) (value: string) =
 
 /// Spellings with the same primary weights in the audited InnoDB collations.
 /// A wildcard can stop between these weights, inside the original scalar.
-let internal fullTextPrefixExpansion forCache name (rune: Rune) =
+let internal fullTextPrefixExpansion name (rune: Rune) =
     let scalar = rune.Value
     let inRange first last = scalar >= first && scalar <= last
     let compatibilityExpansion () =
         let expansion = rune.ToString().Normalize(NormalizationForm.FormKD)
         let expansion =
-            if name = "utf8mb4_0900_as_ci" && not forCache then
+            if name = "utf8mb4_0900_as_ci" then
                 // An unvoiced prefix can stop before the combining mark.
-                // Prefixes that include it can change membership after a flush.
                 match expansion |> Seq.tryFindIndex (function '\u3099' | '\u309A' -> true | _ -> false) with
                 | Some position -> expansion.Substring(0, position + 1)
                 | None -> expansion
@@ -1598,11 +1597,6 @@ let internal fullTextPrefixExpansion forCache name (rune: Rune) =
         | 0x309F | 0x30FF -> kanaLigatureExpansion (char scalar)
         | 0x32FF -> None
         | _ when inRange 0x3200 0x33FF || inRange 0xAC00 0xD7A3 -> compatibilityExpansion ()
-        | 0x00C6 | 0x00E6 when forCache -> Some "ae"
-        | 0x0152 | 0x0153 when forCache -> Some "oe"
-        | _ when forCache ->
-            let decomposed = rune.ToString().Normalize(NormalizationForm.FormD)
-            if decomposed.Length > rune.Utf16SequenceLength then Some decomposed else None
         | _ -> None
     | "utf8mb4_0900_ai_ci"
     | "utf8mb4_unicode_520_ci"
@@ -1721,7 +1715,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         elif name = "utf8mb3_unicode_ci" then
             s |> foldFullwidthAscii |> foldLegacyKanaForms |> foldKanaVariants
               |> foldSmallKana |> foldLegacyUnicodeJamo |> trim
-        elif name = "utf8mb4_0900_ai_ci" || name = "utf8mb4_0900_as_ci" then
+        elif name = "utf8mb4_0900_ai_ci" then
             s |> foldKanaLigatures |> primaryText
         elif name = "utf8mb4_ja_0900_as_cs_ks" then
             s |> markJapaneseHiraganaForFullText |> foldJapaneseCompatibility |> trim
@@ -2052,6 +2046,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                 "B" + Convert.ToHexString(binaryBytes s)
             elif chinese0900 then
                 Convert.ToHexString(Uca0900Weights.chineseWeight s)
+            elif name = "utf8mb4_0900_as_ci" then
+                Uca0900Weights.accentSensitiveKey s
             else
                 match legacyFullTextCase name with
                 | Some ranges ->

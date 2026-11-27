@@ -306,6 +306,20 @@ let tests =
                       closeTo 0.227644696831703 scores.[id] "matching postings share DF across cache and disk"
                       closeTo scores.[id] flat.[id] "flat and general evaluators agree"
 
+          testCase "accent-sensitive ngram cache inserts grams in MySQL collation order"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_0900_as_ci" |> Option.get
+              let rules = { Tokenizer = Ngrams 2; Stopwords = StopwordPolicy.Disabled }
+              let index =
+                  [ "中"; "花"; "株"; "㍿"; "ｷﾞ"; "ǽ"; "㋿" ]
+                  |> List.mapi (fun i word -> i + 1, rules, [ word + "中 " + word + "花"; "田" + word + " 上海" ])
+                  |> buildIndexWithDocumentSettings rules collation
+
+              Expect.isEmpty (booleanScores index "花*") "the leading combining mark sends the cache search away from 花中"
+              let flat = tryFlatBooleanScoresDictionary index "花*" |> Option.get
+              Expect.isEmpty flat "the SQL fast path has the same cache traversal"
+              Expect.isEmpty (booleanScores (flushPostings index) "花*") "the flushed cursor stops at the combining mark"
+
           testCase "Unicode 5.2 ngrams share padded space keys but retain Mongolian separator weight"
           <| fun _ ->
               let collation = tryFind "utf8mb4_unicode_520_ci" |> Option.get

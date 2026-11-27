@@ -27,4 +27,13 @@ SELECT 'flushed Kana ligature',GROUP_CONCAT(id ORDER BY id) FROM cjk WHERE MATCH
 SELECT 'flushed Hangul',GROUP_CONCAT(id ORDER BY id) FROM cjk WHERE MATCH(body) AGAINST('하*' IN BOOLEAN MODE);
 SELECT 'flushed voiced Katakana',GROUP_CONCAT(id ORDER BY id) FROM cjk WHERE MATCH(body) AGAINST('ギ*' IN BOOLEAN MODE);
 SELECT 'flushed accented e',GROUP_CONCAT(id ORDER BY id) FROM accents WHERE MATCH(a,b) AGAINST('é*' IN BOOLEAN MODE);
+
+CREATE TABLE cache_order(id INT PRIMARY KEY,a TEXT,b TEXT,FULLTEXT ft(a,b) WITH PARSER ngram) COLLATE=utf8mb4_0900_as_ci;
+INSERT INTO cache_order VALUES
+  (1,'中中 中花','田中 上海'),(2,'花中 花花','田花 上海'),(3,'株中 株花','田株 上海'),
+  (4,'㍿中 ㍿花','田㍿ 上海'),(5,'ｷﾞ中 ｷﾞ花','田ｷﾞ 上海'),
+  (6,'ǽ中 ǽ花','田ǽ 上海'),(7,'㋿中 ㋿花','田㋿ 上海');
+SELECT 'cached Han after combining mark',GROUP_CONCAT(id ORDER BY id)
+FROM cache_order WHERE MATCH(a,b) AGAINST('花*' IN BOOLEAN MODE);
+
 DROP DATABASE fsdb_ngram_accent_fixture;

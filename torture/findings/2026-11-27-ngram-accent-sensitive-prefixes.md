@@ -21,12 +21,11 @@ membership differences fell from 309 to 293.
 
 ## Cached prefix search
 
-For wholly cached postings, Fsdb now starts at the first matching
+For cached postings, Fsdb starts at the first matching
 cache tree entry and walks its neighbors in each direction. A
-nonmatching entry ends that side of the search. Prefix comparison
-includes the audited canonical accent decompositions and voiced
-Kana compatibility expansions. The flat Boolean scorer uses the
-same posting lookup as grouped and weighted expressions.
+nonmatching entry ends that side of the search. The flat Boolean
+scorer uses the same posting lookup as grouped and weighted
+expressions.
 [MySQL cached wildcard traversal](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L915-L994)
 
 The 143-query cached bigram sweep went from 131 to 143 matches in
@@ -45,7 +44,7 @@ the separate flushed lookup.
 
 The [SQL fixture](2026-11-27-ngram-accent-sensitive-prefixes.sql)
 isolates two changes in membership at the flush boundary. Fsdb
-matches the six cached and six flushed results.
+matches both states.
 
 - `é*` finds the precomposed `é中` in MySQL's cache. After the flush,
   it finds the decomposed `é中`.
@@ -72,8 +71,8 @@ The two-column matrix includes deletes and solo, required, excluded,
 weighted, repeated, and phrase queries. It ran `ANALYZE TABLE` at
 each phase so MySQL's row-count estimates reflected the small test
 tables. Without that refresh, MySQL scores also differed in the
-accent-insensitive and binary controls. The remaining mixed
-accent-sensitive differences involve the cache results for `花*`
+accent-insensitive and binary controls. At that stage, the mixed
+accent-sensitive differences involved cache lookups for `花*`
 and `é*`. For `花*`, the cache and auxiliary table both contain
 grams with leading combining marks whose primary weights match
 `花` and whose secondary weights differ. Those grams sort before
@@ -86,6 +85,30 @@ Both Fsdb storage modes agreed on the bigram matrix, and all 1,044
 mixed queries reproduced after WAL replay. An orderly shutdown
 and snapshot reload reproduced the explicit-flush results for
 `é*` and `ギ*` in a separate mixed fixture with no deletes.
+
+## Exact cache term order
+
+Fsdb now uses the pinned collation keys when it groups and inserts
+grams. The red-black tree uses the same weight comparison as the
+flushed prefix cursor. The `cache_order` fixture returns no rows
+for `花*` in either engine. InnoDB inserts a document's grams in
+collation order, so different weights can change the tree path even
+when two cursors agree about individual spelling equivalences.
+[MySQL cache insertion](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0fts.cc#L1189-L1217)
+
+The cached accent-sensitive matrix now matches on rows and scores
+for all 290 searches, up from 282. The mixed accent-sensitive
+matrix matches on both for all 348 searches, up from 338. All 348
+flushed searches still match. An additional 860 natural-language
+and Boolean searches with the ngram and default parsers agreed
+with MySQL on rows and scores after `ANALYZE TABLE`.
+
+A checkpoint created before the collation change returned a
+false hit for `花*`. On reload, the newer version rebuilt the
+cache from document order and retained deletes. Its results agreed
+with a freshly built index and a checkpoint written by the newer
+version. All 1,914 cached and mixed bigram results reproduced after
+WAL replay.
 
 These commands regenerate the embedded weight table using an isolated,
 running MySQL container from `torture/compose.yaml`.
