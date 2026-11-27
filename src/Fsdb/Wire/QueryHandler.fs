@@ -3745,11 +3745,14 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
                                                         if revision store <> revision session.Store then refresh () else store
                                                     else store
                                                 Executor.tryPrimaryRead protectGaps wait planningStore dbName readSelect
-                                                |> Option.map (fun (plan, orderedSelect) ->
+                                                |> Option.map (fun (plan, orderedSelect, keys) ->
                                                     match Storage.lockPrimaryRead (lockWaitTimeout session) session.Store refresh strength plan with
                                                     | Storage.ReadPrimary readStore -> readStore, orderedSelect
                                                     | Storage.SkippedPrimaryPoint readStore ->
-                                                        readStore, { orderedSelect with Where = Some(Lit(VInt 0L)) })
+                                                        readStore, { orderedSelect with Where = Some(Lit(VInt 0L)) }
+                                                    | Storage.ReadSelectedPrimaryKeys(readStore, rows) ->
+                                                        let qualifier = source.Alias |> Option.defaultValue source.Table
+                                                        readStore, Executor.selectLockedPrimaryKeys qualifier keys rows orderedSelect)
                                                 |> Option.defaultValue (planningStore, select)
                                         | _ -> store, select)
                                     |> Option.defaultWith (fun () -> consistentReadStore (), select)

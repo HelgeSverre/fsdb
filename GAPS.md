@@ -946,8 +946,9 @@ READ COMMITTED retains row-only locking for the audited reads.
 check pending inserts at the requested key and protect the audited gaps
 under REPEATABLE READ and SERIALIZABLE.
 [Ordered integer primary-key `NOWAIT` ranges with `LIMIT`](torture/findings/2026-11-27-missing-primary-write-gaps.md#ordered-range-limits)
-stop at the limit and keep the visited locks after a conflict. Ordered
-`SKIP LOCKED` ranges can still lock rows beyond the limit.
+stop at the limit and keep the visited locks after a conflict. The
+corresponding `SKIP LOCKED` ranges count unlocked rows toward the limit
+and preserve the gaps at the records they visit successfully.
 
 [Unique secondary-key moves](torture/findings/2026-11-27-unique-secondary-key-moves.md)
 now hold the destination key through commit or rollback, including in a

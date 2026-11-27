@@ -8543,4 +8543,54 @@ let tests =
               TestSupport.Sql.expectOk (handle holder "ROLLBACK" |> snd) "release the first rejected record"
               Expect.equal (probe 30) (ResultSet([ "id" ], [ [ Some "30" ] ])) "the failed read did not retain the rejected record"
               TestSupport.Sql.expectError 3572 (probe 20) "the failed read keeps the matching records"
-              TestSupport.Sql.expectOk (handle reader "ROLLBACK" |> snd) "end the reader" ]
+              TestSupport.Sql.expectOk (handle reader "ROLLBACK" |> snd) "end the reader"
+
+          testCase "ordered primary SKIP LOCKED stops after enough unlocked rows and protects visited gaps"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              for isolation, direction, filter, blockedKeys, first, later, openGap, visitedGap in
+                  [ "REPEATABLE READ", "ASC", "WHERE id BETWEEN 15 AND 45 ", [ 20 ], 30, 40, 18, 25
+                    "REPEATABLE READ", "DESC", "WHERE id BETWEEN 15 AND 45 ", [ 40 ], 30, 20, 35, 25
+                    "READ COMMITTED", "ASC", "", [ 10; 20 ], 30, 40, 18, 25 ] do
+                  let store = Fsdb.Storage.create ()
+                  let observer = run (create 1 store) "SET innodb_lock_wait_timeout=1" (Affected 0UL)
+                  run observer "CREATE TABLE gate(id INT PRIMARY KEY,n INT)" (Affected 0UL) |> ignore
+                  run observer "INSERT INTO gate VALUES (10,1),(20,2),(30,3),(40,4),(50,5)" (Affected 5UL) |> ignore
+                  let holder = run (create 2 store) "BEGIN" (Affected 0UL)
+                  let holder =
+                      blockedKeys |> List.fold (fun state key ->
+                          run state $"UPDATE gate SET n=12 WHERE id={key}" (Affected 1UL)) holder
+                  let reader = run (create 3 store) $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  let reader = run reader $"SELECT id FROM gate {filter}ORDER BY id {direction} LIMIT 1 FOR UPDATE SKIP LOCKED"
+                                   (ResultSet([ "id" ], [ [ Some(string first) ] ]))
+                  run holder "ROLLBACK" (Affected 0UL) |> ignore
+                  let insert key = handle observer $"INSERT INTO gate VALUES ({key},0)" |> snd
+                  let trailing = handle observer $"UPDATE gate SET n=15 WHERE id={later}" |> snd
+                  let openResult = insert openGap
+                  let visitedResult = insert visitedGap
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+                  Expect.equal trailing (Affected 1UL) "rows beyond the limit stay unlocked"
+                  Expect.equal openResult (Affected 1UL) "the gap before the skipped record stays open"
+                  if isolation = "REPEATABLE READ" then TestSupport.Sql.expectError 1205 visitedResult "the visited record protects its gap"
+                  else Expect.equal visitedResult (Affected 1UL) "READ COMMITTED leaves gaps open"
+
+          testCase "reverse primary SKIP LOCKED protects the gap before a rejected prefix without locking its row"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let observer, _ = handle (create 1 store) "SET innodb_lock_wait_timeout=1"
+              for sql in
+                  [ "CREATE TABLE gate(a INT,b INT,n INT,PRIMARY KEY(a,b))"
+                    "INSERT INTO gate VALUES (1,10,1),(1,20,2),(3,10,3)" ] do
+                  TestSupport.Sql.expectOk (handle observer sql |> snd) sql
+              let reader, _ = handle (create 2 store) "START TRANSACTION"
+              let reader, result = handle reader "SELECT b FROM gate WHERE a=2 ORDER BY b DESC LIMIT 1 FOR UPDATE SKIP LOCKED"
+              Expect.equal result (ResultSet([ "b" ], [])) "the requested prefix is empty"
+              let predecessor = handle observer "SELECT n FROM gate WHERE a=1 AND b=20 FOR UPDATE NOWAIT" |> snd
+              let gap = handle observer "INSERT INTO gate VALUES (1,15,4)" |> snd
+              TestSupport.Sql.expectOk (handle reader "ROLLBACK" |> snd) "release the read gaps"
+              Expect.equal predecessor (ResultSet([ "n" ], [ [ Some "2" ] ])) "the rejected row stays available"
+              TestSupport.Sql.expectError 1205 gap "the gap before the rejected row is protected" ]

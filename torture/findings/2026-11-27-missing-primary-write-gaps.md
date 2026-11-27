@@ -158,13 +158,23 @@ All 200 schedules matched MySQL 8.4.11 in memory and with WAL enabled.
 They covered both scan directions and lock strengths, all four isolation
 levels, `OFFSET`, and a descending composite key with `FORCE INDEX`.
 
-Ordered `SKIP LOCKED` ranges still use the general locking path. With
-the same keys, hold 20 and replace `NOWAIT` with `SKIP LOCKED`. Both
-engines return 30. Fsdb also locks 40, so a concurrent update of 40
-times out. The divergence also occurs for descending order and at READ
-COMMITTED. Ranges that require a filesort or have competing access paths
-remain outside the audited `NOWAIT` coverage.
+Ordered integer primary-key ranges with `SKIP LOCKED` count only
+admitted records toward `LIMIT` and `OFFSET`. With the same keys, hold
+20 and replace `NOWAIT` with `SKIP LOCKED`. The query returns 30 and an
+update to 40 can proceed. Fsdb evaluates only the keys selected by the
+locking scan.
 
 At REPEATABLE READ, hold 30 and use `LIMIT 2 ... SKIP LOCKED` over the
 same range in ascending order. MySQL returns 20 and 40. An insert at 27
 can proceed while an insert at 33 waits.
+
+In a reverse equality-prefix scan, the predecessor outside the prefix
+stays available while the gap before it is protected. The comparison ran
+240 `SKIP LOCKED` schedules against MySQL 8.4.11 in memory and with WAL
+enabled, including empty prefixes, pending inserts, and both directions
+of composite primary keys. The queue schedules also verified that five
+concurrent readers each acquired a different row and left a later row
+available for updates.
+
+Ranges that require a filesort or have competing access paths remain
+outside the audited `NOWAIT` and `SKIP LOCKED` coverage.

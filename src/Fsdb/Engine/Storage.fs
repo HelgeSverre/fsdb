@@ -6779,6 +6779,7 @@ type internal PrimaryReadPlan =
 type internal PrimaryReadOutcome =
     | ReadPrimary of Store
     | SkippedPrimaryPoint of Store
+    | ReadSelectedPrimaryKeys of Store * Value list list
 
 let internal compareIntegerPrimaryValues = compareIndexedValues None
 
@@ -6809,6 +6810,8 @@ type private PrimaryGapScan =
     | SkippedPointGap
     | LimitedGap of direction: PrimaryScanDirection * stoppedAtRecord: bool
     | ProbeLimitedRange of PrimaryScanDirection
+    | CursorNextKeyGap
+    | CursorUpperGap
     | EmptyReversePrefixGap
     | RetainedRangeGap of PrimaryScanDirection
     | RetainedReverseSeekGap
@@ -6903,14 +6906,19 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
                         | RetainedRangeGap ForwardScan -> "retained-forward:"
                         | RetainedRangeGap ReverseScan -> "retained-reverse:"
                         | RetainedReverseSeekGap -> "retained-seek:"
+                        | CursorNextKeyGap -> "cursor-record:"
+                        | CursorUpperGap -> "cursor-upper:"
                         | _ -> "range:"
                     // A reverse cursor protects the gap before its last visited row
                     // and the gap before the successor of its initial seek.
                     let lowerAnchor, upperAnchor =
-                        if reverse then
+                        match scan with
+                        | CursorNextKeyGap -> Option.map (fun (key, _) -> key, false) upper, upper
+                        | CursorUpperGap -> upper, Option.map (fun (key, inclusive) -> key, not inclusive) upper
+                        | _ when reverse ->
                             Option.map (fun (values, _) -> values, scan = RetainedReverseSeekGap) lower,
                             Option.map (fun (values, inclusive) -> values, not inclusive) upper
-                        else Option.map anchor lower, Option.map anchor upper
+                        | _ -> Option.map anchor lower, Option.map anchor upper
                     prefix + identity lower + ":" + identity upper, lowerAnchor, upperAnchor
             let needsGap table =
                 match read with
@@ -6967,6 +6975,19 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
             let isVisibleInAnyReadView table key =
                 contains table key || (readTables () |> Seq.exists (fun version -> contains version key))
 
+            let lastKey table =
+                table.SecondaryOrder |> Map.tryFind "PRIMARY"
+                |> Option.bind (fun entries -> if entries.IsEmpty then None else Some entries.[entries.Count - 1].Values)
+
+            let lastBoundary table =
+                seq {
+                    yield! lastKey table |> Option.toList
+                    yield! readTables () |> Seq.choose lastKey
+                    yield! pending () |> Seq.map (fun (_, _, values) -> values)
+                }
+                |> Seq.fold (fun best candidate ->
+                    if best |> Option.forall (fun key -> compare candidate key > 0) then Some candidate else best) None
+
             let installsGaps = match scan with ProbeLimitedRange _ -> false | _ -> true
             let install skippedPoint =
                 match current () with
@@ -6991,6 +7012,7 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
                             match scan with
                             // A missing prefix also protects the gap before the rejected predecessor.
                             | EmptyReversePrefixGap -> lowerAnchor |> Option.bind (fun key -> nearest true (key, false) table)
+                            | CursorUpperGap when lower.IsNone -> lastBoundary table
                             | _ -> lowerAnchor
                         let mutable lower = lowerAnchor |> Option.map boundary
                         let upperAnchor =
@@ -6998,7 +7020,8 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
                             // An inclusive descending scan can reach the end of the index.
                             | PrimaryRange(_, Some(stoppingKey, true))
                                 when not reverse && scan <> LimitedGap(ForwardScan, true)
-                                     && scan <> RetainedRangeGap ForwardScan && group.Directions = [ Desc ]
+                                     && scan <> RetainedRangeGap ForwardScan && scan <> CursorNextKeyGap
+                                     && group.Directions = [ Desc ]
                                      && (nearest false (stoppingKey, false) table).IsNone ->
                                 None
                             | _ -> upper |> Option.bind (fun edge -> nearest false edge table)
@@ -7050,7 +7073,7 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
             if scan <> SkippedPointGap && not (needsGap observed) then GapProtected
             else
                 match scan, read with
-                | (RetainedRangeGap _ | RetainedReverseSeekGap), PrimaryRange _ ->
+                | (RetainedRangeGap _ | RetainedReverseSeekGap | CursorNextKeyGap | CursorUpperGap), PrimaryRange _ ->
                     // The transaction already protects this interval through
                     // its provisional scan gap. Keep the narrower claim
                     // before releasing the provisional one.
@@ -7138,6 +7161,19 @@ type private PrimaryRangeSelection =
       Stop: Value list option
       EndRecord: RowId option }
 
+let private primaryRangeBounds (entries: ImmutableSortedSet<SecondaryOrderEntry>) lower upper =
+    let start =
+        lower |> Option.map (fun (values, inclusive) ->
+            let first, after = orderedPrefixBounds entries values
+            if inclusive then first else after)
+        |> Option.defaultValue 0
+    let finish =
+        upper |> Option.map (fun (values, inclusive) ->
+            let first, after = orderedPrefixBounds entries values
+            if inclusive then after else first)
+        |> Option.defaultValue entries.Count
+    start, finish
+
 let private primaryRangeRows (table: Table) lower upper limit probeForwardEnd =
     let empty = { Rows = []; Stop = None; EndRecord = None }
     match Map.tryFind "PRIMARY" table.SecondaryOrder with
@@ -7147,16 +7183,7 @@ let private primaryRangeRows (table: Table) lower upper limit probeForwardEnd =
             let entry = entries.[index]
             entry.RowId, entry.Values
 
-        let start =
-            lower |> Option.map (fun (values, inclusive) ->
-                let first, after = orderedPrefixBounds entries values
-                if inclusive then first else after)
-            |> Option.defaultValue 0
-        let finish =
-            upper |> Option.map (fun (values, inclusive) ->
-                let first, after = orderedPrefixBounds entries values
-                if inclusive then after else first)
-            |> Option.defaultValue entries.Count
+        let start, finish = primaryRangeBounds entries lower upper
         match limit with
         | Some(ReverseScan, _) when start = finish && isEqualityPrefix lower upper -> empty
         | Some(ReverseScan, count) ->
@@ -7440,9 +7467,76 @@ let private lockPrimaryRange timeout (live: Store) (refresh: unit -> Store) stre
         |> function Ok current -> current | Error error -> raise error
     | None -> initial
 
+let private lockPrimarySkipRange (live: Store) refresh strength (plan: PrimaryReadPlan) lower upper direction count =
+    let database, tableName = plan.ReadDatabase, plan.ReadTableName
+    let cache = keyLockCache live (lockNamespaceKey database tableName)
+    let initial = refresh ()
+    withTransactionLockCheckpoint initial (fun () ->
+        // Admit each record and its gap against the same key state. Skipped
+        // records contribute neither an output row nor their preceding gap.
+        lock cache.SyncRoot (fun () ->
+            let snapshot = refresh ()
+            let entries = primaryReadTable plan snapshot |> Option.bind (fun table -> Map.tryFind "PRIMARY" table.SecondaryOrder)
+            let gap scan read =
+                if plan.ReadGaps then
+                    acquirePrimaryGap TimeSpan.Zero live snapshot database tableName scan false read |> ignore
+            let upperGap () = gap CursorUpperGap plan.ReadAccess
+            let recordGap key =
+                let edge = Some(key, true)
+                gap CursorNextKeyGap (PrimaryRange(edge, edge))
+            let claim rowId probe =
+                if probe then
+                    try
+                        checkTransactionReadTarget snapshot database tableName strength rowId
+                        true
+                    with LockNowait _ -> false
+                else
+                    acquireTransactionReadTargets TimeSpan.Zero snapshot database tableName strength SkipLocked [ rowId ]
+                    |> List.isEmpty |> not
+
+            let selected =
+                match entries with
+                | None ->
+                    upperGap ()
+                    []
+                | Some entries ->
+                    let start, finish = primaryRangeBounds entries lower upper
+                    let forward = direction = ForwardScan
+                    if not forward then upperGap ()
+                    let step = if forward then 1 else -1
+                    let rec visit index offset remaining selected =
+                        Limits.checkQueryInterruption queryCancellation.Value
+                        if remaining = 0 then List.rev selected
+                        elif forward && plan.ReadGaps && index >= finish then
+                            upperGap ()
+                            List.rev selected
+                        elif index < 0 || index >= entries.Count then List.rev selected
+                        else
+                            let entry = entries.[index]
+                            let matches = index >= start && index < finish
+                            let probe = not plan.ReadGaps && (if matches then offset > 0 else forward)
+                            if not matches && not forward && isEqualityPrefix lower upper then
+                                // A reverse prefix seek protects the predecessor's gap without locking its row.
+                                recordGap entry.Values
+                                List.rev selected
+                            elif not (claim entry.RowId probe) then visit (index + step) offset remaining selected
+                            else
+                                recordGap entry.Values
+                                if not matches then List.rev selected
+                                elif offset > 0 then visit (index + step) (offset - 1) (remaining - 1) selected
+                                else visit (index + step) 0 (remaining - 1) (entry.Values :: selected)
+                    let first = if forward then start else finish - 1
+                    visit first plan.ReadOffset count []
+
+            ReadSelectedPrimaryKeys(snapshot, selected)))
+
 let internal lockPrimaryRead timeout live refresh strength (plan: PrimaryReadPlan) =
     match plan.ReadAccess with
     | PrimaryPoint(key, _) -> lockPrimaryPoint timeout live refresh strength plan key
+    | PrimaryRange(lower, upper) when plan.ReadWait = SkipLocked ->
+        match plan.ReadRangeLimit with
+        | Some(direction, count) -> lockPrimarySkipRange live refresh strength plan lower upper direction count
+        | None -> invalidOp "SKIP LOCKED primary ranges require an ordered limit"
     | PrimaryRange(lower, upper) -> ReadPrimary(lockPrimaryRange timeout live refresh strength plan lower upper)
 
 /// Read either side of an indexed NULL test after any exact bound leading key

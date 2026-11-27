@@ -36263,7 +36263,8 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
                             | _ -> rangeRead
                 | _ -> None
 
-            let boundedClusteredScan = select.OrderBy.IsEmpty && select.Limit.IsSome
+            let boundedClusteredScan =
+                select.Limit.IsSome && (select.OrderBy.IsEmpty || wait = SkipLocked)
             if keys.IsEmpty || (conditions.IsEmpty && not boundedClusteredScan)
                || not (List.forall simpleProjection select.Projections) then None
             else
@@ -36272,7 +36273,7 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
                 |> Option.orElseWith (fun () ->
                     match wait with
                     | WaitForLocks when protectGaps && integerKeys -> range ()
-                    | NoWait when integerKeys && primaryIsOnlyChoice -> range () |> Option.filter (snd >> Option.isSome)
+                    | (NoWait | SkipLocked) when integerKeys && primaryIsOnlyChoice -> range () |> Option.filter (snd >> Option.isSome)
                     | _ -> None)
                 |> Option.map (fun (access, limit) ->
                     let plan: Storage.PrimaryReadPlan =
@@ -36290,8 +36291,19 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
                             let order = keys |> List.map (fun key -> QualifiedCol(qualifier, key), keyDirection key)
                             { select with OrderBy = order }
                         else select
-                    plan, readSelect))
+                    plan, readSelect, keys))
     | _ -> None
+
+let internal selectLockedPrimaryKeys qualifier keys values (select: SelectStmt) =
+    let scalarOrRow = function [ value ] -> value | values -> Row values
+    let eligible =
+        match values with
+        | [] -> Lit(VInt 0L)
+        | _ ->
+            let key = keys |> List.map (fun column -> QualifiedCol(qualifier, column)) |> scalarOrRow
+            In(key, values |> List.map (List.map Lit >> scalarOrRow))
+    let where = select.Where |> Option.map (fun predicate -> BinOp(And, predicate, eligible)) |> Option.defaultValue eligible
+    { select with Where = Some where; Offset = None }
 
 let private transactionWriteTargetsIn
     (temporaryCatalog: Catalog option)
