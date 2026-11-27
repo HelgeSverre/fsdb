@@ -217,6 +217,47 @@ checks also matched after a checkpoint restart.
 Collated text ranges, competing indexes, and other filesort shapes
 remain outside this comparison.
 
+## Collated primary-key ranges
+
+The primary locking cursor seeks by the column's collation when a
+`CHAR` or `VARCHAR` is the last part of the key. Both the committed
+index and the pending-write check use the same canonical bounds.
+Text in earlier key parts can split a logical prefix into several
+spelling runs, so those composite ranges still need separate handling.
+
+With ascending keys `a10`, `é20`, `g30`, `k40`, and `z50` under
+`utf8mb4_0900_ai_ci`, hold `g30` in a writer transaction. Start a
+reader transaction and run:
+
+```sql
+SELECT id FROM t FORCE INDEX (PRIMARY)
+WHERE id >= 'E20' AND id <= 'k40'
+ORDER BY id LIMIT 1 FOR UPDATE NOWAIT;
+```
+
+The reader returns `é20`. Increasing the limit to two reports 3572
+and retains the lock on `é20`. With `SKIP LOCKED`, the same limit
+returns `é20` and `k40`, protects the gap before `k40`, and leaves
+`z50` available to another writer. An exclusive lower bound excludes
+the equivalent spelling `é20`.
+
+Separate inequalities on collated-equivalent spellings can still
+form a range. With `id >= 'E20' AND id <= 'é20'` and a limit of two,
+an exhausted forward scan protects the gap after `é20`. A reverse
+scan also locks the rejected predecessor. In the same fixture,
+`BETWEEN 'E20' AND 'é20'` uses an exact seek and leaves both neighboring
+records available.
+
+The matrix against MySQL 8.4.11 improved from 224 to 928 matching
+schedules in both memory and WAL configurations. It covered all four
+isolation levels, both lock strengths and scan directions, case and
+accent sensitivity, PAD SPACE and NO PAD, mixed-direction composite
+keys, and pending inserts. Twelve additional schedules compared gap
+inserts, and sixteen compared resuming a scan after a competing writer
+committed. Prepared text bounds returned the same rows and the same
+`3572 / HY000` error. Six composite schedules also matched after a
+checkpoint restart. [MySQL locking reads](https://dev.mysql.com/doc/refman/8.4/en/innodb-locking-reads.html)
+
 ## Locking reads with LIMIT 0
 
 With a plain `LIMIT 0` or `LIMIT 0 OFFSET 0`, MySQL validates the query

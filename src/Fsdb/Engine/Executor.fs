@@ -36991,11 +36991,31 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
                     |> Option.map (Option.map (scanThroughLimit limit))
                 | _ -> None
 
-            let columnType column =
+            let columnDefinition column =
                 resolveColumn table.Columns column
                 |> Result.toOption
-                |> Option.map (fun index -> table.Columns.[index].Type)
-            let orderedRangeKeys = keys |> List.forall (columnType >> Option.exists Storage.supportsPrimaryRangeKeyType)
+                |> Option.map (fun index -> table.Columns.[index])
+            let columnType column = columnDefinition column |> Option.map _.Type
+            let orderedRangeKeys =
+                keys |> List.map columnType |> tryAllSome |> Option.exists Storage.supportsPrimaryRangeKeyTypes
+            let columnCollation column = columnDefinition column |> Option.bind _.Collation
+            let compareBounds column =
+                Storage.comparePrimaryRangeValues (columnCollation column)
+            let sameStoredBound column lower upper =
+                match lower, upper, columnType column with
+                | VString _, VString _, Some kind ->
+                    let normalize = Storage.normalizePrimaryTextBound kind (columnCollation column)
+                    normalize lower = normalize upper
+                | _ -> true
+            let sameLiteralBound low high lower upper =
+                match lower, upper with
+                | VString a, VString b ->
+                    let collation = function
+                        | ConnectionLiteral(_, name) -> Collation.findOrDefault (Some name)
+                        | _ -> store.ExecutionSettings.ConnectionCollation
+                    let left, right = collation low, collation high
+                    left.Name = right.Name && left.Equals a b
+                | _ -> true
             let point = Storage.tryLockingPrimaryPoint store table
 
             let integer = function
@@ -37024,7 +37044,8 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
                 | Between(column, low, high) when orderedRangeKeys ->
                     predicateColumn column |> Option.bind (fun name ->
                         match keyLiteral name low, keyLiteral name high with
-                        | Some lower, Some upper when Storage.comparePrimaryRangeValues lower upper = 0 -> Some(name, lower)
+                        | Some lower, Some upper when compareBounds name lower upper = 0 && sameLiteralBound low high lower upper ->
+                            Some(name, lower)
                         | _ -> None)
                 | _ -> None
 
@@ -37049,7 +37070,7 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
                     if List.exists List.isEmpty predicates then None
                     else
                         let bounds = List.concat predicates
-                        let compare = Storage.comparePrimaryRangeValues
+                        let compare = compareBounds key
                         let strongest direction =
                             List.fold (fun current ((value, inclusive) as candidate) ->
                                 match current with
@@ -37068,7 +37089,7 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
                             match bound with
                             | None -> Some None
                             | Some(values, inclusive) ->
-                                Storage.tryExactPrimaryKeyPrefix store table values
+                                Storage.tryPrimaryRangePrefix store table values
                                 |> Option.map (fun exact -> Some(exact, inclusive))
                         let physicalLower, physicalUpper =
                             if keyDirection key = Desc then edge upper, edge lower else edge lower, edge upper
@@ -37080,8 +37101,9 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
                             match lower, upper with
                             | Some(low, includeLow), Some(high, includeHigh) when compare low high = 0 ->
                                 if not (includeLow && includeHigh) then None
-                                elif remaining.IsEmpty then
+                                elif remaining.IsEmpty && sameStoredBound key low high then
                                     limit |> Option.bind (fun _ -> point (prefix @ [ low ])) |> Option.map (fun access -> access, None)
+                                elif remaining.IsEmpty then rangeRead
                                 else
                                     match limit with
                                     | Some(Some(Storage.ForwardScan, _)) -> rangeRead

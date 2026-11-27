@@ -8560,6 +8560,93 @@ let tests =
                   run transaction "ROLLBACK" (Affected 0UL) |> ignore
                   run holder "ROLLBACK" (Affected 0UL) |> ignore
 
+          testCase "collated primary ranges seek equivalent spellings and retain only visited locks"
+          <| fun _ ->
+              for columnType, spelling, bound in
+                  [ "VARCHAR(12) COLLATE utf8mb4_0900_ai_ci", "é20", "E20"
+                    "CHAR(12) COLLATE utf8mb4_unicode_ci", "b20", "b20 "
+                    "VARCHAR(12) COLLATE utf8mb4_bin", "b20", "b20 " ] do
+                  let store = Fsdb.Storage.create ()
+                  let run session sql expected =
+                      let next, actual = handle session sql
+                      Expect.equal actual expected sql
+                      next
+                  let owner = create 1 store
+                  let observer = run (create 2 store) "SET innodb_lock_wait_timeout=1" (Affected 0UL)
+                  let reader = create 3 store
+                  run owner $"CREATE TABLE gate(id {columnType} PRIMARY KEY,n INT)" (Affected 0UL) |> ignore
+                  run owner $"INSERT INTO gate VALUES ('a10',0),('{spelling}',0),('g30',0),('k40',0),('z50',0)" (Affected 5UL) |> ignore
+                  let holder = run owner "BEGIN" (Affected 0UL)
+                  let holder = run holder "UPDATE gate SET n=1 WHERE id='g30'" (Affected 1UL)
+                  let query comparison limit mode =
+                      $"SELECT id FROM gate FORCE INDEX (PRIMARY) WHERE id {comparison} '{bound}' AND id <= 'k40' ORDER BY id LIMIT {limit} FOR UPDATE {mode}"
+                  let first = $"SELECT id FROM gate WHERE id='{spelling}' FOR UPDATE NOWAIT"
+                  let transaction = run reader "BEGIN" (Affected 0UL)
+                  let transaction = run transaction (query ">=" 1 "NOWAIT") (ResultSet([ "id" ], [ [ Some spelling ] ]))
+                  run transaction "ROLLBACK" (Affected 0UL) |> ignore
+
+                  let transaction = run reader "BEGIN" (Affected 0UL)
+                  let transaction, conflict = handle transaction (query ">=" 2 "NOWAIT")
+                  TestSupport.Sql.expectError 3572 conflict "the next matching record is locked"
+                  TestSupport.Sql.expectError 3572 (handle observer first |> snd) "NOWAIT retains the first lock"
+                  run transaction "ROLLBACK" (Affected 0UL) |> ignore
+
+                  let transaction = run reader "BEGIN" (Affected 0UL)
+                  let transaction = run transaction (query ">" 1 "SKIP LOCKED") (ResultSet([ "id" ], [ [ Some "k40" ] ]))
+                  run observer first (ResultSet([ "id" ], [ [ Some spelling ] ])) |> ignore
+                  run observer "UPDATE gate SET n=2 WHERE id='z50'" (Affected 1UL) |> ignore
+                  TestSupport.Sql.expectError 1205 (handle observer "INSERT INTO gate VALUES ('j33',0)" |> snd)
+                      "the admitted record protects its preceding gap"
+                  run transaction "ROLLBACK" (Affected 0UL) |> ignore
+                  run holder "ROLLBACK" (Affected 0UL) |> ignore
+
+          testCase "equivalent text inequalities retain range boundary locks"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, actual = handle session sql
+                  Expect.equal actual expected sql
+                  next
+              let owner = create 1 store
+              let observer = run (create 2 store) "SET innodb_lock_wait_timeout=1" (Affected 0UL)
+              run owner "CREATE TABLE gate(id VARCHAR(12) COLLATE utf8mb4_0900_ai_ci PRIMARY KEY)" (Affected 0UL) |> ignore
+              run owner "INSERT INTO gate VALUES ('a10'),('é20'),('k40')" (Affected 3UL) |> ignore
+              let target = ResultSet([ "id" ], [ [ Some "é20" ] ])
+              let predecessor = "SELECT id FROM gate WHERE id='a10' FOR UPDATE NOWAIT"
+              let insert = "INSERT INTO gate VALUES ('g30')"
+
+              let reader = run owner "BEGIN" (Affected 0UL)
+              let reader = run reader "SELECT id FROM gate WHERE id >= 'E20' AND id <= 'é20' ORDER BY id DESC LIMIT 2 FOR UPDATE" target
+              TestSupport.Sql.expectError 3572 (handle observer predecessor |> snd) "the reverse scan visits the preceding record"
+              run reader "ROLLBACK" (Affected 0UL) |> ignore
+
+              let reader = run owner "BEGIN" (Affected 0UL)
+              let reader = run reader "SELECT id FROM gate WHERE id >= 'E20' AND id <= 'é20' ORDER BY id LIMIT 2 FOR UPDATE" target
+              run observer predecessor (ResultSet([ "id" ], [ [ Some "a10" ] ])) |> ignore
+              TestSupport.Sql.expectError 1205 (handle observer insert |> snd) "the exhausted forward scan protects its successor gap"
+              run reader "ROLLBACK" (Affected 0UL) |> ignore
+
+              let reader = run owner "BEGIN" (Affected 0UL)
+              let reader = run reader "SELECT id FROM gate WHERE id BETWEEN 'E20' AND 'é20' ORDER BY id DESC LIMIT 2 FOR UPDATE" target
+              run observer predecessor (ResultSet([ "id" ], [ [ Some "a10" ] ])) |> ignore
+              run observer insert (Affected 1UL) |> ignore
+              run reader "ROLLBACK" (Affected 0UL) |> ignore
+
+              let reader = run owner "BEGIN" (Affected 0UL)
+              let reader =
+                  run reader "SELECT id FROM gate WHERE id BETWEEN 'E20' AND 'g30' ORDER BY id LIMIT 3 FOR UPDATE SKIP LOCKED"
+                      (ResultSet([ "id" ], [ [ Some "é20" ]; [ Some "g30" ] ]))
+              run observer "INSERT INTO gate VALUES ('b15')" (Affected 1UL) |> ignore
+              run observer "INSERT INTO gate VALUES ('h35')" (Affected 1UL) |> ignore
+              run reader "ROLLBACK" (Affected 0UL) |> ignore
+
+              let reader = run owner "BEGIN" (Affected 0UL)
+              let reader = run reader "SELECT id FROM gate WHERE id >= 'h35' AND id <= 'k40' ORDER BY id LIMIT 3 FOR UPDATE"
+                                (ResultSet([ "id" ], [ [ Some "h35" ]; [ Some "k40" ] ]))
+              TestSupport.Sql.expectError 1205 (handle observer "INSERT INTO gate VALUES ('z99')" |> snd)
+                  "an exhausted scan protects the end of the index"
+              run reader "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "primary range filesort retains cursor locks and applies OFFSET to sorted rows"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

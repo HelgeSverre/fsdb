@@ -3290,7 +3290,10 @@ let private projectIndexValue indexName row (column: ColumnDef) prefixLength tra
 let private indexValues (columns: ColumnDef list) (group: IndexKeyGroup) (row: Value[]) =
     List.map3
         (fun index prefixLength transform ->
-            projectIndexValue group.Name (Some row) columns.[index] prefixLength transform row.[index])
+            match projectIndexValue group.Name (Some row) columns.[index] prefixLength transform row.[index] with
+            // Primary seeks and unique locks both use the decoded text's collation.
+            | VEncodedString(charset, bytes) when group.Name = "PRIMARY" -> VString(Charset.decodeBytes charset bytes)
+            | value -> value)
         group.Indices
         group.PrefixLengths
         group.Transforms
@@ -6084,12 +6087,6 @@ let private exactPrimaryValues store table indices values =
         | _ -> Error())
     |> Result.toOption
 
-let internal tryExactPrimaryKeyPrefix store table (values: Value list) =
-    uniqueKeyGroups table
-    |> List.tryFind (fun group ->
-        group.Name = "PRIMARY" && indexesWholeColumns group && values.Length <= group.Indices.Length)
-    |> Option.bind (fun group -> exactPrimaryValues store table (List.take values.Length group.Indices) values)
-
 let private tryExactWriteLockTargets (store: Store) (table: Table) name (values: Value list) =
     uniqueKeyGroups table
     |> List.tryFind (fun group -> group.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
@@ -6695,11 +6692,37 @@ let private compareGapKeyParts collation left right =
     | VString a, VString b -> StringComparer.Ordinal.Compare(a, b)
     | _ -> compareIndexedValues collation left right
 
+let rec private compareGapKeys directions left right =
+    match directions, left, right with
+    | [], [], [] -> 0
+    | direction :: directions, a :: left, b :: right ->
+        match compareGapKeyParts None a b with
+        | 0 -> compareGapKeys directions left right
+        | order when direction = Desc -> -order
+        | order -> order
+    | _ -> invalidArg "left" "Gap keys and index directions must have matching widths"
+
 let private canonicalGapPart collation = function
     | VString value -> VString((Collation.findOrDefault collation).KeyOf value)
     | VEncodedString(charset, bytes) ->
         VString((Collation.findOrDefault collation).KeyOf(Charset.decodeBytes charset bytes))
     | value -> value
+
+let private canonicalRangeKey (entry: SecondaryOrderEntry) =
+    match List.last entry.Values with
+    | VString _ -> List.map2 canonicalGapPart entry.CollationNames entry.Values
+    | _ -> entry.Values
+
+let private primaryRangePrefixBounds (entries: ImmutableSortedSet<SecondaryOrderEntry>) prefix =
+    match List.tryLast prefix with
+    | Some(VString _) ->
+        // A text range can only vary the final part of the index. A bound
+        // containing collation weights therefore always has the full width.
+        let compareAt index =
+            let entry = entries.[index]
+            compareGapKeys entry.Directions (canonicalRangeKey entry) prefix
+        sortedInsertionPoint FirstEqual entries.Count compareAt, sortedInsertionPoint AfterEqual entries.Count compareAt
+    | _ -> orderedPrefixBounds entries prefix
 
 /// Physical order may break a collation tie by spelling before considering
 /// the suffix. Search each spelling run separately and combine its best key
@@ -6762,7 +6785,7 @@ type private PrimaryGapBoundary =
 
 type internal PrimaryGapSearch =
     | PrimaryPoint of lockKey: string * canonicalParts: Value list
-    /// Range edges in physical index order. A partial edge includes or excludes its whole prefix.
+    /// Canonical keys in index order. A partial edge includes or excludes its whole prefix.
     | PrimaryRange of lower: (Value list * bool) option * upper: (Value list * bool) option
 
 type internal PrimaryScanDirection = ForwardScan | ReverseScan
@@ -6782,16 +6805,51 @@ type internal PrimaryReadOutcome =
     | SkippedPrimaryPoint of Store
     | ReadSelectedPrimaryKeys of Store * Value list list * consumedOffset: int
 
-let internal comparePrimaryRangeValues = compareIndexedValues None
+let internal comparePrimaryRangeValues collation left right =
+    match left, right with
+    | VString a, VString b -> (Collation.findOrDefault collation).ComparePrimary a b
+    | _ -> compareIndexedValues collation left right
 
 let private isTextPrimaryKeyType = function TChar _ | TVarchar _ -> true | _ -> false
 
-let internal supportsPrimaryRangeKeyType = function
+let private supportsNonTextPrimaryRange = function
     | TDecimal _ | TBinary _ | TVarBinary _ -> true
     | columnType -> isIntegerKeyType columnType
 
 let private supportsPrimaryPointGap columnType =
-    supportsPrimaryRangeKeyType columnType || isTextPrimaryKeyType columnType
+    supportsNonTextPrimaryRange columnType || isTextPrimaryKeyType columnType
+
+// Physical text ties can break by spelling before the suffix. A text
+// range is contiguous when the text column is the final key part.
+let internal supportsPrimaryRangeKeyTypes types =
+    let rec check = function
+        | [] -> true
+        | [ final ] -> supportsPrimaryPointGap final
+        | first :: rest -> supportsNonTextPrimaryRange first && check rest
+    check types
+
+let internal normalizePrimaryTextBound columnType collation value =
+    match columnType, value with
+    | TChar _, VString text ->
+        let trimmed = text.TrimEnd(' ')
+        if (Collation.findOrDefault collation).Equals text trimmed then VString trimmed else value
+    | _ -> value
+
+let private normalizePrimaryBounds (table: Table) indices values =
+    List.map2 (fun index value ->
+        let column = table.Columns.[index]
+        normalizePrimaryTextBound column.Type column.Collation value) indices values
+
+let internal tryPrimaryRangePrefix store (table: Table) (values: Value list) =
+    uniqueKeyGroups table
+    |> List.tryFind (fun group ->
+        group.Name = "PRIMARY" && indexesWholeColumns group && values.Length <= group.Indices.Length)
+    |> Option.bind (fun group ->
+        let indices = List.take values.Length group.Indices
+        let collation index = table.Columns.[index].Collation
+        let bounds = normalizePrimaryBounds table indices values
+        exactPrimaryValues store table indices bounds
+        |> Option.map (List.map2 (collation >> canonicalGapPart) indices))
 
 let private tryPrimaryGapPoint width key =
     tryPrimaryGapLockValues width key |> Option.map (fun parts -> PrimaryPoint(key, parts))
@@ -6802,6 +6860,7 @@ let internal tryLockingPrimaryPoint store (table: Table) values =
         group.Name = "PRIMARY" && indexesWholeColumns group && sameLength values group.Indices
         && List.forall (fun index -> supportsPrimaryPointGap table.Columns.[index].Type) group.Indices)
     |> Option.bind (fun group ->
+        let values = normalizePrimaryBounds table group.Indices values
         exactPrimaryValues store table group.Indices values
         |> Option.bind (fun exact ->
             let key = encodeEqualityValues table.Columns group.Indices exact |> uniqueKeyLockName group
@@ -6835,52 +6894,56 @@ type private PrimaryGapAdmission =
     | GapHasPendingKey of PendingPrimaryKey
     | GapSkippedPoint
 
-let private isEqualityPrefix lower upper =
+let private equalInclusiveBounds lower upper =
     match lower, upper with
-    | Some(first, true), Some(last, true) -> first = last
+    | Some(first, true), Some(last, true) when first = last -> Some first
+    | _ -> None
+
+let private isCollatedPointRange lower upper =
+    match equalInclusiveBounds lower upper |> Option.bind List.tryLast with
+    | Some(VString _) -> true
     | _ -> false
+
+let private isPrefixSeek lower upper =
+    match equalInclusiveBounds lower upper |> Option.bind List.tryLast with
+    | Some(VString _) | None -> false
+    | Some _ -> true
 
 let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database: string) tableName scan deferPending read =
     match snapshot.TransactionLocks, tableAt snapshot database tableName with
     | Some context, Some observed ->
         let tableKey = normalizeTableName tableName
         let database = database.ToLowerInvariant()
-        let supportsKeyPart column =
-            let columnType = observed.Columns.[column].Type
+        let supportsKeyTypes indices =
+            let types = indices |> List.map (fun column -> observed.Columns.[column].Type)
             match read with
-            | PrimaryPoint _ -> supportsPrimaryPointGap columnType
-            | PrimaryRange _ -> supportsPrimaryRangeKeyType columnType
+            | PrimaryPoint _ -> List.forall supportsPrimaryPointGap types
+            | PrimaryRange _ -> supportsPrimaryRangeKeyTypes types
         uniqueKeyGroups observed
         |> List.tryFind (fun group ->
             group.Name = "PRIMARY" && indexesWholeColumns group
-            && List.forall supportsKeyPart group.Indices
+            && supportsKeyTypes group.Indices
             && (match read with
                 | PrimaryPoint(_, values) -> values.Length = group.Indices.Length
                 | PrimaryRange _ -> true))
         |> Option.map (fun group ->
             let width = group.Indices.Length
             let hasText = group.Indices |> List.exists (fun index -> isTextPrimaryKeyType observed.Columns.[index].Type)
-            // Point probes are decoded from the lock key, where text is
-            // already canonicalized to the column's collation.
-            let encode (table: Table) values =
-                let encoded =
-                    if hasText then
-                        List.map2 (fun index value ->
-                            match value with
-                            | VString key -> string (key.Length + 1) + ":S" + key
-                            | _ -> encodeEqualityValues table.Columns [ index ] [ value ]) group.Indices values
-                        |> String.concat ""
-                    else encodeEqualityValues table.Columns group.Indices values
-                primaryLockKeyPrefix + encoded
-            let collations = group.Indices |> List.map (fun column -> observed.Columns.[column].Collation)
-            let gapCollations = if hasText then List.replicate width (Some "binary") else collations
-            let compare = compareIndexedKeys gapCollations group.Directions
+            // Pending keys, seek bounds, and gap boundaries all carry
+            // collation weights in place of the original text.
+            let encode (values: Value list) =
+                let indices = List.take values.Length group.Indices
+                if hasText then
+                    List.map2 (fun index value ->
+                        match value with
+                        | VString key -> string (key.Length + 1) + ":S" + key
+                        | _ -> encodeEqualityValues observed.Columns [ index ] [ value ]) indices values
+                    |> String.concat ""
+                else encodeEqualityValues observed.Columns indices values
+            let compare = compareGapKeys group.Directions
             let compareToPrefix (prefix: Value list) candidate =
-                if hasText then compare candidate prefix
-                else
-                    let length = prefix.Length
-                    compareIndexedKeys (List.take length collations) (List.take length group.Directions)
-                        (List.take length candidate) prefix
+                let length = prefix.Length
+                compareGapKeys (List.take length group.Directions) (List.take length candidate) prefix
             let contains (table: Table) (key: string) =
                 table.UniqueIndex |> Map.tryFind "PRIMARY"
                 |> Option.exists (Map.containsKey (key.Substring(primaryLockKeyPrefix.Length)))
@@ -6897,9 +6960,7 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
                 | PrimaryPoint(key, values) -> key, Some(values, false), Some(values, false)
                 | PrimaryRange(lower, upper) ->
                     let identity = function
-                        | Some(values: Value list, inclusive) ->
-                            encodeEqualityValues observed.Columns (List.take values.Length group.Indices) values
-                            + (if inclusive then "i" else "e")
+                        | Some(values, inclusive) -> encode values + (if inclusive then "i" else "e")
                         | None -> "-"
                     let anchor (values: Value list, inclusive) = values, values.Length = width || not inclusive
                     let prefix =
@@ -6919,6 +6980,10 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
                         match scan with
                         | CursorNextKeyGap -> Option.map (fun (key, _) -> key, false) upper, upper
                         | CursorUpperGap -> upper, Option.map (fun (key, inclusive) -> key, not inclusive) upper
+                        | OrdinaryGap | LimitedGap(ForwardScan, false) when isCollatedPointRange lower upper ->
+                            // Equivalent spellings can form a range that
+                            // runs through the gap after its only candidate.
+                            Option.map anchor lower, Option.map (fun (key, _) -> key, false) upper
                         | _ when reverse ->
                             Option.map (fun (values, _) -> values, scan = RetainedReverseSeekGap) lower,
                             Option.map (fun (values, inclusive) -> values, not inclusive) upper
@@ -6950,16 +7015,20 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
             let neighbor lower inclusive pivot (table: Table) =
                 table.SecondaryOrder |> Map.tryFind "PRIMARY"
                 |> Option.bind (fun entries ->
-                    if hasText then textPrimaryGapNeighbor lower compare pivot entries
-                    else
-                        let first, after = orderedPrefixBounds entries pivot
+                    match read with
+                    | PrimaryPoint _ when hasText -> textPrimaryGapNeighbor lower compare pivot entries
+                    | _ ->
+                        let seek = if hasText then primaryRangePrefixBounds else orderedPrefixBounds
+                        let first, after = seek entries pivot
                         let index =
                             match lower, inclusive with
                             | true, true -> after - 1
                             | true, false -> first - 1
                             | false, true -> first
                             | false, false -> after
-                        if index >= 0 && index < entries.Count then Some entries.[index].Values else None)
+                        if index < 0 || index >= entries.Count then None
+                        elif hasText then Some(canonicalRangeKey entries.[index])
+                        else Some entries.[index].Values)
 
             let nearest lower (pivot, inclusive) table =
                 let improves candidate bound =
@@ -6981,7 +7050,11 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
 
             let lastKey table =
                 table.SecondaryOrder |> Map.tryFind "PRIMARY"
-                |> Option.bind (fun entries -> if entries.IsEmpty then None else Some entries.[entries.Count - 1].Values)
+                |> Option.bind (fun entries ->
+                    if entries.IsEmpty then None
+                    else
+                        let entry = entries.[entries.Count - 1]
+                        Some(if hasText then canonicalRangeKey entry else entry.Values))
 
             let lastBoundary table =
                 seq {
@@ -7006,7 +7079,7 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
                            && (stripe.Gap |> Option.exists (fun (key, _) -> key = gapIdentity)) then
                             alreadyHeld <- true)
                     if not alreadyHeld then
-                        let boundary key = { Values = key; LockKey = encode observed key }
+                        let boundary key = { Values = key; LockKey = primaryLockKeyPrefix + encode key }
                         let lowerAnchor =
                             // The cursor advances past the skipped row and locks the gap before its successor.
                             if skippedPoint && (isVisibleInAnyReadView table probe || (exactKeyOwner cache probe).IsSome) then
@@ -7021,11 +7094,12 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
                         let mutable lower = lowerAnchor |> Option.map boundary
                         let upperAnchor =
                             match read with
-                            // An inclusive descending scan can reach the end of the index.
+                            // An exhausted scan can reach the end of the index
+                            // after admitting an inclusive upper boundary.
                             | PrimaryRange(_, Some(stoppingKey, true))
                                 when not reverse && scan <> LimitedGap(ForwardScan, true)
                                      && scan <> RetainedRangeGap ForwardScan && scan <> CursorNextKeyGap
-                                     && group.Directions = [ Desc ]
+                                     && (hasText || group.Directions = [ Desc ])
                                      && (nearest false (stoppingKey, false) table).IsNone ->
                                 None
                             | _ -> upper |> Option.bind (fun edge -> nearest false edge table)
@@ -7168,12 +7242,12 @@ type private PrimaryRangeSelection =
 let private primaryRangeBounds (entries: ImmutableSortedSet<SecondaryOrderEntry>) lower upper =
     let start =
         lower |> Option.map (fun (values, inclusive) ->
-            let first, after = orderedPrefixBounds entries values
+            let first, after = primaryRangePrefixBounds entries values
             if inclusive then first else after)
         |> Option.defaultValue 0
     let finish =
         upper |> Option.map (fun (values, inclusive) ->
-            let first, after = orderedPrefixBounds entries values
+            let first, after = primaryRangePrefixBounds entries values
             if inclusive then after else first)
         |> Option.defaultValue entries.Count
     start, finish
@@ -7183,19 +7257,20 @@ let private primaryRangeRows (table: Table) lower upper limit probeForwardEnd =
     match Map.tryFind "PRIMARY" table.SecondaryOrder with
     | None -> empty
     | Some entries ->
+        let key index = canonicalRangeKey entries.[index]
         let row index =
             let entry = entries.[index]
-            entry.RowId, entry.Values
+            entry.RowId, canonicalRangeKey entry
 
         let start, finish = primaryRangeBounds entries lower upper
         match limit with
-        | Some(ReverseScan, _) when start = finish && isEqualityPrefix lower upper -> empty
+        | Some(ReverseScan, _) when start = finish && isPrefixSeek lower upper -> empty
         | Some(ReverseScan, count) ->
             // An exhausted reverse scan tests the first record below the range.
             // That record is locked even though it fails the predicate.
             let last = if count <= finish - start then finish - count else max 0 (start - 1)
             { Rows = [ for index in finish - 1 .. -1 .. last do row index ]
-              Stop = if last < finish then Some entries.[last].Values else None
+              Stop = if last < finish then Some(key last) else None
               EndRecord = if last < start && last < finish then Some entries.[last].RowId else None }
         | _ ->
             let stop = limit |> Option.map snd |> Option.filter (fun count -> count <= finish - start)
@@ -7203,11 +7278,11 @@ let private primaryRangeRows (table: Table) lower upper limit probeForwardEnd =
             if probeForwardEnd && stop.IsNone && finish < entries.Count then
                 // At lower isolation, the forward cursor checks the first rejected record without keeping its lock.
                 { Rows = [ for index in start .. finish do row index ]
-                  Stop = Some entries.[finish].Values
+                  Stop = Some(key finish)
                   EndRecord = Some entries.[finish].RowId }
             else
                 { Rows = [ for index in start .. after - 1 do row index ]
-                  Stop = stop |> Option.map (fun _ -> entries.[after - 1].Values)
+                  Stop = stop |> Option.map (fun _ -> key (after - 1))
                   EndRecord = None }
 
 let private primaryReadTable (plan: PrimaryReadPlan) snapshot =
@@ -7440,7 +7515,7 @@ let private lockPrimaryRange timeout (live: Store) (refresh: unit -> Store) stre
         let stoppingEdge = stop |> Option.map (fun key -> key, true)
         let scan, read =
             match direction with
-            | ReverseScan when plan.ReadGaps && stop.IsNone && isEqualityPrefix lower upper -> EmptyReversePrefixGap, PrimaryRange(lower, upper)
+            | ReverseScan when plan.ReadGaps && stop.IsNone && isPrefixSeek lower upper -> EmptyReversePrefixGap, PrimaryRange(lower, upper)
             | ReverseScan -> limitedGap ReverseScan stop.IsSome, PrimaryRange(stoppingEdge, upper)
             | ForwardScan when not plan.ReadGaps -> limitedGap ForwardScan stop.IsSome, PrimaryRange(lower, stoppingEdge)
             | ForwardScan -> limitedGap ForwardScan stop.IsSome, PrimaryRange(lower, stoppingEdge |> Option.orElse upper)
@@ -7517,6 +7592,7 @@ let private lockPrimarySkipRange (live: Store) refresh strength (plan: PrimaryRe
                 | Some entries ->
                     let start, finish = primaryRangeBounds entries lower upper
                     let forward = direction = ForwardScan
+                    let includeSuccessor = isCollatedPointRange lower upper
                     if not forward then upperGap ()
                     let step = if forward then 1 else -1
                     let complete offset selected = List.rev selected, plan.ReadOffset - offset
@@ -7531,16 +7607,27 @@ let private lockPrimarySkipRange (live: Store) refresh strength (plan: PrimaryRe
                             let entry = entries.[index]
                             let matches = index >= start && index < finish
                             let probe = not plan.ReadGaps && (if matches then offset > 0 else forward)
-                            if not matches && not forward && isEqualityPrefix lower upper then
+                            if not matches && not forward && isPrefixSeek lower upper then
                                 // A reverse prefix seek protects the predecessor's gap without locking its row.
-                                recordGap entry.Values
+                                if plan.ReadGaps then recordGap (canonicalRangeKey entry)
                                 complete offset selected
                             elif not (claim entry.RowId probe) then visit (index + step) offset remaining selected
                             else
-                                recordGap entry.Values
+                                let endsAtRecord =
+                                    if plan.ReadGaps then
+                                        let key = canonicalRangeKey entry
+                                        let edge = Some(key, true)
+                                        // A forward seek can start and end at exact
+                                        // records without visiting their outer gaps.
+                                        if not (forward && index = start && lower = edge) then recordGap key
+                                        forward && index + 1 < entries.Count && upper = edge && not includeSuccessor
+                                    else false
+                                let advance offset selected =
+                                    if endsAtRecord then complete offset selected
+                                    else visit (index + step) offset (remaining - 1) selected
                                 if not matches then complete offset selected
-                                elif offset > 0 then visit (index + step) (offset - 1) (remaining - 1) selected
-                                else visit (index + step) 0 (remaining - 1) (entry.Values :: selected)
+                                elif offset > 0 then advance (offset - 1) selected
+                                else advance 0 (entry.Values :: selected)
                     let first = if forward then start else finish - 1
                     visit first plan.ReadOffset count []
 

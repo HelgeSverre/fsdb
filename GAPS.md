@@ -3199,8 +3199,10 @@ implementation effort:
    honor ordered limits for blocking, NOWAIT, and SKIP LOCKED reads.
    Audited reverse composite filesorts acquire locks in scan order and
    apply the limit and offset after sorting. At lower isolation, a blocking
-   offset scan retains a row it had to wait for. Collated text ranges and
-   competing secondary-index plans remain open.
+   offset scan retains a row it had to wait for. [Collated primary-key ranges](torture/findings/2026-11-27-missing-primary-write-gaps.md#collated-primary-key-ranges)
+   use the column collation for endpoints and pending writes when text is
+   the last key part. Ranges over composite keys with an earlier text
+   part and competing secondary-index plans remain open.
    Literal equality
    on the writable physical target avoids waiting for an unrelated row, and
    generic joined writes now lock their matched rows at storage publication.
