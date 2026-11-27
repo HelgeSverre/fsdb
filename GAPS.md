@@ -967,8 +967,9 @@ record ownership remain open.
 The [blocking form](torture/findings/2026-11-27-ordered-secondary-locking.md#blocking-reads)
 waits for a pending insert or row lock before the limit and reopens the
 seek after the blocker resolves. Audited timeouts retain the visited
-prefix. A rolled-back secondary-key change can still leave an extra
-READ COMMITTED OFFSET row lock.
+prefix. A [rolled-back secondary-key change](torture/findings/2026-11-27-ordered-secondary-locking.md#rolled-back-key-changes-at-offset)
+now releases the skipped READ COMMITTED OFFSET record in the audited
+scans, while payload-only updates keep their waited-on lock.
 [Locking reads with `LIMIT 0` and no offset](torture/findings/2026-11-27-missing-primary-write-gaps.md#locking-reads-with-limit-0)
 validate the statement and retain table metadata without claiming rows,
 including when the locking read is inside a subquery, CTE, or UNION.

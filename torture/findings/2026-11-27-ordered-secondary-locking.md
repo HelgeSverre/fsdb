@@ -66,6 +66,21 @@ The pinned MySQL comparison matched the wait decision and result in all
 pending inserts and existing row locks before and after the limit,
 secondary-key changes, commit and rollback, both traversal directions,
 and OFFSET under READ COMMITTED and REPEATABLE READ. The primary row
-ownership probes matched in 248 schedules. In the other eight, a
-READ COMMITTED OFFSET consumed a row whose pending secondary-key change
-was rolled back. Fsdb retained that row lock and MySQL released it.
+ownership probes now match in all 256 schedules in both modes.
+
+## Rolled-back key changes at OFFSET
+
+At READ COMMITTED, a pending secondary-key move can make the cursor wait
+on a record it will skip for OFFSET. When the writer rolls back, the cursor
+returns the next row and releases the skipped record. A payload-only update,
+an update to a different index, or a key change reversed by a second UPDATE
+allows the skipped record to remain locked. At REPEATABLE READ the skipped
+record remains locked after a key change rolls back.
+
+Fsdb previously retained the skipped record in eight schedules covering
+both directions, integer and DECIMAL keys, and moves within and out of
+the equality slice. The cursor now checks the blocking owner's last row
+image when it resumes and reopens the seek after dropping its new claim
+on a rewritten OFFSET record. Reopening preserves locks the cursor
+already held. Additional MySQL comparisons covered reversals in the same
+transaction, updates to a different index, and rollback to a savepoint.

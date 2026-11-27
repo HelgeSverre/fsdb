@@ -8674,6 +8674,45 @@ let tests =
                   Expect.isTrue wasWaiting "the reader enters the wait graph before the holder ends"
                   Expect.equal result (ResultSet([ "id" ], [ [ Some expected ] ])) "the seek reopens on the current index"
 
+          testCase "ordered secondary offset releases a record rewritten by a rolled-back update"
+          <| fun _ ->
+              for isolation, changes, retainsOffset in
+                  [ "READ COMMITTED", [ "stamp=40" ], false
+                    "READ COMMITTED", [ "payload=1" ], true
+                    "READ COMMITTED", [ "stamp=40"; "stamp=10" ], true
+                    "REPEATABLE READ", [ "stamp=40" ], true ] do
+                  let store = Fsdb.Storage.create ()
+                  let run session sql count =
+                      let next, result = handle session sql
+                      Expect.equal result (Affected count) sql
+                      next
+                  let owner = create 1 store
+                  run owner "CREATE TABLE jobs(id INT PRIMARY KEY,k INT,stamp INT,payload INT,KEY ix(k,stamp,id),KEY by_payload(k,payload,id))" 0UL |> ignore
+                  run owner "INSERT INTO jobs VALUES(10,7,10,0),(30,7,30,0)" 2UL |> ignore
+                  let holder = run owner "BEGIN" 0UL
+                  let holder = (holder, changes) ||> List.fold (fun current change -> run current $"UPDATE jobs SET {change} WHERE id=10" 1UL)
+                  let reader = run (create 2 store) $"SET TRANSACTION ISOLATION LEVEL {isolation}" 0UL
+                  let reader = run reader "SET innodb_lock_wait_timeout=5" 0UL
+                  let reader = run reader "BEGIN" 0UL
+                  let waiting = Threading.Tasks.Task.Run(fun () ->
+                      handle reader "SELECT id FROM jobs FORCE INDEX(ix) WHERE k=7 ORDER BY stamp,id LIMIT 1 OFFSET 1 FOR UPDATE")
+                  let blocked () = lock store.LockWaits.SyncRoot (fun () -> store.LockWaits.Edges.Count > 0)
+                  let entered = Threading.SpinWait.SpinUntil((fun () -> blocked () || waiting.IsCompleted), TimeSpan.FromSeconds 3.0)
+                  let wasWaiting = entered && blocked ()
+                  run holder "ROLLBACK" 0UL |> ignore
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the read finishes after rollback"
+                  let reader, result = waiting.Result
+                  let probe id = handle (create 3 store) $"SELECT id FROM jobs WHERE id={id} FOR UPDATE NOWAIT" |> snd
+                  let offsetRow, returnedRow = probe 10, probe 30
+                  run reader "ROLLBACK" 0UL |> ignore
+                  Expect.isTrue wasWaiting "the reader waited on the offset record"
+                  Expect.equal result (ResultSet([ "id" ], [ [ Some "30" ] ])) "the read uses the restored index order"
+                  TestSupport.Sql.expectError 3572 returnedRow "the returned row stays locked"
+                  if retainsOffset then
+                      TestSupport.Sql.expectError 3572 offsetRow "the skipped row stays locked"
+                  else
+                      Expect.equal offsetRow (ResultSet([ "id" ], [ [ Some "10" ] ])) "the restored offset record is unlocked"
+
           testCase "ordered secondary blocking read retains its visited prefix on timeout"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

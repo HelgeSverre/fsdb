@@ -460,9 +460,12 @@ let splitQualified (defaultDb: string) (name: string) : string * string =
 
 type KeyLockActivity = { mutable Owners: int64 }
 
+type TransactionRowWrites = Lazy<Dictionary<struct (string * string * int64 * RowId), Value[]>>
+
 type RowLockStripe =
     { SyncRoot: obj
       mutable ExclusiveOwner: int64 option
+      mutable ExclusiveRowWrites: TransactionRowWrites option
       SharedOwners: HashSet<int64>
       KeyActivity: KeyLockActivity option
       // Gap claims use the same release and wait machinery as row stripes.
@@ -483,6 +486,7 @@ type TransactionLockContext =
     { Owner: int64
       HeldStripes: Collections.Generic.HashSet<RowLockStripe>
       LockClaims: Collections.Generic.HashSet<TransactionLockClaim>
+      RowWrites: TransactionRowWrites
       mutable RollbackWork: int64
       mutable DeadlockVictim: bool
       mutable DynamicWriteRebase: DynamicWriteRebase option }
@@ -521,6 +525,7 @@ let private rowLockStripeCount = 4096
 let private createRowLockStripe () =
     { SyncRoot = obj ()
       ExclusiveOwner = None
+      ExclusiveRowWrites = None
       SharedOwners = HashSet()
       KeyActivity = None
       Gap = None }
@@ -528,6 +533,7 @@ let private createRowLockStripe () =
 let private createKeyLockStripe syncRoot activity =
     { SyncRoot = syncRoot
       ExclusiveOwner = None
+      ExclusiveRowWrites = None
       SharedOwners = HashSet()
       KeyActivity = Some activity
       Gap = None }
@@ -807,6 +813,27 @@ let private recordRollbackWork (store: Store) events =
             Threading.Interlocked.Add(&context.RollbackWork, work) |> ignore
     | None -> ()
 
+// The waiting cursor can still inspect the writer's last row image after the
+// stripe is released. Full rollback leaves that image in place for the waiter.
+let private recordTransactionRowWrites (store: Store) events =
+    store.TransactionLocks |> Option.iter (fun context ->
+        for event in events do
+            match event with
+            | RowsUpdatedById(database, name, changes) ->
+                match store.Databases.TryGetValue database with
+                | true, tables ->
+                    let name = name.ToLowerInvariant()
+                    match Map.tryFind name tables.Value with
+                    | Some table when table.SecondaryOrder |> Map.exists (fun name _ -> name <> "PRIMARY") ->
+                        let database = database.ToLowerInvariant()
+                        let writes = context.RowWrites.Value
+                        lock writes (fun () ->
+                            for change in changes do
+                                writes.[struct (database, name, table.SchemaRevision, change.RowId)] <- change.After)
+                    | _ -> ()
+                | _ -> ()
+            | _ -> ())
+
 let private preparePublishedEvents (store: Store) (durableEvents: CommitEvent list) (observerEvents: CommitEvent list) =
     let durableAction =
         lock store.CommitLock (fun () ->
@@ -886,6 +913,7 @@ let private captureFullTextStopwords (store: Store) event captured =
     | _ -> captured
 
 let private prepareEvents (store: Store) (events: CommitEvent list) : unit -> unit =
+    recordTransactionRowWrites store events
     let events =
         events |> List.map (fun event ->
             let captured =
@@ -994,6 +1022,7 @@ let private createTransactionLockContext owner =
     { Owner = owner
       HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference)
       LockClaims = Collections.Generic.HashSet<TransactionLockClaim>()
+      RowWrites = lazy (Dictionary())
       RollbackWork = 0L
       DeadlockVictim = false
       DynamicWriteRebase = None }
@@ -1102,6 +1131,7 @@ let private releaseLockStripes (context: TransactionLockContext) (stripes: seq<R
 
             if releasedExclusive then
                 stripe.ExclusiveOwner <- None
+                stripe.ExclusiveRowWrites <- None
                 stripe.KeyActivity
                 |> Option.iter (fun activity -> Threading.Interlocked.Decrement(&activity.Owners) |> ignore)
 
@@ -1188,6 +1218,7 @@ let withTransactionLockCheckpoint (store: Store) (body: unit -> 'a) : 'a =
 
                     if releasedExclusive then
                         stripe.ExclusiveOwner <- None
+                        stripe.ExclusiveRowWrites <- None
                         stripe.KeyActivity
                         |> Option.iter (fun activity -> Threading.Interlocked.Decrement(&activity.Owners) |> ignore)
 
@@ -4492,6 +4523,8 @@ let private acquireStripeWithBlockers
         | SharedStripe -> stripe.SharedOwners.Add context.Owner |> ignore
         | ExclusiveStripe ->
             if stripe.ExclusiveOwner.IsNone then
+                if stripe.KeyActivity.IsNone && stripe.Gap.IsNone then
+                    stripe.ExclusiveRowWrites <- Some context.RowWrites
                 stripe.KeyActivity
                 |> Option.iter (fun activity -> Threading.Interlocked.Increment(&activity.Owners) |> ignore)
             stripe.ExclusiveOwner <- Some context.Owner
@@ -4958,16 +4991,22 @@ let private transactionReadStripeIndex rowId =
 
 let private transactionReadMode = function ShareLock -> SharedStripe | UpdateLock -> ExclusiveStripe
 
-let private checkTransactionReadTarget (store: Store) dbName tableName strength rowId =
+let private conflictingTransactionReadTarget (store: Store) dbName tableName strength rowId =
     match store.TransactionLocks, store.RowLocks.TryGetValue(lockNamespaceKey dbName tableName) with
     | Some context, (true, rows) ->
         match rows.TryGetValue(transactionReadStripeIndex rowId) with
         | true, stripe ->
             lock stripe.SyncRoot (fun () ->
-                if not (stripeAvailable context.Owner (transactionReadMode strength) stripe) then
-                    raise (LockNowait dbName))
-        | _ -> ()
-    | _ -> ()
+                if stripeAvailable context.Owner (transactionReadMode strength) stripe then None
+                else
+                    let writes = if stripe.ExclusiveOwner = Some context.Owner then None else stripe.ExclusiveRowWrites
+                    Some writes)
+        | _ -> None
+    | _ -> None
+
+let private checkTransactionReadTarget store dbName tableName strength rowId =
+    if conflictingTransactionReadTarget store dbName tableName strength rowId |> Option.isSome then
+        raise (LockNowait dbName)
 
 let private acquireTransactionReadTargetsWith
     (timeout: TimeSpan)
@@ -7185,6 +7224,7 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
                         let stripe =
                             { SyncRoot = cache.SyncRoot
                               ExclusiveOwner = None
+                              ExclusiveRowWrites = None
                               SharedOwners = HashSet([ context.Owner ])
                               KeyActivity = None
                               Gap = Some(gapIdentity, blocks) }
@@ -8588,10 +8628,10 @@ exception private ReopenOrderedSecondaryRead of Store
 type private OrderedSecondaryReadConflict =
     | SecondaryNowait
     | SecondaryPendingKey of string
-    | SecondaryLockedRow of RowId * Value list
+    | SecondaryLockedRow of RowId * Value list * TransactionRowWrites option
 
 exception private OrderedSecondaryPending of string
-exception private OrderedSecondaryRowLocked of RowId * Value list
+exception private OrderedSecondaryRowLocked of RowId * Value list * TransactionRowWrites option
 
 let internal tryLockOrderedSecondaryRead
     timeout (store: Store) refresh database tableName indexName terms prefixValues strength wait releaseOffset offset limit =
@@ -8672,8 +8712,11 @@ let internal tryLockOrderedSecondaryRead
                                     // Lower-isolation OFFSET records only retain
                                     // a row lock if the cursor had to wait.
                                     if releaseOffset && ids.Count < offset then
-                                        checkTransactionReadTarget current database tableName strength entry.RowId
-                                        ids.Add entry.RowId
+                                        match conflictingTransactionReadTarget current database tableName strength entry.RowId with
+                                        | None -> ids.Add entry.RowId
+                                        | Some _ when wait = SkipLocked -> ()
+                                        | Some _ when wait = NoWait -> raise (LockNowait database)
+                                        | Some writes -> raise (OrderedSecondaryRowLocked(entry.RowId, entry.Values, writes))
                                     else
                                         let admission = if wait = WaitForLocks then NoWait else wait
                                         let locked =
@@ -8682,7 +8725,7 @@ let internal tryLockOrderedSecondaryRead
                                 with
                                 | LockNowait _ when wait = SkipLocked -> ()
                                 | LockNowait _ when wait = WaitForLocks ->
-                                    raise (OrderedSecondaryRowLocked(entry.RowId, entry.Values))
+                                    raise (OrderedSecondaryRowLocked(entry.RowId, entry.Values, None))
                             if ids.Count < limit then nextPending |> Option.iter (snd >> stopAtPending)
                             let consumedOffset = min offset ids.Count
                             ids |> Seq.skip consumedOffset |> Set.ofSeq, consumedOffset
@@ -8700,7 +8743,7 @@ let internal tryLockOrderedSecondaryRead
                                         with
                                         | LockNowait _ -> Error SecondaryNowait
                                         | OrderedSecondaryPending claim -> Error(SecondaryPendingKey claim)
-                                        | OrderedSecondaryRowLocked(id, key) -> Error(SecondaryLockedRow(id, key))
+                                        | OrderedSecondaryRowLocked(id, key, writes) -> Error(SecondaryLockedRow(id, key, writes))
                                     match scanned with
                                     | Error conflict -> Error conflict
                                     | Ok(rows, offset) ->
@@ -8713,7 +8756,7 @@ let internal tryLockOrderedSecondaryRead
                                     | Error(SecondaryPendingKey claim) ->
                                         waitForTransactionReadDependencies timeout current database tableName [ claim ] []
                                         Some(Error(refresh ()))
-                                    | Error(SecondaryLockedRow(id, key)) ->
+                                    | Error(SecondaryLockedRow(id, key, writes)) ->
                                         withTransactionLockCheckpoint current (fun () ->
                                             acquireTransactionReadTargets timeout current database tableName strength WaitForLocks [ id ]
                                             |> ignore
@@ -8723,9 +8766,21 @@ let internal tryLockOrderedSecondaryRead
                                                 |> Option.filter (fun candidate -> candidate.SchemaRevision = table.SchemaRevision)
                                                 |> Option.bind (fun candidate -> candidate.RowsArray.TryFind id)
                                                 |> Option.exists (fun row -> List.map (fun index -> row.[index]) group.Indices = key)
+                                            let rewritten =
+                                                match writes with
+                                                | Some journal when journal.IsValueCreated ->
+                                                    let rows = journal.Value
+                                                    let address = struct (database.ToLowerInvariant(), normalizeTableName tableName, table.SchemaRevision, id)
+                                                    lock rows (fun () ->
+                                                        match rows.TryGetValue address with
+                                                        | true, row -> List.map (fun index -> row.[index]) group.Indices <> key
+                                                        | _ -> false)
+                                                | _ -> false
                                             // A deleted or moved entry is no longer the
-                                            // record this cursor was waiting to visit.
-                                            if not stillAtKey then raise (ReopenOrderedSecondaryRead latest)
+                                            // record this cursor was waiting to visit. At
+                                            // lower isolation a rewritten OFFSET entry is
+                                            // revisited even if rollback restored its key.
+                                            if not stillAtKey || rewritten then raise (ReopenOrderedSecondaryRead latest)
                                             Some(Error latest))
                             with ReopenOrderedSecondaryRead latest -> Some(Error latest)))))
 
