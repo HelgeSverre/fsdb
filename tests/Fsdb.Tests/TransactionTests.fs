@@ -8441,4 +8441,40 @@ let tests =
                   TestSupport.Sql.expectOk (handle second "ROLLBACK" |> snd) "end the second reader"
                   TestSupport.Sql.expectOk (handle first "ROLLBACK" |> snd) "end the first reader"
                   Expect.equal result (ResultSet([ "n" ], [])) "two exact misses can coexist"
-                  Expect.equal updated (Affected 1UL) "the missing seek does not lock an unrelated row" ]
+                  Expect.equal updated (Affected 1UL) "the missing seek does not lock an unrelated row"
+
+          testCase "exact primary reads with NOWAIT or SKIP LOCKED protect the MySQL gap"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let empty = ResultSet([ "n" ], [])
+              for mode, pending, isolation, explicitTransaction in
+                  [ "NOWAIT", true, "REPEATABLE READ", false
+                    "NOWAIT", true, "REPEATABLE READ", true
+                    "NOWAIT", false, "REPEATABLE READ", true
+                    "SKIP LOCKED", true, "REPEATABLE READ", true
+                    "SKIP LOCKED", true, "READ COMMITTED", true ] do
+                  let store = Fsdb.Storage.create ()
+                  let writer = run (create 1 store) "SET innodb_lock_wait_timeout=1" (Affected 0UL)
+                  run writer "CREATE TABLE gate (id VARCHAR(6) COLLATE utf8mb4_0900_ai_ci PRIMARY KEY,n INT)" (Affected 0UL) |> ignore
+                  run writer "INSERT INTO gate VALUES ('a',1),('f',6)" (Affected 2UL) |> ignore
+                  let holder = run (create 2 store) "START TRANSACTION" (Affected 0UL)
+                  let holder = if pending then run holder "INSERT INTO gate VALUES ('c',3)" (Affected 1UL) else holder
+                  let reader = run (create 3 store) $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                  let reader = if explicitTransaction then run reader "START TRANSACTION" (Affected 0UL) else reader
+                  let reader, result = handle reader $"SELECT n FROM gate WHERE id='C' FOR SHARE {mode}"
+                  if pending && mode = "NOWAIT" then TestSupport.Sql.expectError 3572 result "the pending key conflicts immediately"
+                  else Expect.equal result empty mode
+                  if pending && mode = "SKIP LOCKED" then
+                      run writer "INSERT INTO gate VALUES ('b',2)" (Affected 1UL) |> ignore
+                  run holder "ROLLBACK" (Affected 0UL) |> ignore
+                  let insert = "INSERT INTO gate VALUES ('d',4)"
+                  let gap = handle writer insert |> snd
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+                  if isolation = "REPEATABLE READ" && (not pending || mode = "SKIP LOCKED") then
+                      TestSupport.Sql.expectError 1205 gap "the gap remains protected until the reader ends"
+                      run writer insert (Affected 1UL) |> ignore
+                  else Expect.equal gap (Affected 1UL) "the neighboring insert can proceed" ]

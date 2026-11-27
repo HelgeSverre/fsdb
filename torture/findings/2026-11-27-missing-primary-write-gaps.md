@@ -102,11 +102,50 @@ the neighboring gap open. If the writer rolls back, the reader returns
 no rows and protects the gap at REPEATABLE READ. At READ COMMITTED and
 READ UNCOMMITTED, the reader also waits for the exact key, and the
 neighboring gap remains open whichever way the writer finishes.
-Secondary-key reads, noninteger primary ranges, and nondefault wait
-modes remain outside this coverage.
+Secondary-key reads and noninteger primary ranges remain outside this coverage.
 
 All 108 schedules matched MySQL 8.4.11 in memory and with WAL enabled.
 The matrix covered seven key fixtures at four isolation levels, with
 `FOR UPDATE`, `FOR SHARE`, and plain SELECT. Another 24 schedules
 covered pending inserts that committed or rolled back, including a
 shared lock on the row published after the wait.
+
+## Exact NOWAIT and SKIP LOCKED reads
+
+With `FOR UPDATE` and `FOR SHARE`, an exact primary-key `NOWAIT` read
+reports 3572 when another transaction holds the matching record or is
+inserting it. `SKIP LOCKED` returns an empty result for either conflict.
+The same conflict results apply to single statements in autocommit mode.
+At REPEATABLE READ and SERIALIZABLE, a genuine miss protects the gap
+around the search key with either wait option. When the read skips a
+conflicting key, it protects the gap after that key in index order.
+At READ COMMITTED and READ UNCOMMITTED, it leaves that gap open.
+[MySQL locking-read options](https://dev.mysql.com/doc/refman/8.4/en/select.html)
+
+For a reproduction, seed an integer primary key with 10 and 60. Leave
+an insert at 30 uncommitted in session A. In session B, start a
+REPEATABLE READ transaction and run
+`SELECT id FROM t WHERE id=30 FOR UPDATE SKIP LOCKED`. It returns no
+rows. Session C can insert 20. Inserting 40 times out until session B
+ends, even if session A first rolls back. The rollback of the pending
+insert also lets the protected gap expand to cover 30.
+
+The exact lookup checks the matching key before taking any gaps. A
+committed matching row can be locked without blocking an insert next to
+it.
+
+The 464 exact-key schedules matched MySQL 8.4.11 in memory and with WAL
+enabled. They covered integer, collated text, decimal, and binary keys,
+including a descending composite key and both outcomes of a pending
+insert. The autocommit schedules covered every isolation level.
+
+### Ordered range limits
+
+An ordered range with a nondefault wait mode still uses the general
+locking path. With keys 10, 20, 30, 40, and 50, use
+`SELECT id FROM t WHERE id BETWEEN 15 AND 45 ORDER BY id LIMIT 1 FOR UPDATE`.
+If another session holds 30, appending `NOWAIT` returns 20 in MySQL.
+Fsdb reports 3572 because it also checks key 30. If another session
+holds 20, appending `SKIP LOCKED` returns 30 in both engines. Fsdb also
+locks 40, so a concurrent update of that row times out. The same
+divergences occur for descending order and at READ COMMITTED.

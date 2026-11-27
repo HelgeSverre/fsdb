@@ -942,6 +942,9 @@ now protect missing keys and the visited range under REPEATABLE READ
 and SERIALIZABLE. [Exact primary-key locking reads](torture/findings/2026-11-27-missing-primary-write-gaps.md#exact-primary-key-locking-reads)
 also protect gaps for audited collated text, decimal, and binary keys.
 READ COMMITTED retains row-only locking for the audited reads.
+[Exact `NOWAIT` and `SKIP LOCKED` reads](torture/findings/2026-11-27-missing-primary-write-gaps.md#exact-nowait-and-skip-locked-reads)
+check pending inserts at the requested key and protect the audited gaps
+under REPEATABLE READ and SERIALIZABLE.
 
 [Unique secondary-key moves](torture/findings/2026-11-27-unique-secondary-key-moves.md)
 now hold the destination key through commit or rollback, including in a

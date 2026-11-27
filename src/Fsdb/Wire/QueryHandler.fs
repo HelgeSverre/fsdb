@@ -3491,8 +3491,8 @@ let private retainsTransactionMetadata session =
 
 let private primaryLockingSelect isolation (select: SelectStmt) =
     match isolation, select.Locking, select.From with
-    | Serializable, [], _ -> Some(ShareLock, select)
-    | _, [ { Wait = WaitForLocks } as locking ], Some(FromTable source) ->
+    | Serializable, [], _ -> Some(ShareLock, WaitForLocks, select)
+    | _, [ locking ], Some(FromTable source) ->
         let qualifier = source.Alias |> Option.defaultValue source.Table
         let targetsSource =
             match locking.Tables with
@@ -3502,7 +3502,7 @@ let private primaryLockingSelect isolation (select: SelectStmt) =
 
         // The primary-key path already acquires the requested locks.
         // Evaluate its rows without preparing a second locking scan.
-        if targetsSource then Some(locking.Strength, { select with Locking = [] })
+        if targetsSource then Some(locking.Strength, locking.Wait, { select with Locking = [] })
         else None
     | _ -> None
 
@@ -3721,10 +3721,13 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
                         withExecutionLimits (fun () ->
                             let readStore, readSelect =
                                 match session.Tx with
-                                | Some transaction when retainsTransactionAfterStatement session ->
+                                | Some transaction when
+                                    (match select.Locking with
+                                     | [ { Wait = (NoWait | SkipLocked) } ] -> true
+                                     | _ -> retainsTransactionAfterStatement session) ->
                                     let protectGaps = transaction.Isolation = RepeatableRead || transaction.Isolation = Serializable
                                     primaryLockingSelect transaction.Isolation select
-                                    |> Option.map (fun (strength, readSelect) ->
+                                    |> Option.map (fun (strength, wait, readSelect) ->
                                         match readSelect.From with
                                         | Some(FromTable source) ->
                                             let database = source.Database |> Option.defaultValue dbName
@@ -3741,10 +3744,12 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
                                                         // A locking read can open a replacement table first accessed after the snapshot.
                                                         if revision store <> revision session.Store then refresh () else store
                                                     else store
-                                                Executor.tryPrimaryRead protectGaps planningStore dbName readSelect
+                                                Executor.tryPrimaryRead protectGaps wait planningStore dbName readSelect
                                                 |> Option.map (fun (plan, orderedSelect) ->
-                                                    let readStore = Storage.lockPrimaryRead (lockWaitTimeout session) session.Store refresh strength plan
-                                                    readStore, orderedSelect)
+                                                    match Storage.lockPrimaryRead (lockWaitTimeout session) session.Store refresh strength plan with
+                                                    | Storage.ReadPrimary readStore -> readStore, orderedSelect
+                                                    | Storage.SkippedPrimaryPoint readStore ->
+                                                        readStore, { orderedSelect with Where = Some(Lit(VInt 0L)) })
                                                 |> Option.defaultValue (planningStore, select)
                                         | _ -> store, select)
                                     |> Option.defaultWith (fun () -> consistentReadStore (), select)

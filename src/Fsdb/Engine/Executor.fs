@@ -36047,7 +36047,7 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
         check delete.From delete.Joins delete.Where delete.Limit singleTarget
     | _ -> Ok()
 
-let internal tryPrimaryRead protectGaps (store: Store) dbName (select: SelectStmt) =
+let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: SelectStmt) =
     let primaryHint = function
         | [] -> true
         | [ { Kind = ForceIndex; Scope = (None | Some IndexJoin); Indexes = [ index ] } ] ->
@@ -36269,7 +36269,7 @@ let internal tryPrimaryRead protectGaps (store: Store) dbName (select: SelectStm
             else
                 exact ()
                 |> Option.map (fun access -> access, None)
-                |> Option.orElseWith (fun () -> if protectGaps && integerKeys then range () else None)
+                |> Option.orElseWith (fun () -> if protectGaps && wait = WaitForLocks && integerKeys then range () else None)
                 |> Option.map (fun (access, limit) ->
                     let plan: Storage.PrimaryReadPlan =
                         { ReadDatabase = database
@@ -36277,6 +36277,7 @@ let internal tryPrimaryRead protectGaps (store: Store) dbName (select: SelectStm
                           ReadSchemaRevision = table.SchemaRevision
                           ReadAccess = access
                           ReadPointGaps = protectGaps
+                          ReadWait = wait
                           ReadRangeLimit = limit }
                     let readSelect =
                         if select.OrderBy.IsEmpty && limit.IsSome then
