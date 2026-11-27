@@ -34,7 +34,7 @@
     <Compile Include="Foundation/Binary.fs" />
     <Compile Include="Sql/SingleByteCharset.fs" />
     <Compile Include="Sql/Charset.fs" />
-    <Compile Include="Sql/Zh0900Weights.fs" />
+    <Compile Include="Sql/Uca0900Weights.fs" />
     <Compile Include="Sql/LegacyFullTextCaseData.fs" />
     <Compile Include="Sql/Collation.fs" />
     <Compile Include="Sql/RegexpScriptProperties.fs" />
@@ -106,6 +106,7 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Sql/Zh0900Weights.bin.gz" LogicalName="Fsdb.Zh0900Weights.bin.gz" />
+    <EmbeddedResource Include="Sql/AccentSensitive0900Weights.bin.gz" LogicalName="Fsdb.AccentSensitive0900Weights.bin.gz" />
     <PackageReference Include="FParsec" Version="1.1.1" />
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.401" PrivateAssets="all" />
     <PackageReference Include="NetTopologySuite" Version="2.6.0" />

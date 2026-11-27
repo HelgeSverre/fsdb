@@ -289,6 +289,23 @@ let tests =
               let rows = tryFlatBooleanScoresDictionary (cache [ "e中"; "é中"; "é中" ]) "é*" |> Option.get
               Expect.equal (rows.Keys |> Seq.toList) [ 2 ] "the flat posting lookup uses the same boundary"
 
+          testCase "accent-sensitive ngram prefixes seek flushed keys before merging cached matches"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_0900_as_ci" |> Option.get
+              let build = buildIndexWithTokenizer (Ngrams 2) collation
+              let accents = build [ 1, "e中"; 2, "é中"; 3, "é中" ] |> flushPostings
+              let mixed = accents |> addDocument 101 "e中" |> addDocument 102 "é中" |> addDocument 103 "é中"
+              let kana = build [ 1, "㌐中"; 2, "キ中"; 3, "ギ中"; 4, "㌔中"; 5, "ギ中"; 6, "き中" ] |> flushPostings
+
+              for index, query, expected in [ accents, "é*", [ 3 ]; mixed, "é*", [ 3; 102 ]; kana, "ギ*", [ 1; 5 ] ] do
+                  let scores = booleanScores index query
+                  Expect.equal (scores.Keys |> Seq.toList) expected query
+                  let flat = tryFlatBooleanScoresDictionary index query |> Option.get
+                  Expect.equal (flat.Keys |> Seq.sort |> Seq.toList) expected "the flat lookup uses the same boundary"
+                  for id in expected do
+                      closeTo 0.227644696831703 scores.[id] "matching postings share DF across cache and disk"
+                      closeTo scores.[id] flat.[id] "flat and general evaluators agree"
+
           testCase "Unicode 5.2 ngrams share padded space keys but retain Mongolian separator weight"
           <| fun _ ->
               let collation = tryFind "utf8mb4_unicode_520_ci" |> Option.get

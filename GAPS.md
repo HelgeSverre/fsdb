@@ -1945,10 +1945,12 @@ and Jamo boundaries. Short wildcards can match Kana ligatures in both
 directions in the audited Unicode collations.
 [Accent-sensitive CJK prefixes](torture/findings/2026-11-27-ngram-accent-sensitive-prefixes.md)
 now reach the audited `utf8mb4_0900_as_ci` compatibility symbols,
-Kana ligatures, and Hangul syllables. With wholly cached postings,
-wildcards follow the cache tree's first hit and stop at nonmatching
-neighbors. Accent-sensitive membership and ranking across flushed and
-mixed posting sets remain open.
+Kana ligatures, and Hangul syllables. Wildcards use the cache tree's
+first hit for cached postings and an ordered collation prefix scan
+for flushed postings. The wider mixed bigram matrix still has
+cached membership and score differences for `花*` and `é*`.
+MySQL's row-count estimates can also change full-text scores before
+statistics are refreshed.
 [Boolean ngram rank cancellation](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#boolean-rank-cancellation)
 now treats a final score of zero as a nonmatch in the audited weighted
 term, phrase, group, and prefix cases. [Single-precision rank accumulation](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#single-precision-rank-accumulation)

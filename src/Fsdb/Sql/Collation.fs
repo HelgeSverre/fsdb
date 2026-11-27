@@ -2001,7 +2001,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         elif spec.ByteOrder then
             compareBinary a b
         elif chinese0900 then
-            Zh0900Weights.compare a b
+            Uca0900Weights.compareChinese a b
         elif name = "utf8mb4_ja_0900_as_cs_ks" then
             (japaneseKanaKey (trim a)).AsSpan().SequenceCompareTo((japaneseKanaKey (trim b)).AsSpan())
         else
@@ -2016,7 +2016,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             // first (MySQL-verified), same tie-break as the ICU branch.
             if c <> 0 then c else countTrailingSpaces b - countTrailingSpaces a
         elif chinese0900 then
-            Zh0900Weights.compare a b
+            Uca0900Weights.compareChinese a b
         else
             let primary = comparePrimary a b
 
@@ -2041,7 +2041,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             if spec.ByteOrder then
                 "B" + Convert.ToHexString(binaryBytes s)
             elif chinese0900 then
-                Convert.ToHexString(Zh0900Weights.weightOf s)
+                Convert.ToHexString(Uca0900Weights.chineseWeight s)
             elif name = "utf8mb4_ja_0900_as_cs_ks" then
                 Convert.ToHexString(japaneseKanaKey (trim s))
             else
@@ -2051,7 +2051,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             if spec.ByteOrder then
                 "B" + Convert.ToHexString(binaryBytes s)
             elif chinese0900 then
-                Convert.ToHexString(Zh0900Weights.weightOf s)
+                Convert.ToHexString(Uca0900Weights.chineseWeight s)
             else
                 match legacyFullTextCase name with
                 | Some ranges ->
@@ -2065,7 +2065,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             if spec.ByteOrder then
                 binaryWeight s
             elif chinese0900 then
-                Zh0900Weights.weightOf s
+                Uca0900Weights.chineseWeight s
             else
                 legacyWeight s
                 |> Option.defaultWith (fun () -> ci.GetSortKey(foldText s, spec.Fold).KeyData)
@@ -2074,7 +2074,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             if spec.ByteOrder then
                 hash (binaryBytes s)
             elif chinese0900 then
-                hash (Zh0900Weights.weightOf s)
+                hash (Uca0900Weights.chineseWeight s)
             elif name = "utf8mb4_ja_0900_as_cs_ks" then
                 hash (japaneseKanaKey (trim s))
             else

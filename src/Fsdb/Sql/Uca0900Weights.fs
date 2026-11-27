@@ -1,4 +1,4 @@
-module internal Fsdb.Zh0900Weights
+module internal Fsdb.Uca0900Weights
 
 open System
 open System.Collections.Generic
@@ -30,14 +30,14 @@ let private readWeight (bytes: byte[]) =
       PrimaryEnd = primary
       SecondaryEnd = separator (primary + 2) }
 
-let private table =
+let private loadTable resourceName signature =
     lazy
-        use resource = typeof<Weight>.Assembly.GetManifestResourceStream("Fsdb.Zh0900Weights.bin.gz")
+        use resource = typeof<Weight>.Assembly.GetManifestResourceStream(resourceName)
         use compressed = new GZipStream(resource, CompressionMode.Decompress)
         use reader = new BinaryReader(compressed, Encoding.UTF8)
 
-        if reader.ReadUInt32() <> 0x31485A46u then
-            invalidOp "Invalid Chinese collation weight table"
+        if reader.ReadUInt32() <> signature then
+            invalidOp ("Invalid collation weight table " + resourceName)
 
         let rangeCount = reader.ReadInt32()
         let scalarCount = reader.ReadInt32()
@@ -85,10 +85,13 @@ let private scalarWeight (ranges: ImplicitRange[]) (scalars: Dictionary<int, Wei
           PrimaryEnd = 4
           SecondaryEnd = 8 }
 
-let weightOf (value: string) =
-    if value.Length = 0 then Array.zeroCreate<byte> 4
+let private chineseTable = loadTable "Fsdb.Zh0900Weights.bin.gz" 0x31485A46u
+let private accentSensitiveTable = loadTable "Fsdb.AccentSensitive0900Weights.bin.gz" 0x31534146u
+
+let private weightOf (ranges, scalars, contractions: IDictionary<char, (string * Weight)[]>) (value: string) =
+    if value.Length = 0 then
+        { Bytes = Array.zeroCreate<byte> 4; PrimaryEnd = 0; SecondaryEnd = 2 }
     else
-        let ranges, scalars, contractions = table.Value
         let segments = ResizeArray<Weight>()
         let mutable offset = 0
         let mutable primaryLength = 0
@@ -135,7 +138,13 @@ let weightOf (value: string) =
             secondary <- secondary + secondarySize
             tertiary <- tertiary + tertiarySize
 
-        result
+        { Bytes = result; PrimaryEnd = primaryLength; SecondaryEnd = secondary }
 
-let compare a b =
-    (weightOf a).AsSpan().SequenceCompareTo((weightOf b).AsSpan())
+let chineseWeight value = (weightOf chineseTable.Value value).Bytes
+
+let compareChinese a b =
+    (chineseWeight a).AsSpan().SequenceCompareTo((chineseWeight b).AsSpan())
+
+let accentSensitiveKey value =
+    let weight = weightOf accentSensitiveTable.Value value
+    Convert.ToHexString(weight.Bytes, 0, weight.SecondaryEnd)

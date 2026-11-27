@@ -56,6 +56,19 @@ let add key text terms =
     | Some tree -> { Tree = blacken tree; LastInserted = text :: terms.LastInserted }
 
 let inInsertionOrder terms = List.rev terms.LastInserted
+let isEmpty terms = terms.LastInserted.IsEmpty
+
+let startingAt lowerBound terms =
+    let rec ascending = function
+        | Empty -> Seq.empty
+        | Node(_, left, key, text, right) when String.CompareOrdinal(key, lowerBound) >= 0 ->
+            seq {
+                yield! ascending left
+                yield key, text
+                yield! ascending right
+            }
+        | Node(_, _, _, _, right) -> ascending right
+    ascending terms.Tree
 
 [<Struct>]
 type PostingTail =
