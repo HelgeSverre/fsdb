@@ -51,11 +51,31 @@ Seek `4.1250` and try to insert `5.1250`. For binary, use a
 `VARBINARY(4)` primary key and substitute `X'10'`, `X'90'`,
 `X'40'`, and `X'50'`, respectively.
 
-The fixtures reset the index to isolate the boundary records. Text and
-other primary-key types, secondary-key gaps, broader write ranges,
-and boundaries influenced by delete-marked records remain open.
-For the text case, MySQL orders equivalent spellings by the following
-key part. With `PRIMARY KEY(k ASC, seq DESC)` and an accent-insensitive
-`k`, a miss at `('E',30)` between `('é',50)` and `('e',10)`
-blocks an insert at `('É',20)` while allowing `('ê',60)`. Fsdb
-currently allows both inserts.
+## Text primary keys
+
+With `PRIMARY KEY(k ASC, seq DESC)` and an accent-insensitive
+`k`, MySQL orders equivalent spellings by the following key part.
+A miss at `('E',30)` between `('é',50)` and `('e',10)`
+blocks an insert at `('É',20)` while allowing `('ê',60)`. Before
+the fix, Fsdb allowed both inserts.
+
+Fsdb compares the canonical collation keys already present in write
+claims. The boundary search uses the stored primary order, looking
+within each equivalent spelling's run and choosing the nearest
+complete key across those runs. It handles equivalent spellings in
+the adjacent prefix too, where the boundary is the first or last key
+in the adjacent group.
+
+The comparison covered six text key fixtures at all four isolation
+levels, including `CHAR` with PAD SPACE, case-sensitive ordering,
+and composite keys with mixed collations and directions. Two additional
+schedules covered a pending insert whose spelling differs from the
+waiting UPDATE's literal. After the insert rolled back, the UPDATE
+missed and protected the refreshed gap. The tests ran in memory and
+with WAL enabled. The point-hit, `LIMIT 0`, and before- and
+after-access savepoint controls also agreed.
+
+The fixtures reset the index to isolate the boundary records.
+Other primary-key types, secondary-key gaps, broader write ranges,
+locking reads on these text keys, and boundaries influenced by
+delete-marked records remain open.

@@ -6658,6 +6658,7 @@ let private tryPrimaryGapLockValues width (key: string) =
         | 'B' ->
             try Some(VBytes(Convert.FromHexString(payload)))
             with :? FormatException -> None
+        | 'S' -> Some(VString(payload.ToString()))
         | _ -> None
 
     let rec read offset remaining reversed =
@@ -6675,6 +6676,64 @@ let private tryPrimaryGapLockValues width (key: string) =
                     | None -> None
                 | _ -> None
     if primaryLockKey key then read primaryLockKeyPrefix.Length width [] else None
+
+let private compareGapKeyParts collation left right =
+    match left, right with
+    | VString a, VString b -> StringComparer.Ordinal.Compare(a, b)
+    | _ -> compareIndexedValues collation left right
+
+let private canonicalGapPart collation = function
+    | VString value -> VString((Collation.findOrDefault collation).KeyOf value)
+    | VEncodedString(charset, bytes) ->
+        VString((Collation.findOrDefault collation).KeyOf(Charset.decodeBytes charset bytes))
+    | value -> value
+
+/// Physical order may break a collation tie by spelling before considering
+/// the suffix. Search each spelling run separately and combine its best key
+/// in index order, including when the neighbor has a different prefix.
+let private textPrimaryGapNeighbor lower compare (pivot: Value list) (entries: ImmutableSortedSet<SecondaryOrderEntry>) =
+    if entries.IsEmpty then None
+    else
+        let pivot = List.toArray pivot
+        let collations = entries.[0].CollationNames |> List.toArray
+        let directions = entries.[0].Directions |> List.toArray
+        let rawAt position index = entries.[index].Values.[position]
+        let partAt position index = rawAt position index |> canonicalGapPart collations.[position]
+        let extreme first afterLast = if lower then afterLast - 1 else first
+        let better candidate current =
+            let order = compare candidate current
+            if lower then order > 0 else order < 0
+        let rec seek bounded position first afterLast =
+            if first = afterLast then None
+            elif position = pivot.Length then
+                if bounded then None
+                else Some(List.map2 canonicalGapPart entries.[first].CollationNames entries.[first].Values)
+            else
+                let direction = if directions.[position] = Desc then -1 else 1
+                let pivotPart = if bounded then pivot.[position] else partAt position (extreme first afterLast)
+                let compareAt offset =
+                    direction * compareGapKeyParts collations.[position] (partAt position (first + offset)) pivotPart
+                let equalFirst = first + sortedInsertionPoint FirstEqual (afterLast - first) compareAt
+                let equalAfter = first + sortedInsertionPoint AfterEqual (afterLast - first) compareAt
+                let mutable best = None
+                let mutable start = equalFirst
+                while start < equalAfter do
+                    let raw = rawAt position start
+                    let compareSpelling index =
+                        direction * compareIndexedValues collations.[position] (rawAt position index) raw
+                    let next =
+                        if compareSpelling (equalAfter - 1) = 0 then equalAfter
+                        else start + sortedInsertionPoint AfterEqual (equalAfter - start) (fun offset ->
+                            compareSpelling (start + offset))
+                    match seek bounded (position + 1) start next with
+                    | Some candidate when best |> Option.forall (better candidate) -> best <- Some candidate
+                    | _ -> ()
+                    start <- next
+                match best with
+                | None when bounded && lower -> seek false position first equalFirst
+                | None when bounded -> seek false position equalAfter afterLast
+                | _ -> best
+        seek true 0 0 entries.Count
 
 let private exactKeyOwner (cache: KeyLockCache) key =
     match cache.Entries.TryGetValue key with
@@ -6736,9 +6795,12 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
     | Some context, Some observed ->
         let tableKey = normalizeTableName tableName
         let database = database.ToLowerInvariant()
+        let isTextKeyPart column =
+            match observed.Columns.[column].Type with TChar _ | TVarchar _ -> true | _ -> false
         let supportsKeyPart column =
             match scan, observed.Columns.[column].Type with
             | WritePointGap, (TDecimal _ | TBinary _ | TVarBinary _) -> true
+            | WritePointGap, _ when isTextKeyPart column -> true
             | _, columnType -> isIntegerKeyType columnType
         uniqueKeyGroups observed
         |> List.tryFind (fun group ->
@@ -6749,14 +6811,28 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
                 | PrimaryRange _ -> true))
         |> Option.map (fun group ->
             let width = group.Indices.Length
+            let hasText = group.Indices |> List.exists isTextKeyPart
+            // Write probes are decoded from the lock key, where text is
+            // already canonicalized to the column's collation.
             let encode (table: Table) values =
-                primaryLockKeyPrefix + encodeEqualityValues table.Columns group.Indices values
+                let encoded =
+                    if hasText then
+                        List.map2 (fun index value ->
+                            match value with
+                            | VString key -> string (key.Length + 1) + ":S" + key
+                            | _ -> encodeEqualityValues table.Columns [ index ] [ value ]) group.Indices values
+                        |> String.concat ""
+                    else encodeEqualityValues table.Columns group.Indices values
+                primaryLockKeyPrefix + encoded
             let collations = group.Indices |> List.map (fun column -> observed.Columns.[column].Collation)
-            let compare = compareIndexedKeys collations group.Directions
+            let gapCollations = if hasText then List.replicate width (Some "binary") else collations
+            let compare = compareIndexedKeys gapCollations group.Directions
             let compareToPrefix (prefix: Value list) candidate =
-                let length = prefix.Length
-                compareIndexedKeys (List.take length collations) (List.take length group.Directions)
-                    (List.take length candidate) prefix
+                if hasText then compare candidate prefix
+                else
+                    let length = prefix.Length
+                    compareIndexedKeys (List.take length collations) (List.take length group.Directions)
+                        (List.take length candidate) prefix
             let contains (table: Table) (key: string) =
                 table.UniqueIndex |> Map.tryFind "PRIMARY"
                 |> Option.exists (Map.containsKey (key.Substring(primaryLockKeyPrefix.Length)))
@@ -6822,14 +6898,16 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
             let neighbor lower inclusive pivot (table: Table) =
                 table.SecondaryOrder |> Map.tryFind "PRIMARY"
                 |> Option.bind (fun entries ->
-                    let first, after = orderedPrefixBounds entries pivot
-                    let index =
-                        match lower, inclusive with
-                        | true, true -> after - 1
-                        | true, false -> first - 1
-                        | false, true -> first
-                        | false, false -> after
-                    if index >= 0 && index < entries.Count then Some entries.[index].Values else None)
+                    if hasText then textPrimaryGapNeighbor lower compare pivot entries
+                    else
+                        let first, after = orderedPrefixBounds entries pivot
+                        let index =
+                            match lower, inclusive with
+                            | true, true -> after - 1
+                            | true, false -> first - 1
+                            | false, true -> first
+                            | false, false -> after
+                        if index >= 0 && index < entries.Count then Some entries.[index].Values else None)
 
             let nearest lower (pivot, inclusive) table =
                 let improves candidate bound =

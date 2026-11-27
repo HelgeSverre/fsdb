@@ -8367,4 +8367,33 @@ let tests =
                   TestSupport.Sql.expectOk (handle second "ROLLBACK" |> snd) "release the second holder"
                   TestSupport.Sql.expectError 1205 blocked definition
                   TestSupport.Sql.expectError 1205 stillBlocked definition
-                  Expect.equal (handle observer insert |> snd) (Affected 1UL) "both holders have released the gap" ]
+                  Expect.equal (handle observer insert |> snd) (Affected 1UL) "both holders have released the gap"
+
+          testCase "missing text primary writes order equivalent spellings by the next key part"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let observer = create 3 store
+              let run sql = handle observer sql |> snd
+              for sql in
+                  [ "CREATE TABLE t(k VARCHAR(20) COLLATE utf8mb4_0900_ai_ci, seq INT, n INT, PRIMARY KEY(k ASC, seq DESC))"
+                    "INSERT INTO t VALUES('é',50,1),('e',10,9),('g',0,0)"
+                    "CREATE VIEW v AS SELECT * FROM t WHERE n>0" ] do
+                  TestSupport.Sql.expectOk (run sql) sql
+
+              let observer, _ = handle observer "SET innodb_lock_wait_timeout=1"
+              let first, _ = handle (create 1 store) "START TRANSACTION"
+              let first, result = handle first "UPDATE t SET n=n+1 WHERE k='E' AND seq=30"
+              Expect.equal result (Affected 0UL) "the write misses between equivalent spellings"
+              let second, _ = handle (create 2 store) "SET innodb_lock_wait_timeout=1"
+              let second, _ = handle second "START TRANSACTION"
+              let second, result = handle second "DELETE FROM v WHERE k='è' AND seq=30"
+              Expect.equal result (Affected 0UL) "an equivalent miss shares the gap"
+              Expect.equal (handle observer "INSERT INTO t VALUES('ê',60,6)" |> snd) (Affected 1UL) "the larger suffix is outside"
+              let insert = "INSERT INTO t VALUES('É',20,2)"
+              let blocked = handle observer insert |> snd
+              TestSupport.Sql.expectOk (handle first "ROLLBACK" |> snd) "release the first holder"
+              let stillBlocked = handle observer insert |> snd
+              TestSupport.Sql.expectOk (handle second "ROLLBACK" |> snd) "release the second holder"
+              TestSupport.Sql.expectError 1205 blocked "the equivalent prefix follows the descending suffix"
+              TestSupport.Sql.expectError 1205 stillBlocked "the second writer retains the gap"
+              Expect.equal (handle observer insert |> snd) (Affected 1UL) "inserts resume after both holders finish" ]

@@ -970,6 +970,8 @@ writes](torture/findings/2026-11-27-missing-primary-write-gaps.md) also
 retain the surrounding gap under REPEATABLE READ and SERIALIZABLE.
 [Decimal and binary primary-key misses](torture/findings/2026-11-27-missing-primary-write-gaps.md#decimal-and-binary-primary-keys)
 use the same gap boundaries, including mixed keys with descending parts.
+[Text primary-key misses](torture/findings/2026-11-27-missing-primary-write-gaps.md#text-primary-keys)
+follow collation order and compare later key parts across equivalent spellings.
 
 A [current write-path control](benchmarks/results/2026-10-14-write-path-control.md)
 measures keyless inserts at one, four, and eight writers with WAL-backed and
