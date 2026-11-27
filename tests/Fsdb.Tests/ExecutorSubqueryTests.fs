@@ -256,6 +256,39 @@ let tests =
                   Expect.hasLength (rows |> List.filter (fun row -> row.[1] = Some "DERIVED")) 1 "emit the body once"
               | other -> failtestf "expected a CTE reuse plan, got %A" other
 
+              let unionBody = withNamed + "SELECT id FROM o UNION ALL SELECT id FROM o"
+              for sql, sharedBlock in
+                  [ unionBody, "<derived2>"
+                    "SELECT u.id FROM (" + unionBody + ") u", "<derived3>"
+                    "WITH a AS (" + unionBody + ") SELECT id FROM a", "<derived3>"
+                    "SELECT p.id,q.id FROM owners p JOIN LATERAL (" + unionBody + ") q ON TRUE", "<derived3>" ] do
+                  match runDefault store ("EXPLAIN " + sql) with
+                  | ResultSet(_, rows) ->
+                      let users = rows |> List.filter (fun row -> row.[2] = Some sharedBlock)
+                      Expect.hasLength users 2 "both UNION branches reference the shared CTE"
+                      let definition = rows |> List.filter (fun row -> row.[1] = Some "DERIVED" && row.[2] = Some "owners")
+                      Expect.hasLength definition 1 "emit the definition once across the UNION"
+                  | other -> failtestf "expected a UNION plan for %s, got %A" sql other
+
+              match runDefault store ("EXPLAIN " + withNamed + scalar + " UNION ALL " + scalar) with
+              | ResultSet(_, rows) ->
+                  let references = rows |> List.choose (function
+                      | _ :: Some "DEPENDENT SUBQUERY" :: Some "e" :: _ :: Some "ref" :: _ :: Some "recent" :: _ :: reference :: _ -> reference
+                      | _ -> None)
+                  Expect.equal references [ "p.k,const"; "p.k,const" ] "both branches bind the declared CTE column"
+              | other -> failtestf "expected correlated lookups in the UNION plan, got %A" other
+
+              match runDefault store ("EXPLAIN FORMAT=JSON " + withNamed + "SELECT p.id FROM o p UNION ALL SELECT q.id FROM o q") with
+              | ResultSet(_, [ [ Some json ] ]) ->
+                  let root = System.Text.Json.Nodes.JsonNode.Parse json
+                  let branches = root.["query_block"].["union_result"].["query_specifications"].AsArray()
+                  let materialization (index: int) =
+                      branches.[index].["query_block"].["table"].["materialized_from_subquery"]
+                  Expect.equal ((materialization 0).["query_block"].["select_id"].GetValue<int>()) 2 "the first reference describes the CTE"
+                  Expect.equal ((materialization 1).["sharing_temporary_table_with"].["select_id"].GetValue<int>()) 2
+                      "the second JSON branch links to the same CTE"
+              | other -> failtestf "expected JSON for the shared UNION materialization, got %A" other
+
           testCase "correlated top-N seeks nullable equality prefixes"
           <| fun _ ->
               let store = newStore ()

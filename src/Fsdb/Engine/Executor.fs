@@ -29286,13 +29286,11 @@ let rec private explainJoinBlock
                         Map.add (binding.Definition.CteName.ToLowerInvariant()) binding binding.VisibleCtes
                     else binding.VisibleCtes
                 withExplainCtes visible (fun () ->
-                    let describe id kind select =
-                        explainSelectBlock store registry dbName nextId acc analysis id kind select binding.Outer
                     match binding.Definition.Body with
-                    | PlainSelect sub -> describe derivedId "DERIVED" sub
+                    | PlainSelect sub ->
+                        explainSelectBlock store registry dbName nextId acc analysis derivedId "DERIVED" sub binding.Outer
                     | UnionSelect(first, rest, _, _, _) ->
-                        describe derivedId "DERIVED" first
-                        |> Result.bind (fun () -> rest |> traverse (fun (_, branch) -> describe (nextId ()) "UNION" branch))
+                        explainUnionBlocks store registry dbName nextId acc analysis derivedId "DERIVED" first rest binding.Outer
                         |> Result.map ignore)
         | FromTable tref, Some(key, reference) ->
             acc.Add
@@ -29367,8 +29365,7 @@ let rec private explainJoinBlock
                 match item with
                 | FromLateral _ -> scopeFor (List.take idx items)
                 | _ -> outer
-            explainSelectBlock store registry dbName nextId acc analysis derivedId "DERIVED" first derivedOuter
-            |> Result.bind (fun () -> rest |> traverse (fun (_, s) -> explainSelectBlock store registry dbName nextId acc analysis (nextId ()) "UNION" s derivedOuter))
+            explainUnionBlocks store registry dbName nextId acc analysis derivedId "DERIVED" first rest derivedOuter
             |> Result.map ignore
 
 
@@ -29522,6 +29519,22 @@ and private explainSelectBlock
             consumption
             outer
             correlatedOrder)
+
+and private explainUnionBlocks store registry dbName nextId acc analysis firstId firstType (first: SelectStmt) rest outer =
+    let explainBranches first =
+        explainSelectBlock store registry dbName nextId acc analysis firstId firstType first outer
+        |> Result.bind (fun () ->
+            rest |> traverse (fun (_, branch) ->
+                let id = nextId ()
+                explainSelectBlock store registry dbName nextId acc analysis id "UNION" branch outer
+                |> Result.map (fun () -> id)))
+
+    if first.Ctes.IsEmpty then explainBranches first
+    else
+        // The parser attaches WITH to the first branch, but every branch
+        // refers to the same declarations and materialization blocks.
+        let scope = extendExplainCtes store registry dbName outer first.Ctes
+        withExplainCtes scope (fun () -> explainBranches { first with Ctes = [] })
 
 /// Renders collected plan rows into `EXPLAIN`'s classic 12-column
 /// resultset — `id` ascending, `None -> NULL` in every `option` cell the
@@ -29907,13 +29920,14 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
 
                 if ids.Length <> selects.Length then Map.empty
                 else
+                    let sharedCtes = selects |> List.tryHead |> Option.map _.Ctes |> Option.defaultValue []
                     List.zip ids selects
                     |> List.choose (fun (id, select) ->
                         match select.From with
                         | Some(FromSubquery(_, alias)) -> Some(id, alias)
                         | Some(FromTable tref)
                             when tref.Database.IsNone
-                                 && (select.Ctes |> List.exists (fun cte -> equalsIgnoreCase cte.CteName tref.Table)) ->
+                                 && (sharedCtes @ select.Ctes |> List.exists (fun cte -> equalsIgnoreCase cte.CteName tref.Table)) ->
                             Some(id, tref.Alias |> Option.defaultValue tref.Table)
                         | _ -> None)
                     |> Map.ofList
@@ -30013,21 +30027,28 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             | Ok() -> renderExplainZeroLimit format
         else
             finish (checkSelect select |> Result.bind (fun () -> explainSelectBlock store registry dbName nextId acc analysis id selectType select None))
-    | Union(first, rest, orderBy, limit, _) ->
+    | Union(first, rest, orderBy, limit, offset) ->
         let id1 = nextId ()
         let materializesResult = unionMaterializesResult orderBy rest
         let zeroResult =
             materializesResult && (limit |> Option.exists (fun expression -> rowCount expression = 0))
 
+        let validation =
+            if first.Ctes.IsEmpty then
+                checkSelect first
+                |> Result.bind (fun () -> rest |> traverse (fun (_, s) -> checkSelect s) |> Result.map ignore)
+            else
+                let result, _, _ =
+                    withPlanningProbe (fun () ->
+                        withMetadataProbe (fun () ->
+                            runUnionStmtWithOuter store validationRegistry dbName first rest orderBy limit offset None))
+                match result with
+                | Err _ -> Error result
+                | _ -> Ok()
+
         finish (
-            checkSelect first
-            |> Result.bind (fun () -> rest |> traverse (fun (_, s) -> checkSelect s) |> Result.map ignore)
-            |> Result.bind (fun () -> explainSelectBlock store registry dbName nextId acc analysis id1 "PRIMARY" first None)
-            |> Result.bind (fun () ->
-                rest
-                |> traverse (fun (_, s) ->
-                    let sid = nextId ()
-                    explainSelectBlock store registry dbName nextId acc analysis sid "UNION" s None |> Result.map (fun () -> sid)))
+            validation
+            |> Result.bind (fun () -> explainUnionBlocks store registry dbName nextId acc analysis id1 "PRIMARY" first rest None)
             |> Result.map (fun restIds ->
                 if materializesResult && not restIds.IsEmpty then
                     let label = sprintf "<union%s>" (id1 :: restIds |> List.map string |> String.concat ",")

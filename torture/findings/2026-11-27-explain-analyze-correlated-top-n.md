@@ -93,3 +93,22 @@ matches all 192 cases. JSON reports the CTE alias and its nested
 body. ANALYZE records the observed ordered lookup for each CTE row.
 MySQL's CTE merging, automatic temporary indexes, estimates, and
 recursive plan details remain open.
+
+### CTE scope across UNION branches
+
+The `WITH` clause applies to every branch of a `UNION`. Validation
+uses the same scope as execution. The plan collector shares CTE blocks
+across top-level unions, derived and lateral union sources, and unions
+inside CTE definitions. When JSON renders a second reference to the
+same materialization, it emits `sharing_temporary_table_with` and the
+original select ID.
+
+The pinned MySQL 8.4.11 comparison reused the 192 CTE variants in
+three forms. Each query used the same CTE in both branches of a
+top-level union, a derived union, or a CTE whose body is a union.
+All 576 returned error 1146 at `3e9f8ea1`. Both Fsdb storage modes
+now match MySQL on the two inner select types, access types, keys,
+key lengths, and references in every case. The 192 single-query
+CTE comparisons still match. Ordinary missing tables in later
+branches still report error 1146. Full plan estimates and the
+select ID of a zero-limit UNION result can differ.

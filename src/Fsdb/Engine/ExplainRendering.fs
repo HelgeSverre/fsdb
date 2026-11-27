@@ -58,6 +58,8 @@ type ExplainNestedSubqueries =
     | NestedSubqueries of (ExplainSubqueryPlacement * (bool * ExplainRow list) list) list
 
 let renderJson (shape: ExplainJsonShape) (derivedAliases: Map<int, string>) (rows: ExplainRow list) : string =
+    let renderedMaterializations = System.Collections.Generic.HashSet<int>()
+
     let jsonArray values =
         let array = JsonArray()
         values |> Seq.iter (fun value -> array.Add(value: JsonNode))
@@ -131,14 +133,19 @@ let renderJson (shape: ExplainJsonShape) (derivedAliases: Map<int, string>) (row
 
             row.Table
             |> Option.bind derivedTableId
-            |> Option.bind (fun id -> Map.tryFind id derivedBlocks)
-            |> Option.iter (fun derivedRows ->
+            |> Option.bind (fun id -> Map.tryFind id derivedBlocks |> Option.map (fun rows -> id, rows))
+            |> Option.iter (fun (id, derivedRows) ->
                 let materialized = JsonObject()
-                materialized["using_temporary_table"] <- JsonValue.Create(true)
-                let dependent = derivedRows |> List.exists (fun row -> row.SelectType = "DEPENDENT DERIVED")
-                materialized["dependent"] <- JsonValue.Create(dependent)
-                materialized["cacheable"] <- JsonValue.Create(true)
-                materialized["query_block"] <- queryBlock derivedBlocks NoNestedSubqueries derivedRows
+                if renderedMaterializations.Add id then
+                    materialized["using_temporary_table"] <- JsonValue.Create(true)
+                    let dependent = derivedRows |> List.exists (fun row -> row.SelectType = "DEPENDENT DERIVED")
+                    materialized["dependent"] <- JsonValue.Create(dependent)
+                    materialized["cacheable"] <- JsonValue.Create(true)
+                    materialized["query_block"] <- queryBlock derivedBlocks NoNestedSubqueries derivedRows
+                else
+                    let shared = JsonObject()
+                    shared["select_id"] <- JsonValue.Create(id)
+                    materialized["sharing_temporary_table_with"] <- shared
                 let table = item["table"] :?> JsonObject
                 row.Id
                 |> Option.bind (fun id -> Map.tryFind id derivedAliases)
