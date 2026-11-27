@@ -21193,24 +21193,19 @@ and private indexOrderTerms (registry: Registry) (tref: TableRef) (select: Selec
         | _ -> Error())
     |> Result.toOption
 
-and private indexOrderPreservesSqlTies (columns: ColumnDef list) (terms: IndexOrderTerm list) =
-    let rec preserves = function
-        | [] | [ _ ] -> true
-        | (term: IndexOrderTerm) :: rest ->
-            // Physical keys can distinguish spellings that tie in SQL. That
-            // refinement is safe only after comparing the requested keys.
-            let compatible =
-                columns
-                |> List.tryFind (fun column -> equalsIgnoreCase column.Name term.Column)
-                |> Option.exists (fun column ->
-                    let text =
-                        match term.Transform with
-                        | None -> isTextColumn (Some column)
-                        | Some transform -> FunctionalIndex.hasTextResult transform
-                    not text || (Collation.findOrDefault column.Collation).EqualityIsOrderEquivalence)
-            compatible && preserves rest
+and private indexTermPreservesSqlTies (columns: ColumnDef list) (term: IndexOrderTerm) =
+    columns
+    |> List.tryFind (fun column -> equalsIgnoreCase column.Name term.Column)
+    |> Option.exists (fun column ->
+        let text =
+            match term.Transform with
+            | None -> isTextColumn (Some column)
+            | Some transform -> FunctionalIndex.hasTextResult transform
+        not text || (Collation.findOrDefault column.Collation).EqualityIsOrderEquivalence)
 
-    preserves terms
+and private indexOrderPreservesSqlTies (columns: ColumnDef list) (terms: IndexOrderTerm list) =
+    // Only a tie on the last requested key may be refined by physical spelling.
+    terms |> List.truncate (max 0 (terms.Length - 1)) |> List.forall (indexTermPreservesSqlTies columns)
 
 and private tryIndexOrder
     (store: Store)
@@ -21398,8 +21393,7 @@ and private bindCorrelatedTopOrder store registry dbName (tref: TableRef) (selec
                     let orderProjections = expandOrderProjections table.Columns qualifiers select.Projections
                     let orderIsValid = validateOrderAliases (columnIndexOf table.Columns) qualifiers orderProjections select.OrderBy |> Result.isOk
                     indexOrderTerms registry tref select
-                    |> Option.filter (fun terms ->
-                        orderIsValid && List.forall safeOrder terms && indexOrderPreservesSqlTies table.Columns terms)
+                    |> Option.filter (fun terms -> orderIsValid && List.forall safeOrder terms)
                     |> Option.map (fun terms -> source, context, predicate, terms, List.map fst pins, correlatedPins))
 
 /// Bind physical predicates to the current outer row for index planning.
@@ -22825,9 +22819,18 @@ and private tryFixedPrefixIndexOrder
                 |> storageOrderTerms
 
             let lower, upper = fixedPrefixSuffixBounds store registry resolved.Table tref whereExpr matched
+            let tieOffsets =
+                if correlatedPins.IsEmpty then []
+                else
+                    orderedTerms
+                    |> List.truncate (max 0 (orderedTerms.Length - 1))
+                    |> List.indexed
+                    |> List.choose (fun (offset, term) ->
+                        if indexTermPreservesSqlTies resolved.Table.Columns term then None else Some offset)
 
-            if not prefixPins.IsEmpty && (resolved.PinnedValues |> List.exists (function VString _ -> true | _ -> false)) then
-                Storage.tryMergedEqualityPrefixOrderWith allowed store resolved.Table terms resolved.PinnedValues lower upper
+            if not tieOffsets.IsEmpty
+               || (not prefixPins.IsEmpty && (resolved.PinnedValues |> List.exists (function VString _ -> true | _ -> false))) then
+                Storage.tryMergedEqualityPrefixOrderWith allowed store resolved.Table terms resolved.PinnedValues lower upper tieOffsets
             else
                 Storage.tryOrderedIndexPrefixRangeLookupWith allowed store resolved.Database tref.Table terms resolved.PinnedValues lower upper
                 |> Option.orElseWith (fun () ->

@@ -8346,36 +8346,132 @@ let private orderedLookupFromEntries (table: Table) (slice: SecondaryOrderSlice)
 let private orderedLookup (table, slice, traversal) =
     orderedLookupFromEntries table slice (slice.AfterLast - slice.First) (orderedEntries traversal slice)
 
+let private mergeOrderedEntries compareEntries (streams: seq<seq<SecondaryOrderEntry>>) =
+    seq {
+        let queue =
+            PriorityQueue<IEnumerator<SecondaryOrderEntry>, SecondaryOrderEntry>(Comparer<SecondaryOrderEntry>.Create(compareEntries))
+        let cursors = ResizeArray<IEnumerator<SecondaryOrderEntry>>()
+        let advance (cursor: IEnumerator<SecondaryOrderEntry>) =
+            if cursor.MoveNext() then queue.Enqueue(cursor, cursor.Current)
+
+        try
+            for stream in streams do
+                Limits.checkQueryCancellation cursors.Count
+                let cursor = stream.GetEnumerator()
+                cursors.Add cursor
+                advance cursor
+
+            while queue.Count > 0 do
+                let cursor = queue.Dequeue()
+                yield cursor.Current
+                advance cursor
+        finally
+            for cursor in cursors do cursor.Dispose()
+    }
+
+/// Each run must be contiguous in physical index order, even when the caller
+/// consumes the runs backwards. Seek its opposite edge without reading rows.
+let private contiguousOrderRuns traversal compareEntries (slice: SecondaryOrderSlice) =
+    seq {
+        let mutable first = slice.First
+        let mutable afterLast = slice.AfterLast
+        let mutable visited = 0
+
+        while first < afterLast do
+            Limits.checkQueryCancellation visited
+            visited <- visited + 1
+            let lower, upper =
+                let seek boundary pivot start stop =
+                    start + sortedInsertionPoint boundary (stop - start) (fun offset ->
+                        compareEntries slice.Entries.[start + offset] pivot)
+
+                if afterLast - first = 1 then
+                    first, afterLast
+                else
+                    match traversal with
+                    | Forward ->
+                        let pivot = slice.Entries.[first]
+                        let next = first + 1
+                        if compareEntries slice.Entries.[next] pivot <> 0 then first, next
+                        elif compareEntries slice.Entries.[afterLast - 1] pivot = 0 then first, afterLast
+                        else first, seek AfterEqual pivot (next + 1) afterLast
+                    | Backward ->
+                        let pivot = slice.Entries.[afterLast - 1]
+                        let previous = afterLast - 2
+                        if compareEntries slice.Entries.[previous] pivot <> 0 then afterLast - 1, afterLast
+                        elif compareEntries slice.Entries.[first] pivot = 0 then first, afterLast
+                        else seek FirstEqual pivot first previous, afterLast
+
+            match traversal with
+            | Forward -> first <- upper
+            | Backward -> afterLast <- lower
+
+            yield { slice with First = lower; AfterLast = upper }
+    }
+
+let private mergedSqlOrder traversal prefixLength (terms: OrderedKeyTerm list) tieOffsets (first: SecondaryOrderSlice) runs =
+    let collations = first.Entries.[first.First].CollationNames |> List.toArray
+    let sqlCollations = Array.map Collation.findOrDefault collations
+    let storedDirections = List.toArray first.Directions
+    let requestedDirections = terms |> List.map _.OrderedDirection |> List.toArray
+    let positions = tieOffsets |> List.map ((+) prefixLength)
+    let directed direction comparison = if direction = Desc then -comparison else comparison
+
+    let compareSqlKeys (directions: Direction array) start stop (left: SecondaryOrderEntry) (right: SecondaryOrderEntry) =
+        let rec compareAt position =
+            if position = stop then 0
+            else
+                let collation = collations.[position]
+                let comparison =
+                    match left.Values.[position], right.Values.[position] with
+                    | VString left, VString right -> sqlCollations.[position].ComparePrimary left right
+                    | left, right -> compareIndexedValues collation left right
+                if comparison = 0 then compareAt (position + 1)
+                else directed directions.[position] comparison
+        compareAt start
+
+    let compareRequested = compareSqlKeys requestedDirections prefixLength terms.Length
+    let rec ordered start positions (slice: SecondaryOrderSlice) =
+        match positions with
+        | [] ->
+            Seq.init (slice.AfterLast - slice.First) (fun offset ->
+                let position =
+                    match traversal with
+                    | Forward -> slice.First + offset
+                    | Backward -> slice.AfterLast - 1 - offset
+                slice.Entries.[position])
+        | position :: remaining ->
+            let compareGroup = compareSqlKeys storedDirections start (position + 1)
+            let compareSpelling (left: SecondaryOrderEntry) (right: SecondaryOrderEntry) =
+                compareIndexedValues collations.[position] left.Values.[position] right.Values.[position]
+                |> directed storedDirections.[position]
+
+            // Later keys are sorted within each spelling, and the spellings
+            // share one SQL key. Merge only the current group before moving on.
+            slice
+            |> contiguousOrderRuns traversal compareGroup
+            |> Seq.collect (fun group ->
+                let nextPosition = position + 1
+                match contiguousOrderRuns traversal compareSpelling group |> Seq.toList with
+                | [ run ] -> ordered nextPosition remaining run
+                | spellings ->
+                    let compareRemainder = compareSqlKeys requestedDirections nextPosition terms.Length
+                    spellings |> Seq.map (ordered nextPosition remaining) |> mergeOrderedEntries compareRemainder)
+
+    match runs with
+    | [ run ] -> ordered prefixLength positions run
+    | _ -> runs |> Seq.map (ordered prefixLength positions) |> mergeOrderedEntries compareRequested
+
 /// Merge the ordered suffixes of spelling runs that share a SQL equality key.
 /// Bounds apply separately within each spelling before the merge.
-let internal tryMergedEqualityPrefixOrderWith allowed store table terms prefixValues lower upper =
+let internal tryMergedEqualityPrefixOrderWith allowed store table terms prefixValues lower upper tieOffsets =
     tryOrderedIndexWithPrefix allowed store (Some table) terms prefixValues lower upper
     |> Option.map (fun (table, entries, prefix, slice, traversal) ->
         match orderedEqualityPrefixSlices entries prefix slice with
         | [] -> orderedLookup (table, slice (0, 0), traversal)
-        | [ run ] -> orderedLookup (table, run, traversal)
+        | [ run ] when List.isEmpty tieOffsets -> orderedLookup (table, run, traversal)
         | first :: _ as runs ->
-            let width = terms.Length - prefix.Length
-            let collations = entries.[first.First].CollationNames |> List.skip prefix.Length |> List.take width
-            let directions = terms |> List.skip prefix.Length |> List.map _.OrderedDirection
-            let compareSuffix left right = compareIndexedKeys collations directions left right
-            let step = if traversal = Forward then 1 else -1
-            let merged =
-                seq {
-                    let queue = PriorityQueue<SecondaryOrderSlice * int, Value list>(Comparer<Value list>.Create(compareSuffix))
-                    let enqueue run position =
-                        let priority = entries.[position].Values |> List.skip prefix.Length |> List.take width
-                        queue.Enqueue((run, position), priority)
-
-                    for run in runs do
-                        enqueue run (if step = 1 then run.First else run.AfterLast - 1)
-
-                    while queue.Count > 0 do
-                        let run, position = queue.Dequeue()
-                        yield entries.[position]
-                        let next = position + step
-                        if next >= run.First && next < run.AfterLast then enqueue run next
-                }
+            let merged = mergedSqlOrder traversal prefix.Length terms tieOffsets first runs
             let count = runs |> List.sumBy (fun run -> run.AfterLast - run.First)
             orderedLookupFromEntries table first count merged)
 

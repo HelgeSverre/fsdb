@@ -268,6 +268,11 @@ let tests =
               let scalar =
                   "SELECT (SELECT e.id FROM events e WHERE e.tenant=o.id ORDER BY e.state,e.id LIMIT 1 OFFSET 1) AS chosen FROM owners o"
               Expect.equal (runDefault store scalar) (ResultSet([ "chosen" ], rows [ [ "2" ] ])) "scalar offset uses the numeric tie-breaker"
+              match runDefault store ("EXPLAIN ANALYZE " + scalar) with
+              | ResultSet(_, lines) ->
+                  let plan = lines |> List.choose (List.tryHead >> Option.flatten) |> String.concat "\n"
+                  Expect.stringContains plan "Ordered index lookup on e using recent" "the collation-equal suffix can stream"
+              | other -> failtestf "expected an analyzed plan, got %A" other
 
               let window = "SELECT id,RANK() OVER(ORDER BY state) AS ranked,ROW_NUMBER() OVER(ORDER BY state,id) AS numbered FROM events ORDER BY id"
               let ranks = rows [ [ "1"; "1"; "1" ]; [ "2"; "1"; "2" ]; [ "3"; "1"; "3" ]; [ "4"; "1"; "4" ]; [ "5"; "5"; "5" ] ]
@@ -286,6 +291,42 @@ let tests =
                   let plan = lines |> List.choose (List.tryHead >> Option.flatten) |> String.concat "\n"
                   Expect.stringContains plan "Ordered index lookup on e using recent" "the binary suffix can stream"
               | other -> failtestf "expected an analyzed plan, got %A" other
+
+          testCase "correlated top-N merges spelling runs at multiple sort keys"
+          <| fun _ ->
+              let store = newStore ()
+              for sql in
+                  [ "CREATE TABLE owners (id INT PRIMARY KEY,tenant VARCHAR(8) COLLATE utf8mb4_0900_ai_ci)"
+                    "INSERT INTO owners VALUES (1,'café'),(2,'CAFÉ'),(3,'other')"
+                    "CREATE TABLE events(id INT PRIMARY KEY,tenant VARCHAR(8) COLLATE utf8mb4_0900_ai_ci,state VARCHAR(8) COLLATE utf8mb4_0900_ai_ci,tag VARCHAR(8) COLLATE utf8mb4_0900_ai_ci,stamp INT,visible INT,KEY recent(tenant,stamp DESC,state,tag DESC,id))"
+                    "INSERT INTO events VALUES (1,'café','active','Z',4,1),(2,'CAFE','Active','z',4,1),(3,'café','Active','X',4,1),(4,'CAFE','áctive','z',4,0),(5,'café','archive','z',4,1),(6,'café',NULL,'z',4,1),(7,'CAFE','active','Z',4,1),(8,'café','archive','x',5,1),(9,'CAFE','active','x',3,1),(10,'other','active','z',4,1),(11,'CAFE','active','z',5,1),(12,'CAFE','active',NULL,4,1)" ] do
+                  match runDefault store sql with
+                  | Affected _ -> ()
+                  | other -> failtestf "%s: %A" sql other
+
+              let source = " FROM events e WHERE e.tenant=o.tenant AND e.stamp<=4 AND e.visible=1"
+              let lateral =
+                  "SELECT o.id,q.id FROM owners o LEFT JOIN LATERAL (SELECT e.id" + source
+                  + " ORDER BY e.stamp DESC,e.state,e.tag DESC,e.id LIMIT 4 OFFSET 2) q ON TRUE ORDER BY o.id,q.id"
+              let scalar =
+                  "SELECT o.id,(SELECT e.id" + source
+                  + " ORDER BY e.stamp,e.state DESC,e.tag,e.id DESC LIMIT 1 OFFSET 2) AS picked FROM owners o ORDER BY o.id"
+              let pairs ids =
+                  [ for owner in [ "1"; "2" ] do
+                        for id in ids do
+                            yield [ Some owner; Some id ]
+                    yield [ Some "3"; None ] ]
+              for sql, expected in
+                  [ lateral, ResultSet([ "id"; "id" ], pairs [ "2"; "3"; "7"; "12" ])
+                    scalar, ResultSet([ "id"; "picked" ], pairs [ "12" ]) ] do
+                  Expect.equal (runDefault store sql) expected "the index preserves the MySQL order through offset and residual filtering"
+                  let scan = sql.Replace("FROM events e WHERE", "FROM events e IGNORE INDEX(recent) WHERE")
+                  Expect.equal (runDefault store scan) expected "the hinted scan has the same result"
+                  match runDefault store ("EXPLAIN ANALYZE " + sql) with
+                  | ResultSet(_, lines) ->
+                      let plan = lines |> List.choose (List.tryHead >> Option.flatten) |> String.concat "\n"
+                      Expect.stringContains plan "Ordered index lookup on e using recent" "the multi-key suffix streams"
+                  | other -> failtestf "expected an analyzed plan, got %A" other
 
           testCase "GROUP BY keeps collation-equal text and its following key together"
           <| fun _ ->

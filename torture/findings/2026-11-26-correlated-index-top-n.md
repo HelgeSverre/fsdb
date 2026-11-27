@@ -118,7 +118,42 @@ after one warm-up per build. Validation was running on the same host.
 | Lateral top-N | 1,673 ms | 25 ms | 9 |
 | Scalar top-N | 1,723 ms | 35 ms | 6 |
 
-Changing only the suffix to `utf8mb4_0900_ai_ci` keeps both queries on
-a scan. The same fixture matched MySQL and took about 1.7 seconds per
-query in the native in-memory Debug build. Streaming these folded suffixes
-would require preserving the later key order across equivalent spellings.
+Changing only the suffix to `utf8mb4_0900_ai_ci` initially kept both
+queries on a scan. The same fixture matched MySQL and took about 1.7
+seconds per query in the native in-memory Debug build.
+
+### Streaming collation-equal suffixes
+
+A correlated lookup can now seek and stream an index such as
+`(tenant, state, stamp DESC, id)` for `ORDER BY state, stamp DESC, id`
+when `state` uses a folding collation. Fsdb seeks the extent of the
+current SQL key, then merges its spelling runs using the later SQL
+keys. More than one sort key can require a merge. The ranges and
+residual filters still apply before offset and limit. If the entire SQL
+sort tuple ties, the row order can depend on the access path.
+[MySQL LIMIT optimization](https://dev.mysql.com/doc/refman/8.4/en/limit-optimization.html)
+
+A 1,024-query comparison matched MySQL 8.4.11 in both Fsdb storage
+modes. It covered two folded sort columns with matching and different
+collations, integer and text equality prefixes, `CHAR` and `VARCHAR`,
+NULL-safe equality, both traversal directions, and a residual filter
+with an offset.
+`EXPLAIN ANALYZE` confirmed every forced ordered lookup and every
+`IGNORE INDEX` control. Uncorrelated sorts and index-ordered grouping
+continue to use their existing index-order eligibility checks.
+
+The 40,000-event fixture had 100 outer rows. The loopback client
+alternated native in-memory Debug builds of `6746ad41` and the updated
+engine after the tests finished, with one warm-up and six timed
+executions per build. Each execution returned the same rows as MySQL.
+
+| Query | Before median | After median | Index rows per loop |
+| --- | ---: | ---: | ---: |
+| Lateral top-N | 1,802 ms | 26 ms | 9 |
+| Scalar top-N | 1,791 ms | 35 ms | 6 |
+
+A separate scalar stress run used eight outer rows and 4,096 events.
+With 4,096 distinct SQL sort values, the median dropped from 260 ms to
+3 ms. With 4,096 distinct spellings of a single SQL sort value, it
+dropped from 268 ms to 77 ms. A group with many spellings needs a
+cursor for each spelling before yielding its first row.
