@@ -1326,6 +1326,32 @@ let tests =
                       [ 1, "café"; 2, "cafe\u0301" ]
               Expect.equal (ids (naturalScores accents "cafe\u0301")) [ 2 ] "general_ci retains combining-mark distinctions"
 
+          testCase "Boolean word modifiers visit split lexer terms before later siblings"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_ja_0900_as_cs_ks" |> Option.get
+              let index =
+                  buildIndexWithTokenizer defaultTokenizer collation
+                      [ 1, "cobalt"; 2, "quartz"; 3, "cobalt quartz"; 4, "東京駅"
+                        5, "cobalt 東京駅"; 6, "quartz 東京駅"; 7, "zzzz"; 8, "cobalt quartz 東京駅" ]
+
+              for query, expected in
+                  [ "+cobalt'quartz", [ 3; 8 ]
+                    "+cobalt'quartz 東*", [ 3; 4; 5; 6; 8 ]
+                    "+cobalt,quartz 東*", [ 3; 4; 5; 6; 8 ]
+                    "+cobalt'quar* 東*", [ 3; 4; 5; 6; 8 ]
+                    "東* +cobalt'quartz", [ 3; 8 ]
+                    "+cobalt'quartz +東*", [ 8 ]
+                    "-cobalt'quartz quartz", [ 2; 3; 6; 8 ]
+                    "東* -cobalt'quartz", [ 4 ]
+                    "+東* -cobalt'quartz", [ 4; 5; 6; 8 ] ] do
+                  let scores = booleanScores index query
+                  Expect.equal (scores |> Map.keys |> Seq.toList) expected query
+
+              let closeTo expected actual message = Expect.isTrue (abs (actual - expected) < 1e-6) message
+              closeTo 1.181238174 (booleanScores index ">cobalt'quartz").[3] "two promoted words share the rank adjustment"
+              closeTo -0.818761885 (booleanScores index "<cobalt'quartz").[3] "two demoted words share the rank adjustment"
+              Expect.isEmpty (booleanScores index "~cobalt'quartz") "soft words adjust existing matches"
+
           testCase "full-text terms follow collation case and accent sensitivity"
           <| fun _ ->
               let aiCi = tryFind "utf8mb4_0900_ai_ci" |> Option.get

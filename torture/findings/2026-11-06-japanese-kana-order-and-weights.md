@@ -47,9 +47,19 @@ at sizes 1–10. The all-Kana corpus matched another 11,520 searches
 and all audited order and equality checks at those sizes. A checkpoint
 written before the change reopened with the corrected prefix result.
 
-The same expanded corpus with the default word parser went from
-1,306 differences to 288, with no new mismatches. The remaining
-cases include apostrophe modifiers and scores after deletion.
+The four-level weights reduced the same corpus with the default word parser
+from 1,306 differences to 288. Keeping modified punctuation-split words in
+their own Boolean list removed another 114 differences. All 19,767 searches
+before deletion matched, including cached, flushed, and mixed postings.
+The 174 differences in the deletion stage affect relevance only.
+[Default UTF-8 word parser](2026-10-16-ngram-boolean-unicode-ctype.md#default-utf-8-word-parser).
+
+An isolated MySQL 8.4.11 fixture confirms that the word parser counts
+retained postings in modified and compound Boolean queries. With seven
+live rows and one deleted `東京駅` posting, `東京駅` weighs three live
+postings, while `+東京駅` and `東京駅 never` weigh four. The same fixture
+has four live `東*` matches and two retained postings, one cached and
+one flushed. `東*` weighs four postings and `+東*` weighs six.
 
 The embedded weight table comes from pinned MySQL 8.4.11. Its
 generator captures every Unicode scalar and 1,160 Kana context pairs

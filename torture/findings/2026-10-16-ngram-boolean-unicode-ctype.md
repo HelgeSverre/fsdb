@@ -90,7 +90,21 @@ in a query under a Unicode 9 collation. [MySQL token classifier](https://github.
 
 Fsdb now makes the same distinction on UTF-8 word indexes and queries.
 The Boolean lexer applies the modifier to each word in a punctuation-split
-term, while a trailing wildcard applies to its last retained word.
+term, and a trailing wildcard applies to its last retained word. The words
+stay in their own list, so MySQL completes that list's required and excluded
+visits before moving to the next sibling. With `+cobalt'quartz 東*`, the
+wildcard can add rows after the list is evaluated. With
+`東* +cobalt'quartz`, the list filters the wildcard rows. Weighted words in
+the list share the usual per-document rank adjustment.
+[MySQL Boolean AST visitation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0ast.cc#L478-L599).
+
+A matrix of 25,380 Boolean searches per collation reduced differences
+from 1,485 to 186 each under `utf8mb4_0900_ai_ci`, `utf8mb4_bin`, and
+`utf8mb4_ja_0900_as_cs_ks`. No query gained a new mismatch. The 21
+remaining membership differences per collation involve soft negation
+after the lexer has discarded all but one word from a split term, as in
+`quartz ~cobalt'qt`. The remaining differences affect relevance.
+
 `utf8mb3_general_ci` uses the same full-text combining-mark distinctions
 as its four-byte counterpart. Unicode 9 lowercase folding now uses the
 captured MySQL map, so later capitals such as `Ʂ` retain their boundaries.

@@ -2063,7 +2063,10 @@ mixed CJK bigrams with turned H, Cherokee, and sharp S.
 [Default UTF-8 word boundaries](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#default-utf-8-word-parser)
 now use the same historical character table and classify documents before
 folding and queries after folding. The pinned Unicode 9 lowercase map
-also preserves boundaries for later capitals.
+also preserves boundaries for later capitals. Boolean modifiers preserve the
+visit order and rank adjustments of punctuation-split word lists.
+[Default word-parser relevance after deletes](torture/findings/2026-11-06-japanese-kana-order-and-weights.md#kana-sensitive-full-text-cursors)
+still differs when modified or compound queries count retained postings.
 
 The [legacy vertical-punctuation follow-up](torture/findings/2026-10-15-legacy-ngram-punctuation.md#vertical-punctuation-block-follow-up)
 also distinguishes all U+FE10–U+FE19 forms under `utf8mb4_unicode_ci` and

@@ -1329,6 +1329,7 @@ type private BoolOp =
 
 type private BoolTerm =
     | BWord of term: Token * prefix: bool
+    | BWordList of BoolTerm list
     | BPhrase of words: Token[] * proximity: int option
     | BGroup of (BoolOp * BoolTerm) list
 
@@ -1593,8 +1594,12 @@ let private parseBooleanQuery rules (collation: Collation) (query: string) : (Bo
                 elif utf8Words && not (wordChunkBoundary query.[i]) then
                     match tokenizer with
                     | Words lengths ->
-                        for term in readWordChunk lengths do
-                            acc.Add(op, term)
+                        match op, readWordChunk lengths with
+                        | operator, terms when operator <> Optional && terms.Length > 1 ->
+                            acc.Add(op, BWordList (Array.toList terms))
+                        | _, terms ->
+                            for term in terms do
+                                acc.Add(op, term)
                     | Ngrams _ -> ()
                 elif isWord query.[i] then
                     let w, sourceWord = readWord ()
@@ -1866,6 +1871,8 @@ let rec private evalTerm
             else
                 None)
         |> Map.ofSeq
+    | BWordList terms ->
+        evalNodes candidateIds view (terms |> List.map (fun term -> Optional, term))
     | BGroup nodes ->
         evalNodes candidateIds view nodes
 
@@ -1939,15 +1946,18 @@ type private RankedBooleanMatch =
 
 let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
     let hasGroups = nodes |> List.exists (function _, BGroup _ -> true | _ -> false)
+    let hasWordLists = nodes |> List.exists (function _, BWordList _ -> true | _ -> false)
 
     let rec leaves nodes =
         nodes
         |> Seq.collect (function
             | _, BGroup children -> leaves children
+            | op, BWordList terms -> terms |> Seq.map (fun term -> op, term)
             | leaf -> Seq.singleton leaf)
 
     match view.Rules.Tokenizer with
-    | Words _ when not hasGroups && not (leaves nodes |> Seq.exists (function _, BWord(_, true) -> true | _ -> false)) -> None
+    | Words _ when not hasGroups && not hasWordLists
+                   && not (leaves nodes |> Seq.exists (function _, BWord(_, true) -> true | _ -> false)) -> None
     | tokenizer ->
         let isNgram =
             match tokenizer with
@@ -2008,7 +2018,7 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
                     | ExactLookup word -> view.Deleted.Words.ContainsKey word
                     | PrefixLookup prefix -> orderedPrefixes || view.Deleted.Prefixes.ContainsKey prefix))
 
-        if not wordGroups && not tracksPostingBounds && not repeated && not weighted
+        if not wordGroups && not hasWordLists && not tracksPostingBounds && not repeated && not weighted
            && not cacheSensitive && not deletedSensitive then
             None
         else
@@ -2264,8 +2274,12 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
                 else matchPasses initial nodes |> fst
 
             and matchPasses (selected, hasRequired) nodes =
-                // Ordinary terms seed the group before required terms and exclusions.
-                let optional, filters = nodes |> List.partition (fun (op, _) -> op <> Must && op <> MustNot)
+                // A split lexer term has its own list. Its required or
+                // excluded words are revisited before the next sibling.
+                let initial, filters =
+                    nodes |> List.partition (function
+                        | _, BWordList _ -> true
+                        | op, _ -> op <> Must && op <> MustNot)
                 let required, excluded = filters |> List.partition (fun (op, _) -> op = Must)
 
                 let union matches (operator, term) =
@@ -2311,7 +2325,13 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
                         | None when first -> Map.add id incoming narrowed
                         | None -> narrowed) Map.empty
 
-                let included = List.fold union selected optional
+                let included, hasRequired =
+                    ((selected, hasRequired), initial)
+                    ||> List.fold (fun (matches, seenRequired) (op, term) ->
+                        match term with
+                        | BWordList terms ->
+                            matchPasses (matches, seenRequired) (terms |> List.map (fun term -> op, term))
+                        | _ -> union matches (op, term), seenRequired)
                 let filtered, hasRequired =
                     ((included, hasRequired), required)
                     ||> List.fold (fun (matches, seenRequired) term -> intersect (not seenRequired) matches term, true)
