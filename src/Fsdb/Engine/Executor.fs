@@ -31732,6 +31732,10 @@ let rec private executeAsWithViewSources
             | Some error -> Error(StoredProgramFailure error)
             | None -> Error(ExpressionError(1105, "Trigger execution failed"))
 
+    let canBatchIgnoredUpdate runStore db table callsCustomFunction beforeTriggers afterTriggers =
+        not callsCustomFunction && List.isEmpty beforeTriggers && List.isEmpty afterTriggers
+        && Storage.canBatchIgnoredUpdates runStore db table
+
     let applyUpdateRows (statement: UpdateStmt) (runStore: Store) db table candidates predicate assignedColumns updater
         (triggerRows: ResizeArray<Value[] option * Value[] option>) beforeTriggers afterTriggers =
         let ignoreErrors = statement.Ignore
@@ -31753,9 +31757,7 @@ let rec private executeAsWithViewSources
                 | Ok changed -> fireAfter changed)
         if not ignoreErrors && not callsCustomFunction then
             write candidates predicate updater |> Result.bind fireAfter
-        elif List.isEmpty beforeTriggers && List.isEmpty afterTriggers
-             && not callsCustomFunction
-             && Storage.canBatchIgnoredUpdates runStore db table then
+        elif canBatchIgnoredUpdate runStore db table callsCustomFunction beforeTriggers afterTriggers then
             Storage.withPermissiveIndexExpressions true (fun () ->
                 updateRowsIgnoringConstraintsWithAssignmentsById runStore db table candidates predicate assignedColumns updater)
         else
@@ -34924,7 +34926,13 @@ let rec private executeAsWithViewSources
 
                 let beforeTriggers = triggersFor writeStore db table "BEFORE" "UPDATE"
                 let afterTriggers = triggersFor writeStore db table "AFTER" "UPDATE"
-                let useSnapshot = updateStmt.Ignore || updateCallsCustomFunction registry updateStmt || not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
+                let callsCustomFunction = updateCallsCustomFunction registry updateStmt
+                let useSnapshot =
+                    if updateStmt.Ignore then
+                        // A batched write already publishes atomically and needs the live catalog after a key wait.
+                        not (canBatchIgnoredUpdate writeStore db table callsCustomFunction beforeTriggers afterTriggers)
+                    else
+                        callsCustomFunction || not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
                 let baseCatalog, targetStore =
                     if useSnapshot then Storage.beginTransactionSnapshotWithBase writeStore else writeStore.Catalog, writeStore
                 let queryStore = if publishPermanent.IsSome then store else targetStore

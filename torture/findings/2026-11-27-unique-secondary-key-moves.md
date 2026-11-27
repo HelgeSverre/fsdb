@@ -27,7 +27,6 @@ a functional key, a cross-database foreign-key cascade, disjoint keys,
 nullable keys, and reverse commit and rollback in autocommit and an
 open transaction.
 
-Batched UPDATE IGNORE still waits but can return 1205 when the insert
-holder commits. The wire probe reproduced it at statement time in
-autocommit and at COMMIT in an open transaction. MySQL skips the row
-and reports zero affected rows in both cases.
+The [UPDATE IGNORE follow-up](2026-11-27-ignored-update-key-waits.md)
+fixes the original 1205 for single-table batches. Joined autocommit
+writes and mixed warning ordering have separate gaps.

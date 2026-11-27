@@ -7010,6 +7010,70 @@ let tests =
                   | ResultSet(_, actual) -> Expect.equal actual expectedRows transactionEnd
                   | actual -> failtestf "expected rows after both transactions, got %A" actual
 
+          testCase "batched UPDATE IGNORE rechecks moved unique keys after a wait"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              for transactional, ending, qualified in
+                  [ false, "COMMIT", false; true, "COMMIT", false; true, "ROLLBACK", false; true, "COMMIT", true ] do
+                  let dataDir =
+                      if transactional && ending = "COMMIT" && not qualified then
+                          Some(TestSupport.directory "ignored-update-replay")
+                      else None
+                  let store =
+                      match dataDir with
+                      | None -> Fsdb.Storage.create ()
+                      | Some dir ->
+                          let store = Fsdb.Persistence.load dir
+                          Fsdb.Persistence.attach dir store
+                          store
+                  let setup = create 1 store
+                  let foreignKey =
+                      if qualified then
+                          run setup "CREATE DATABASE keys_db" (Affected 1UL) |> ignore
+                          run setup "CREATE TABLE keys_db.parent(k INT PRIMARY KEY)" (Affected 0UL) |> ignore
+                          run setup "INSERT INTO keys_db.parent VALUES(1),(2),(3),(5),(6)" (Affected 5UL) |> ignore
+                          ",FOREIGN KEY(k) REFERENCES keys_db.parent(k)"
+                      else ""
+                  run setup $"CREATE TABLE moved_key(id INT PRIMARY KEY,k INT UNIQUE,qty INT{foreignKey})" (Affected 0UL)
+                  |> ignore
+                  run setup "INSERT INTO moved_key VALUES(1,1,5),(2,3,5),(3,5,5)" (Affected 3UL) |> ignore
+                  let owner = run (create 2 store) "START TRANSACTION" (Affected 0UL)
+                  let owner = run owner "INSERT INTO moved_key VALUES(9,2,7)" (Affected 1UL)
+                  let waiter = create 3 store
+                  let waiter = if transactional then run waiter "START TRANSACTION" (Affected 0UL) else waiter
+
+                  use started = new Threading.ManualResetEventSlim()
+                  let pending =
+                      Threading.Tasks.Task.Run(fun () ->
+                          started.Set()
+                          handle waiter "UPDATE IGNORE moved_key SET k=CASE id WHEN 1 THEN 2 WHEN 2 THEN 1 ELSE 6 END,qty=qty+1 WHERE id<9 ORDER BY id")
+                  Expect.isTrue (started.Wait 5000) "the UPDATE starts"
+                  let blocked = not (pending.Wait 100)
+                  run owner ending (Affected 0UL) |> ignore
+                  Expect.isTrue (pending.Wait 5000) "the UPDATE resumes"
+                  let waiter, result = pending.GetAwaiter().GetResult()
+                  Expect.isTrue blocked "the update waits for the held destination key"
+                  let committed = ending = "COMMIT"
+                  Expect.equal result (Affected(if committed then 1UL else 3UL)) "only rows with available keys change"
+                  let waiter, warnings = handle waiter "SHOW WARNINGS"
+                  let duplicate key = [ Some "Warning"; Some "1062"; Some(sprintf "Duplicate entry '%d' for key 'moved_key.k'" key) ]
+                  match warnings with
+                  | ResultSet(_, actual) -> Expect.equal actual (if committed then [ duplicate 2; duplicate 1 ] else []) "warnings follow staged row order"
+                  | other -> failtestf "expected warnings, got %A" other
+                  if transactional then run waiter "COMMIT" (Affected 0UL) |> ignore
+                  let expected =
+                      if committed then [ [ 1; 1; 5 ]; [ 2; 3; 5 ]; [ 3; 6; 6 ]; [ 9; 2; 7 ] ]
+                      else [ [ 1; 2; 6 ]; [ 2; 1; 6 ]; [ 3; 6; 6 ] ]
+                  let reader =
+                      dataDir |> Option.map (Fsdb.Persistence.load >> create 4) |> Option.defaultValue setup
+                  match handle reader "SELECT id,k,qty FROM moved_key ORDER BY id" |> snd with
+                  | ResultSet(_, actual) -> Expect.equal actual (expected |> List.map (List.map (string >> Some))) ending
+                  | other -> failtestf "expected committed rows, got %A" other
+
           testCase "a cross-database cascade waits for the destination gap before publishing"
           <| fun _ ->
               let run session sql expected =

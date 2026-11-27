@@ -932,7 +932,10 @@ now hold the destination key through commit or rollback, including in a
 cross-database cascade. An ordinary UPDATE waiting for a pending insert
 rechecks the destination after the wait and returns 1062 if the insert
 committed. Batched UPDATE IGNORE can still fail with 1205 instead of
-skipping that newly conflicting row.
+skipping that newly conflicting row in an autocommit joined write.
+[Single-table UPDATE IGNORE](torture/findings/2026-11-27-ignored-update-key-waits.md)
+keeps unrelated updates after the wait. Warning order can still differ
+when some conflicts were visible before the wait.
 
 A [current write-path control](benchmarks/results/2026-10-14-write-path-control.md)
 measures keyless inserts at one, four, and eight writers with WAL-backed and
