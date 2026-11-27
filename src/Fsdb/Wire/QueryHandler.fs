@@ -3467,6 +3467,16 @@ let private primaryLockingSelect isolation (select: SelectStmt) =
         else None
     | _ -> None
 
+let private isConsistentRead statement =
+    match statement with
+    | Select _ | Union _ -> not (statementContainsLockingRead statement)
+    | _ -> false
+
+let private consistentReadTransaction session statement =
+    session.Tx
+    |> Option.filter (fun transaction ->
+        transaction.Isolation = RepeatableRead && retainsTransactionAfterStatement session && isConsistentRead statement)
+
 let private beginDynamicWriteRebaseForStatement (session: Session) (store: Store) statement =
     // Wrapped autocommit writes that read a target row need it refreshed after a wait.
     let canRebase =
@@ -3509,7 +3519,7 @@ let private formatResultForProtocol metadata (typedRows: Value[] list) result =
         ResultSetWithValues(columns, rows, rawResultColumns result, typedRows)
     | _ -> result
 
-let private executeParsedStatement accesses (session: Session) (stmt: Statement) : Session * QueryResult =
+let private executeParsedStatement readOverlay accesses (session: Session) (stmt: Statement) : Session * QueryResult =
     let stmt = withSqlSelectLimit session stmt
     stmt
     |> statementStatusCommand
@@ -3615,6 +3625,18 @@ let private executeParsedStatement accesses (session: Session) (stmt: Statement)
         // derived; other statements are already rendered by Executor.
         let variables = expressionVariables session
 
+        let consistentReadStore () =
+            if List.isEmpty accesses then store
+            else
+                match readOverlay with
+                | Some createView -> createView store
+                | None ->
+                    match consistentReadTransaction session stmt with
+                    | Some transaction ->
+                        Storage.recordConsistentReadView session.Store store
+                        Storage.consistentReadSnapshot store transaction.BaseCatalog
+                    | None -> store
+
         let consumeSelectDestination (select: SelectStmt) result types rows =
             match select.IntoFile, select.IntoVariables, result with
             | Some destination, _, ResultSet _ ->
@@ -3685,8 +3707,8 @@ let private executeParsedStatement accesses (session: Session) (stmt: Statement)
                                                     readStore, orderedSelect)
                                                 |> Option.defaultValue (planningStore, select)
                                         | _ -> store, select)
-                                    |> Option.defaultValue (store, select)
-                                | _ -> store, select
+                                    |> Option.defaultWith (fun () -> consistentReadStore (), select)
+                                | _ -> consistentReadStore (), select
                             Executor.runTopLevelSelect readStore registry dbName readSelect)
 
                     let result, types = consumeSelectDestination select result types rows
@@ -3695,7 +3717,7 @@ let private executeParsedStatement accesses (session: Session) (stmt: Statement)
                     session.LastInsertId, session.LastGeneratedId, result, types, calculatedFoundRows
                 | Union(first, rest, orderBy, limit, offset) ->
                     let result, types, calculatedFoundRows, rows =
-                        withExecutionLimits (fun () -> Executor.runTopLevelUnion store registry dbName first rest orderBy limit offset)
+                        withExecutionLimits (fun () -> Executor.runTopLevelUnion (consistentReadStore ()) registry dbName first rest orderBy limit offset)
 
                     let result, types = consumeSelectDestination first result types rows
                     let result = formatResultForProtocol types rows result
@@ -3802,13 +3824,6 @@ let private executeParsedStatement accesses (session: Session) (stmt: Statement)
             | Error _ -> execute session
             | Ok() ->
                 let started = if insideFunctionOrTrigger session then session else startTransactionStatement session
-                match stmt, started.Tx with
-                | Select select, Some transaction when transaction.Isolation = RepeatableRead
-                                                       && select.From.IsSome && select.Locking.IsEmpty
-                                                       && retainsTransactionAfterStatement started ->
-                    Storage.recordConsistentReadView started.Store transaction.Snapshot
-                | _ -> ()
-
                 let executed, result =
                     try
                         started
@@ -3921,7 +3936,7 @@ let private trackTableEngineAccess stmt (accesses: TableLocks.Access list) (sess
         else session
     | _ -> session
 
-let private executeParsedCoreWith lockBoundary (session: Session) (stmt: Statement) : Session * QueryResult =
+let private executeParsedCoreWith lockBoundary readOverlay (session: Session) (stmt: Statement) : Session * QueryResult =
     let store = Session.currentStore session
     let database = session.Database |> Option.defaultValue defaultDatabase
     let accesses = TableLocks.accessesForStatement store session.TemporaryCatalog database stmt
@@ -3969,7 +3984,7 @@ let private executeParsedCoreWith lockBoundary (session: Session) (stmt: Stateme
                     session.ActiveRoles
                     (fun () ->
                         Limits.withLockWaitTimeout (lockWaitTimeout session)
-                            (fun () -> executeParsedStatement accesses session stmt)))
+                            (fun () -> executeParsedStatement readOverlay accesses session stmt)))
 
         let executed, result =
             match lockBoundary with
@@ -3992,8 +4007,8 @@ let private executeParsedCoreWith lockBoundary (session: Session) (stmt: Stateme
 
         executed, result
 
-let private executeParsedCore session stmt = executeParsedCoreWith AcquireStatementLock session stmt
-let private executeParsedCoreUnderLock session stmt = executeParsedCoreWith StatementLockHeld session stmt
+let private executeParsedCore session stmt = executeParsedCoreWith AcquireStatementLock None session stmt
+let private executeParsedCoreUnderLock session stmt = executeParsedCoreWith StatementLockHeld None session stmt
 
 type private TemporaryAction =
     | CreateTemporary
@@ -4276,6 +4291,13 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
                 |> Seq.map (fun key -> key, CatalogOverlay.tryTable baseCatalog key)
                 |> Map.ofSeq }
     let workingSession = { session with Store = working; Tx = None }
+    let readOverlay =
+        consistentReadTransaction session stmt
+        |> Option.map (fun transaction statementStore ->
+            Storage.recordConsistentReadView session.Store baseStore
+            let permanent = Storage.consistentReadSnapshot baseStore transaction.BaseCatalog
+            let visible = CatalogOverlay.merge permanent.Catalog session.TemporaryCatalog
+            { Storage.beginTransactionSnapshotFromCatalog statementStore visible with ExecutionSettings = statementStore.ExecutionSettings })
     // The overlay executes without its own transaction, but permanent writes
     // still share the outer transaction's lock owner and catalog refresh.
     let startedRebase =
@@ -4287,7 +4309,8 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
     let mutable rebasedBase = None
     let (executed, result), permanent =
         try
-            Executor.withPermanentMutationResult working session.Store (fun () -> executeParsedCoreUnderLock workingSession stmt)
+            Executor.withPermanentMutationResult working session.Store (fun () ->
+                executeParsedCoreWith StatementLockHeld readOverlay workingSession stmt)
         finally
             if startedRebase then
                 rebasedBase <- Storage.finishDynamicWriteRebase baseStore

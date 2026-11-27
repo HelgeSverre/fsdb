@@ -3469,19 +3469,19 @@ let private constraintLookup columns indices rows =
 /// structural boundaries (`createTable`, `truncate`, `alterTable` — column
 /// positions may have shifted — and `Persistence`'s replay/snapshot-load,
 /// which write `Rows` directly, bypassing every checked path below that
-/// otherwise maintains the index incrementally). `Map.ofList` keeping the
-/// last entry for a repeated key is a non-issue here: a well-formed table
-/// never has two rows actually colliding on a real PK/UNIQUE group.
-let private rebuildUniqueIndex (table: Table) : Map<string, Map<string, RowId>> =
+/// otherwise maintains the index incrementally).
+let private rebuildUniqueIndexWith collect (table: Table) : Map<string, Map<string, RowId>> =
     uniqueKeyGroups table
     |> List.map (fun group ->
         let inner =
             table.RowsArray.Indexed
             |> Seq.choose (fun (rowId, row) -> encodeUniqueKey table.Columns group row |> Option.map (fun key -> key, rowId))
-            |> Map.ofSeq
+            |> collect
 
         group.Name, inner)
     |> Map.ofList
+
+let private rebuildUniqueIndex table = rebuildUniqueIndexWith Map.ofSeq table
 
 let private rebuildSecondaryIndex (table: Table) : Map<string, Map<string, Set<RowId>>> =
     secondaryKeyGroups table
@@ -3888,6 +3888,101 @@ let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (l
             SecondaryIndex = secondaryIndex
             SecondaryOrder = secondaryOrder }
     |> mergeFullTextDocuments sourceRowIds baseTable batchTable liveTable
+
+let private overlayConsistentRows (pinned: Table) (baseline: Table) (working: Table) =
+    let primary = uniqueKeyGroups pinned |> List.tryFind (fun group -> group.Name = "PRIMARY")
+    let pinnedId rowId row =
+        match primary with
+        | Some key ->
+            encodeUniqueKey pinned.Columns key row
+            |> Option.bind (fun encoded -> Map.find key.Name pinned.UniqueIndex |> Map.tryFind encoded)
+        | None -> pinned.RowsArray.TryFind rowId |> Option.map (fun _ -> rowId)
+
+    let changes = working.RowsArray.ChangesFrom baseline.RowsArray |> Seq.toArray
+    if changes.Length = 0 then pinned
+    else
+        let rows = pinned.RowsArray.ToBuilder()
+        let writes =
+            changes |> Array.choose (fun (rowId, before, after) ->
+                after |> Option.map (fun row ->
+                    let replaces = if primary.IsSome || before.IsSome then pinnedId rowId row else None
+                    rowId, replaces, row))
+        let overwritten = writes |> Array.choose (fun (_, replaces, _) -> replaces) |> Set.ofArray
+
+        // A version moved to a different primary key by another writer is
+        // still visible at its old key. Apply this transaction's key changes
+        // to the pinned keys, rather than to their current heap identities.
+        for rowId, before, _ in changes do
+            before |> Option.bind (pinnedId rowId) |> Option.iter (fun id ->
+                if not (Set.contains id overwritten) then rows.Remove id |> ignore)
+
+        let sourceRowIds =
+            writes |> Array.fold (fun sources (source, replaces, row) ->
+                let target =
+                    match replaces with
+                    | Some id -> rows.[id] <- row; id
+                    | None -> rows.Add row
+                Map.add target source sources) Map.empty
+
+        let visible = { pinned with RowsArray = rows.DrainToImmutable() }
+        let chooseFirst previous current =
+            match primary with
+            | None -> min previous current
+            | Some key ->
+                let collations = key.Indices |> List.map (fun index -> visible.Columns.[index].Collation)
+                let values id = indexValues visible.Columns key visible.RowsArray.[id]
+                if compareIndexedKeys collations key.Directions (values current) (values previous) < 0 then current
+                else previous
+
+        let collectUnique entries =
+            entries |> Seq.fold (fun indexes (key, id) ->
+                let first = Map.tryFind key indexes |> Option.map (fun previous -> chooseFirst previous id) |> Option.defaultValue id
+                Map.add key first indexes) Map.empty
+
+        // A pinned secondary key can coexist with a new own row using that
+        // key. A unique point probe returns the first clustered record,
+        // while ordered index scans still include every visible row.
+        withoutIndexExpressionDiagnostics (fun () ->
+            { visible with
+                UniqueIndex = rebuildUniqueIndexWith collectUnique visible
+                SecondaryIndex = rebuildSecondaryIndex visible
+                SecondaryOrder = rebuildSecondaryOrder visible }
+            |> publishRowsWithDocumentRules (documentRulesFrom working sourceRowIds) pinned)
+
+/// The write base can advance independently of the committed read view.
+/// Overlay only this transaction's changes on that read view.
+let internal consistentReadSnapshot (working: Store) (writeBase: Catalog) =
+    let pinned =
+        working.TransactionLocks
+        |> Option.bind (fun context ->
+            match working.ConsistentReadViews.TryGetValue context.Owner with
+            | true, catalog -> Some catalog
+            | false, _ -> None)
+
+    match pinned with
+    | None -> working
+    | Some catalog when catalog.Count = writeBase.Count
+                        && catalog |> Map.forall (fun name db -> Map.tryFind name writeBase |> Option.exists (fun before -> obj.ReferenceEquals(before, db))) -> working
+    | Some catalog ->
+        let visible =
+            working.Catalog
+            |> Map.fold (fun visible dbName workingDb ->
+                match Map.tryFind dbName writeBase, Map.tryFind dbName catalog with
+                | Some baseline, Some _ when obj.ReferenceEquals(baseline, workingDb) -> visible
+                | Some baseline, Some pinned ->
+                    let tables =
+                        workingDb |> Map.fold (fun tables name workingTable ->
+                            match Map.tryFind name baseline, Map.tryFind name pinned with
+                            | Some before, _ when obj.ReferenceEquals(before, workingTable) -> tables
+                            | Some before, Some readTable when obj.ReferenceEquals(before, readTable) -> Map.add name workingTable tables
+                            | Some before, Some readTable when sameTableSchema before workingTable && sameTableSchema before readTable ->
+                                Map.add name (overlayConsistentRows readTable before workingTable) tables
+                            | _ -> Map.add name workingTable tables) pinned
+                    Map.add dbName tables visible
+                | None, _ -> Map.add dbName workingDb visible
+                | _ -> visible) catalog
+
+        { transactionSnapshotFromCatalog working visible with ExecutionSettings = working.ExecutionSettings }
 
 let private foreignKeyStorageValue (column: ColumnDef) value =
     match column.Type, value with

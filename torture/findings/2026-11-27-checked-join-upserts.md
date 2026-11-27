@@ -40,10 +40,10 @@ rollback by the competing writer.
 
 The equijoin variant also matched those four schedules in an explicit
 transaction after reading the joined table before opening the transaction.
-If the read occurs inside the transaction before the wait, a subsequent
-plain SELECT can differ in repeatable read. In one rejected duplicate
-update, MySQL still saw the old row value `5` while Fsdb saw the holder's
-committed value `9`. Both returned warning 1369 and inserted the other row.
+When the read occurs inside the transaction before a wait, MySQL keeps
+the old row visible to plain SELECT after a rejected duplicate update.
+The [consistent-read follow-up](2026-11-27-repeatable-read-after-write-refresh.md)
+closes the case where Fsdb previously showed the holder's committed value.
 
 ## Read-side record buffers
 

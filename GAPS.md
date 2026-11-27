@@ -948,6 +948,10 @@ now matches MySQL for the audited invalid values, warning order, and
 NULL handling before and after BEFORE triggers.
 [Wrapped autocommit upserts](torture/findings/2026-11-27-checked-join-upserts.md#waiting-for-a-duplicate-row)
 also refresh the duplicate row after a wait, including checked join views.
+[Repeatable reads after a write refresh](torture/findings/2026-11-27-repeatable-read-after-write-refresh.md)
+retain the first committed read view and overlay only the transaction's own
+changes. The audited queries include a checked upsert after a lock wait,
+UNION, and a join to a session temporary table.
 
 A [current write-path control](benchmarks/results/2026-10-14-write-path-control.md)
 measures keyless inserts at one, four, and eight writers with WAL-backed and

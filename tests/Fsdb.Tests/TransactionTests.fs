@@ -8193,24 +8193,71 @@ let tests =
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let setup = create 1 store
-              let setup, _ = handle setup "CREATE TABLE up_t (id INT, v INT)"
-              let setup, _ = handle setup "INSERT INTO up_t VALUES (1, 1)"
+              let setup, _ = handle setup "CREATE TABLE up_t (id INT PRIMARY KEY, v INT)"
+              let setup, _ = handle setup "INSERT INTO up_t VALUES (1, 1), (2, 2)"
 
               let a = create 2 store
+              let a, _ = handle a "CREATE TEMPORARY TABLE read_keys(id INT PRIMARY KEY)"
+              let a, _ = handle a "INSERT INTO read_keys VALUES (1),(2)"
               let a, _ = handle a "BEGIN"
               let a, _ = handle a "SELECT v FROM up_t"
 
-              handle (create 3 store) "UPDATE up_t SET v = 1234 WHERE id = 1" |> ignore
+              handle (create 3 store) "UPDATE up_t SET v = 1234" |> ignore
 
               let a, updateResult = handle a "UPDATE up_t SET v = v + 1 WHERE id = 1"
               Expect.equal updateResult (Affected 1UL) "the update changes the latest committed row"
+
+              match handle a "SELECT v FROM up_t ORDER BY id" |> snd with
+              | ResultSet(_, values) ->
+                  Expect.equal values [ [ Some "1235" ]; [ Some "2" ] ] "a plain read combines the snapshot with its own update"
+              | result -> failtestf "expected the consistent read, got %A" result
+
+              match handle a "SELECT up_t.v FROM up_t JOIN read_keys USING(id) ORDER BY up_t.id" |> snd with
+              | ResultSet(_, values) ->
+                  Expect.equal values [ [ Some "1235" ]; [ Some "2" ] ] "temporary sources share the consistent permanent read view"
+              | result -> failtestf "expected the consistent temporary join, got %A" result
 
               match handle a "COMMIT" |> snd with
               | Affected 0UL -> ()
               | result -> failtestf "expected the current-read update to commit, got %A" result
 
-              match handle (create 4 store) "SELECT v FROM up_t" |> snd with
-              | ResultSet(_, [ [ Some "1235" ] ]) -> ()
+              match handle (create 4 store) "SELECT v FROM up_t ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1235" ]; [ Some "1234" ] ]) -> ()
               | result -> failtestf "expected the increment to use the latest committed value, got %A" result
 
-              ignore setup ]
+              ignore setup
+
+          testCase "repeatable read overlays own changes on the original clustered keys"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable reader = create 2 store
+              let run sql =
+                  let next, result = handle reader sql
+                  reader <- next
+                  result
+              let execute sql = handle (create 3 store) sql |> snd
+              let read sql expected =
+                  match run sql with
+                  | ResultSet(_, actual) -> Expect.equal actual expected sql
+                  | other -> failtestf "expected rows for %s, got %A" sql other
+              let pair id value = [ Some id; Some value ]
+
+              TestSupport.Sql.expectOk (execute "CREATE TABLE t(id INT PRIMARY KEY,u INT UNIQUE)") "create the target"
+              TestSupport.Sql.expectOk (execute "INSERT INTO t VALUES(1,10),(2,20)") "seed the original rows"
+              TestSupport.Sql.expectOk (run "BEGIN") "begin the consistent transaction"
+              read "SELECT id,u FROM t ORDER BY id" [ pair "1" "10"; pair "2" "20" ]
+              TestSupport.Sql.expectOk (execute "UPDATE t SET u=30 WHERE id=1") "move the secondary key"
+              TestSupport.Sql.expectOk (execute "UPDATE t SET id=4 WHERE id=2") "move another clustered key"
+              TestSupport.Sql.expectOk (run "SAVEPOINT before_change") "save the original write state"
+              Expect.equal (run "UPDATE t SET u=u WHERE id=1") (Affected 0UL) "refresh the write view without changing the old secondary key"
+              Expect.equal (run "UPDATE t SET u=41 WHERE id=4") (Affected 1UL) "the write sees the moved row"
+              Expect.equal (run "INSERT INTO t VALUES(0,10)") (Affected 1UL) "the write sees the freed secondary key"
+              read "SELECT id,u FROM t ORDER BY id" [ pair "0" "10"; pair "1" "10"; pair "2" "20"; pair "4" "41" ]
+              read "SELECT id,u FROM t FORCE INDEX(u) WHERE u=10" [ pair "0" "10" ]
+              read "SELECT id,u FROM t FORCE INDEX(u) WHERE u BETWEEN 10 AND 11 ORDER BY id" [ pair "0" "10"; pair "1" "10" ]
+              Expect.equal (run "DELETE FROM t WHERE id=4") (Affected 1UL) "delete at the current key"
+              read "SELECT id,u FROM t ORDER BY id" [ pair "0" "10"; pair "1" "10"; pair "2" "20" ]
+              TestSupport.Sql.expectOk (run "ROLLBACK TO SAVEPOINT before_change") "discard own writes"
+              read "SELECT id,u FROM t ORDER BY id" [ pair "1" "10"; pair "2" "20" ]
+              TestSupport.Sql.expectOk (run "COMMIT") "close the original view"
+              read "SELECT id,u FROM t ORDER BY id" [ pair "1" "30"; pair "4" "20" ] ]

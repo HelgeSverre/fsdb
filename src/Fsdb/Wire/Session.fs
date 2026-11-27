@@ -346,8 +346,8 @@ let private emptyTransactionTracking =
 type TransactionEngineAccess = UnusedEngine | ReadEngine | LockedEngine
 
 /// One open transaction. `Snapshot` is private until COMMIT. `BaseCatalog`
-/// distinguishes its concrete changes from visible rows: fixed views retain
-/// one base, while statement-scoped isolation replaces both when it refreshes.
+/// tracks the write base as it refreshes. Plain repeatable reads have a
+/// separate committed view and overlay the transaction's changes on it.
 type Transaction =
     { Snapshot: Store
       BaseCatalog: Catalog
