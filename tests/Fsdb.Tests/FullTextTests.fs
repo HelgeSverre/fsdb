@@ -345,6 +345,26 @@ let tests =
                       let ids = booleanScores index term |> Map.keys |> Seq.toList
                       Expect.equal ids expected (name + " " + term)
 
+          testCase "accent-insensitive bigrams share circled and ordinary Kana postings"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_0900_ai_ci" |> Option.get
+              let rules = indexingRules (Ngrams 2) StopwordPolicy.Disabled
+              let kana =
+                  [ for codepoint in 0x32D0 .. 0x32FE do
+                      let circled = string (char codepoint)
+                      yield codepoint, circled, circled.Normalize(System.Text.NormalizationForm.FormKC) ]
+              let index =
+                  kana
+                  |> List.collect (fun (id, circled, ordinary) ->
+                      [ id, rules, [ circled + "東"; "京" + circled ]
+                        id + 1000, rules, [ ordinary + "東"; "京" + ordinary ] ])
+                  |> buildIndexWithDocumentSettings rules collation
+              for view in [ index; flushPostings index ] do
+                  for id, circled, ordinary in kana do
+                      let query = ordinary + "東"
+                      Expect.equal (naturalScores view query |> Map.keys |> Seq.toList) [ id; id + 1000 ] circled
+                      Expect.equal (booleanScores view query |> Map.keys |> Seq.toList) [ id; id + 1000 ] circled
+
           testCase "accent-sensitive ngram prefixes can end inside CJK expansions"
           <| fun _ ->
               let documents =

@@ -716,6 +716,15 @@ let private foldKanaLigatures (value: string) =
             | None -> result.Append(c) |> ignore
         result.ToString()
 
+let private foldCircledKatakana (value: string) =
+    let first, last = '\u32D0', '\u32FE'
+    if value.AsSpan().IndexOfAnyInRange(first, last) < 0 then value
+    else
+        value
+        |> String.map (fun c ->
+            if c >= first && c <= last then (string c).Normalize(NormalizationForm.FormKC).[0]
+            else c)
+
 // UCA 4.0 also folds the small Katakana extension.
 let private foldLegacyKanaForms (value: string) =
     let ordinary = "クシストヌハヒフヘホムラリルレロ"
@@ -1739,7 +1748,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             s |> foldFullwidthAscii |> foldLegacyKanaForms |> foldKanaVariants
               |> foldSmallKana |> foldLegacyUnicodeJamo |> trim
         elif name = "utf8mb4_0900_ai_ci" then
-            s |> foldKanaLigatures |> primaryText
+            s |> foldCircledKatakana |> foldKanaLigatures |> primaryText
         elif name = "utf8mb4_ja_0900_as_cs_ks" then
             s |> markJapaneseHiraganaForFullText |> foldJapaneseCompatibility |> trim
         else primaryText s

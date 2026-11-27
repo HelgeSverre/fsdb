@@ -58,8 +58,23 @@ postings after deletion. The fix resolved all nine case-sensitive
 relevance differences. The weighted score remained stable when
 the WAL-backed index reopened from a checkpoint.
 
-The wider baseline also isolated two separate gaps. Under
-`utf8mb4_0900_ai_ci`, `ア駅` should find the circled `㋐駅`
-document alongside its ordinary Kana forms. Under
-`utf8mb4_ja_0900_as_cs_ks`, MySQL's flushed cursor can return no
-rows for `ア*` even when the exact gram `ア駅` is indexed.
+Under `utf8mb4_ja_0900_as_cs_ks`, MySQL's flushed cursor can return
+no rows for `ア*` even when the exact gram `ア駅` is indexed. Fsdb
+still returns the Katakana document in that fixture. A three-row
+reproduction uses `ア駅`, `あ駅`, and `背景`. Removing the
+Hiragana row restores the Katakana prefix match in MySQL.
+
+## Circled Katakana in accent-insensitive ngrams
+
+The `utf8mb4_0900_ai_ci` full-text key folds the 47 circled Katakana
+scalars U+32D0–U+32FE into their ordinary forms after tokenization.
+For example, `ア駅` finds a document containing `㋐駅`. Boolean
+tokenization still classifies a circled character as punctuation
+when it occurs in the query.
+
+The two-column membership oracle matched all 188 natural-language
+and Boolean checks on freshly inserted and flushed bigrams. The
+expanded `utf8mb4_0900_ai_ci` corpus went from 2,236 differences to
+zero across 26,356 searches. The maintained two-column corpus also
+matched all 3,870 searches at token sizes 1–10. A checkpoint written
+before the fix returned the corrected membership on reopen.

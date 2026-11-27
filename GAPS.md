@@ -2017,8 +2017,9 @@ MySQL's row-count estimates can still change full-text scores
 before statistics are refreshed.
 [Weighted case-sensitive wildcards](torture/findings/2026-11-27-ngram-collation-prefixes.md#weighted-prefix-posting-visits)
 apply their rank adjustments only to postings the cursor actually visits.
-The expanded corpus still exposes circled-Kana equivalence gaps under
-`utf8mb4_0900_ai_ci` and wildcard differences under the Japanese collation.
+[Circled Katakana](torture/findings/2026-11-27-ngram-collation-prefixes.md#circled-katakana-in-accent-insensitive-ngrams)
+shares posting keys with ordinary Kana under `utf8mb4_0900_ai_ci`.
+The expanded corpus still exposes wildcard differences under the Japanese collation.
 [Boolean ngram rank cancellation](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#boolean-rank-cancellation)
 now treats a final score of zero as a nonmatch in the audited weighted
 term, phrase, group, and prefix cases. [Single-precision rank accumulation](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#single-precision-rank-accumulation)
