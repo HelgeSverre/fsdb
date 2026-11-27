@@ -2163,6 +2163,21 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
                     source
                     :: (select.Joins |> List.map _.Table)
 
+                let outerQualifiers =
+                    sourceItems |> List.choose FromItem.tryQualifier |> List.map _.ToLowerInvariant() |> Set.ofList
+                let reservedAliases =
+                    lazy (
+                        Expression.subqueryRelationAliases (Select select)
+                        |> List.map _.ToLowerInvariant()
+                        |> Set.ofList
+                        |> Set.union outerQualifiers)
+                let mutable nextAlias = 0
+                let rec freshAlias locals =
+                    nextAlias <- nextAlias + 1
+                    let candidate = sprintf "__fsdb_join_%d" nextAlias
+                    if Set.contains candidate locals || Set.contains candidate reservedAliases.Value then freshAlias locals
+                    else candidate
+
                 let projectedNames projections =
                     projections
                     |> List.map (fun ({ Expression = expression; Alias = alias } as projection) ->
@@ -2285,31 +2300,37 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
                             |> Option.bind (fun nested ->
                                 let baseQualifier = nested.UpdateFrom.Alias |> Option.defaultValue nested.UpdateFrom.Table
                                 let joinedQualifiers = nested.UpdateJoins |> List.map (_.Table >> FromItem.tryQualifier)
-                                let outerQualifiers =
-                                    sourceItems
-                                    |> List.choose FromItem.tryQualifier
-                                    |> List.map _.ToLowerInvariant()
-                                    |> Set.ofList
+                                let localSubqueryAliases =
+                                    lazy (
+                                        Do(
+                                            Option.toList nested.Predicate
+                                            @ (nested.CheckPredicates |> Map.values |> List.ofSeq)
+                                            @ (nested.Expressions |> Map.values |> List.ofSeq)
+                                            @ (nested.UpdateJoins |> List.collect Join.conditions)
+                                            @ (nested.JoinCheck |> Option.bind _.Predicate |> Option.toList))
+                                        |> Expression.subqueryRelationAliases
+                                        |> List.map _.ToLowerInvariant()
+                                        |> Set.ofList)
+                                let localAliases =
+                                    lazy (
+                                        baseQualifier
+                                        :: (List.choose id joinedQualifiers
+                                            @ Expression.subqueryRelationAliases (Select { nested.Definition with Joins = nested.UpdateJoins }))
+                                        |> List.map _.ToLowerInvariant()
+                                        |> Set.ofList
+                                        |> Set.union localSubqueryAliases.Value)
+                                let physicalQualifier =
+                                    if Set.contains (qualifier.ToLowerInvariant()) localSubqueryAliases.Value then
+                                        freshAlias localAliases.Value
+                                    else qualifier
                                 // Inner view aliases are private to that view. Give any
                                 // that collide with the outer FROM fresh physical names
                                 // before the joined sources are inlined.
                                 let renamedJoinAliases =
-                                    let mutable reserved =
-                                        Set.union outerQualifiers
-                                            (joinedQualifiers |> List.choose id |> List.map _.ToLowerInvariant() |> Set.ofList)
-                                    let mutable nextName = 0
-                                    let rec availableName number =
-                                        let candidate = sprintf "__fsdb_join_%d" number
-                                        if Set.contains (candidate.ToLowerInvariant()) reserved then
-                                            availableName (number + 1)
-                                        else candidate, number
                                     joinedQualifiers
                                     |> List.choose (function
                                         | Some name when Set.contains (name.ToLowerInvariant()) outerQualifiers ->
-                                            let replacement, number = availableName (nextName + 1)
-                                            nextName <- number
-                                            reserved <- Set.add (replacement.ToLowerInvariant()) reserved
-                                            Some(name.ToLowerInvariant(), replacement)
+                                            Some(name.ToLowerInvariant(), freshAlias localAliases.Value)
                                         | _ -> None)
                                     |> Map.ofList
                                 let hasSubquery =
@@ -2407,17 +2428,50 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
                                     None
                                 else
                                     let remapQualifier name =
-                                        if equalsIgnoreCase name baseQualifier then qualifier
+                                        if equalsIgnoreCase name baseQualifier then physicalQualifier
                                         else Map.tryFind (name.ToLowerInvariant()) renamedJoinAliases |> Option.defaultValue name
 
                                     let rewriteInnerReference = function
-                                        | Col column -> Some(QualifiedCol(qualifier, column))
+                                        | Col column -> Some(QualifiedCol(physicalQualifier, column))
                                         | QualifiedCol(source, column) ->
                                             let renamed = remapQualifier source
                                             if equalsIgnoreCase renamed source then None
                                             else Some(QualifiedCol(renamed, column))
                                         | _ -> None
-                                    let qualify = Expression.rewrite rewriteInnerReference
+                                    let physicalColumns (table: TableRef) =
+                                        let database = table.Database |> Option.defaultValue nested.ViewDatabase
+                                        InformationSchema.relationColumns store.Catalog database table.Table
+                                    let baseColumns =
+                                        lazy (
+                                            physicalColumns nested.UpdateFrom
+                                            |> Option.defaultValue []
+                                            |> List.map _.ToLowerInvariant()
+                                            |> Set.ofList)
+                                    let localColumns (query: SelectStmt) =
+                                        if not query.Ctes.IsEmpty then None
+                                        else
+                                            Option.toList query.From @ (query.Joins |> List.map (fun join -> join.Table))
+                                            |> List.collect FromItem.leaves
+                                            |> List.map (function
+                                                | FromTable table -> physicalColumns table
+                                                | _ -> None)
+                                            |> tryAllSome
+                                            |> Option.map (fun sources ->
+                                                let aliases = query.Projections |> List.choose _.Alias
+                                                List.concat sources @ aliases |> List.map _.ToLowerInvariant() |> Set.ofList)
+                                    let rewriteCorrelated = function
+                                        | Col column when Set.contains (column.ToLowerInvariant()) baseColumns.Value ->
+                                            Some(QualifiedCol(physicalQualifier, column))
+                                        | Col _ -> None
+                                        | reference -> rewriteInnerReference reference
+                                    let rewriteSubqueries =
+                                        if nested.UpdateJoins.IsEmpty then
+                                            Expression.rewriteSubqueryOuterReferencesWithColumns localColumns rewriteCorrelated
+                                        else Expression.rewriteSubqueryOuterReferences rewriteInnerReference
+                                    let qualify expression =
+                                        expression
+                                        |> rewriteSubqueries
+                                        |> Expression.rewrite rewriteInnerReference
 
                                     let renameJoinedSource preceding = function
                                         | FromTable table ->
@@ -2476,7 +2530,7 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
                                         { Reference =
                                             FromTable
                                                 { nested.UpdateFrom with
-                                                    Alias = Some qualifier }
+                                                    Alias = Some physicalQualifier }
                                           JoinedSources =
                                             nested.UpdateJoins
                                             |> List.mapi (fun index join ->
@@ -2700,12 +2754,18 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
                                 |> Option.defaultValue [ projection ]
                             | _ -> [ projection ])
 
-                    let rewriteSources =
-                        Expression.rewrite (function
-                            | QualifiedCol(qualifier, column) ->
-                                sources
-                                |> List.tryFind (fun source -> source.Qualifier.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
-                                |> Option.bind (fun source -> source.Expressions |> Map.tryFind (column.ToLowerInvariant()))
+                    let rewriteOuterReference =
+                        function
+                        | QualifiedCol(sourceName, column) ->
+                            sources
+                            |> List.tryFind (fun source -> equalsIgnoreCase source.Qualifier sourceName)
+                            |> Option.bind (fun source -> source.Expressions |> Map.tryFind (column.ToLowerInvariant()))
+                        | _ -> None
+
+                    let rewriteSources expression =
+                        expression
+                        |> Expression.rewriteSubqueryOuterReferences rewriteOuterReference
+                        |> Expression.rewrite (function
                             | Col column ->
                                 let expressions =
                                     sources
@@ -2715,15 +2775,7 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
                                 | [ expression ] -> Some expression
                                 | expression :: _ when Set.contains (column.ToLowerInvariant()) coalescedNames -> Some expression
                                 | _ -> None
-                            | _ -> None)
-
-                    let rewriteOuterReference =
-                        function
-                        | QualifiedCol(sourceName, column) ->
-                            sources
-                            |> List.tryFind (fun source -> equalsIgnoreCase source.Qualifier sourceName)
-                            |> Option.bind (fun source -> source.Expressions |> Map.tryFind (column.ToLowerInvariant()))
-                        | _ -> None
+                            | reference -> rewriteOuterReference reference)
 
                     let rewriteJoinedTable =
                         let rewriteSelect = Expression.rewriteSelectExpressions rewriteOuterReference
@@ -2811,7 +2863,7 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
                                     let keys =
                                         left
                                         |> Result.bind (fun left ->
-                                            FromItem.logicalColumns columnsOf rightSource.Reference
+                                            FromItem.logicalColumns columnsOf originalJoin.Table
                                             |> Result.bind (fun right -> FromItem.logicalJoinKeys left right originalJoin))
                                     let next =
                                         left |> Result.bind (fun left -> FromItem.logicalJoinColumns columnsOf left originalJoin)

@@ -5750,6 +5750,36 @@ let tests =
                     "DELETE t FROM target t JOIN filtered r ON t.id=r.id WHERE t.id=2" ] do
                   Expect.equal (run sql) (Affected 1UL) sql
 
+          testCase "saved joined view writes preserve correlated qualifiers when a source is renamed"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE alias_target(id INT PRIMARY KEY,n INT,tag INT)"
+                        "CREATE TABLE alias_labels(id INT PRIMARY KEY,tag INT)"
+                        "CREATE TABLE alias_allowed(id INT PRIMARY KEY)"
+                        "INSERT INTO alias_target VALUES(1,10,999),(2,20,999)"
+                        "INSERT INTO alias_labels VALUES(1,100),(2,200)"
+                        "INSERT INTO alias_allowed VALUES(1)"
+                        "CREATE VIEW plain_filter AS SELECT l.id,l.tag FROM alias_labels l WHERE EXISTS (SELECT 1 FROM alias_allowed p WHERE p.id=l.id)"
+                        "CREATE VIEW shadow_filter AS SELECT l.id,l.tag FROM alias_labels l WHERE EXISTS (SELECT 1 FROM alias_allowed r WHERE r.id=l.id)"
+                        "CREATE VIEW bare_filter AS SELECT l.id,l.tag FROM alias_labels l WHERE EXISTS (SELECT 1 FROM alias_allowed r WHERE r.id=tag-99)"
+                        "CREATE VIEW plain_join AS SELECT t.id,t.n,r.tag FROM alias_target t JOIN plain_filter r ON r.id=t.id"
+                        "CREATE VIEW shadow_join AS SELECT t.id,t.n,r.tag FROM alias_target t JOIN shadow_filter r ON r.id=t.id"
+                        "CREATE VIEW bare_join AS SELECT t.id,t.n,r.tag FROM alias_target t JOIN bare_filter r ON r.id=t.id"
+                        "CREATE VIEW guarded_join AS SELECT t.id,t.n,r.tag FROM alias_target t JOIN shadow_filter r ON r.id=t.id WHERE EXISTS (SELECT 1 FROM alias_allowed p WHERE p.id=r.id)" ]
+
+              for sql in
+                  [ "UPDATE plain_join SET n=n+1"
+                    "UPDATE shadow_join SET n=n+1"
+                    "UPDATE bare_join SET n=n+1"
+                    "UPDATE guarded_join SET tag=tag+1 WHERE id=1" ] do
+                  Expect.equal (run sql) (Affected 1UL) sql
+
+              Expect.equal (run "SELECT n FROM alias_target ORDER BY id")
+                  (ResultSet([ "n" ], [ [ Some "13" ]; [ Some "20" ] ])) "the correlated predicate selects only the allowed row"
+              Expect.equal (run "SELECT tag FROM alias_labels ORDER BY id")
+                  (ResultSet([ "tag" ], [ [ Some "101" ]; [ Some "200" ] ])) "the renamed component remains writable"
+
           testCase "geometry equality and binary casts use the SQL geometry bytes"
           <| fun _ ->
               let cartesian = "00000000010100000000000000000024400000000000004E40"

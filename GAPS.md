@@ -1090,8 +1090,9 @@ view reads remain available, as do reads of unwritten join components.
 now distinguish catalog updateability and CHECK OPTION eligibility from
 the individual UPDATE, DELETE, and INSERT decisions. A direct joined UPDATE
 also checks the expressions of a merged read-side view against the physical
-assignment targets. Some joined DELETE cases and predicates whose qualifiers
-change during a saved joined-view write still differ.
+assignment targets. Saved joined-view writes preserve qualified and audited
+bare correlations when a component is renamed. Some joined DELETE cases
+and bare correlations through scopes with unknown columns still differ.
 
 Uncorrelated scalar projection subqueries can leave direct columns writable
 while preventing insertion. Dependent projection subqueries refuse writes.

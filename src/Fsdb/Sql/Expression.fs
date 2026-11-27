@@ -438,11 +438,14 @@ let private relationAliases (select: SelectStmt) =
     |> List.collect FromItem.leaves
     |> List.choose FromItem.tryQualifier
 
-let private outerQualifiedRules replace =
-    let rec rulesFor shadowed =
+let private outerReferenceRules localColumns replace =
+    let rec rulesFor shadowedAliases shadowedColumns =
         { Replace =
             (function
-            | QualifiedCol(owner, _) as reference when not (Set.contains (owner.ToLowerInvariant()) shadowed) ->
+            | QualifiedCol(owner, _) as reference when not (Set.contains (owner.ToLowerInvariant()) shadowedAliases) ->
+                replace reference
+            | Col name as reference
+                when shadowedColumns |> Option.exists (fun names -> not (Set.contains (name.ToLowerInvariant()) names)) ->
                 replace reference
             | _ -> None)
           Projection = id
@@ -452,11 +455,21 @@ let private outerQualifiedRules replace =
                     relationAliases nested
                     |> List.map _.ToLowerInvariant()
                     |> Set.ofList
-                Some(rulesFor (Set.union shadowed locals)) }
-    rulesFor Set.empty
+                let columns = shadowedColumns |> Option.bind (fun names ->
+                    localColumns |> Option.bind (fun getColumns ->
+                        getColumns nested |> Option.map (Set.union names)))
+                Some(rulesFor (Set.union shadowedAliases locals) columns) }
+    rulesFor Set.empty (localColumns |> Option.map (fun _ -> Set.empty))
+
+let private outerQualifiedRules replace = outerReferenceRules None replace
 
 let rewriteSubqueryOuterReferences replace expression =
     let rules = outerQualifiedRules replace
+    rewriteTreeWith { rules with Replace = fun _ -> None } expression
+
+/// Bare correlated names can be rebound when every intervening scope has known columns.
+let internal rewriteSubqueryOuterReferencesWithColumns localColumns replace expression =
+    let rules = outerReferenceRules (Some localColumns) replace
     rewriteTreeWith { rules with Replace = fun _ -> None } expression
 
 let subqueryRelationAliases statement =

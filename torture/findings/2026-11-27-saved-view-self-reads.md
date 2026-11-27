@@ -87,6 +87,43 @@ loading a checkpoint containing the view definitions.
 
 Joined DELETE still has differences for scalar subqueries and for
 predicates that MySQL keeps as subqueries during view resolution.
-The direct correlated EXISTS control remains allowed. A separate
-saved joined-view UPDATE can also fail with 1054 in Fsdb when the
-outer definition renames the read-side view's source qualifier.
+The direct correlated EXISTS control remains allowed.
+
+## Aliases in saved joined views
+
+When a saved joined view inlines another view, a correlated reference
+in the inner predicate keeps its original relation. Fsdb now rewrites
+the physical qualifier inside the subquery and assigns a fresh physical
+alias if the requested name is already used locally. Within known
+physical column scopes, it also preserves an unqualified correlation
+before exposing it to the extra columns of the enclosing join.
+[MySQL correlated name resolution](https://dev.mysql.com/doc/refman/8.4/en/correlated-subqueries.html)
+
+```sql
+CREATE TABLE items (id INT PRIMARY KEY, n INT);
+CREATE TABLE labels (id INT PRIMARY KEY, tag INT);
+CREATE TABLE allowed (id INT PRIMARY KEY);
+INSERT INTO items VALUES (1, 10), (2, 20);
+INSERT INTO labels VALUES (1, 100), (2, 200);
+INSERT INTO allowed VALUES (1);
+CREATE VIEW filtered AS SELECT l.id, l.tag FROM labels l
+  WHERE EXISTS (SELECT 1 FROM allowed r WHERE r.id = l.id);
+CREATE VIEW joined AS
+  SELECT i.id, i.n, r.tag FROM items i JOIN filtered r ON r.id = i.id;
+
+UPDATE joined SET n = n + 1;
+SELECT id, n FROM items ORDER BY id;
+```
+
+Both engines update only row 1. Binding `l.id` to the inner `r` would
+make the predicate true for every outer row.
+
+The differential matrix improved from 22 to 46 matching outcomes
+and final row sets in both storage modes. It includes a second level
+of correlation, a qualified CTE, generated-name collisions,
+`NATURAL JOIN`, `USING`, and cascading check options. Additional
+probes confirmed that an inner column retains its owner and that a
+check option still rejects an update that would remove the row from
+the view. Binary prepared writes to the qualified and bare variants
+matched after checkpoint restart. Bare references through CTEs or
+other scopes with unknown columns still need broader name binding.
