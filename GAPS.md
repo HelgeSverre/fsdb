@@ -662,6 +662,11 @@ Douglas–Peucker simplification for SRID 0 and projected geometries.
 It preserves the audited ring and component order, drops collapsed
 components, and reports MySQL's geographic-SRS and argument errors.
 
+[`ST_Collect`](torture/findings/2026-11-27-spatial-collect.md) supports
+grouped and window aggregation, including `DISTINCT` spatial equality.
+Unions of geometry and bare NULL retain geometry values for downstream
+spatial functions.
+
 [`ST_Validate`](torture/findings/2026-11-27-spatial-validate.md) preserves
 valid geometry and shares topology checks with `ST_IsValid`. The
 planar checks distinguish single-point ring contacts from disconnected

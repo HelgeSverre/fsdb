@@ -1,0 +1,38 @@
+CREATE DATABASE fsdb_spatial_collect;
+USE fsdb_spatial_collect;
+CREATE TABLE samples (id INT PRIMARY KEY, grp INT, g GEOMETRY);
+INSERT INTO samples VALUES
+    (1,1,POINT(2,2)),(2,1,NULL),(3,1,POINT(1,1)),(4,1,POINT(2,2)),
+    (5,2,ST_GeomFromText('LINESTRING(0 0,1 1)')),
+    (6,2,ST_GeomFromText('LINESTRING(1 1,0 0)')),
+    (7,3,ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')),(8,4,NULL),
+    (9,5,POINT(1,2)),(10,5,ST_GeomFromText('POINT(1 2)',4326));
+
+SELECT grp,ST_AsText(ST_Collect(ALL g)),ST_AsText(ST_Collect(DISTINCT g))
+FROM samples WHERE grp<5 GROUP BY grp ORDER BY grp;
+SELECT ST_AsText(ST_Collect(g)) FROM samples WHERE grp=0;
+SELECT ST_AsText(ST_Collect(g)), ST_SRID(ST_Collect(g)) FROM samples WHERE id=10;
+SELECT id,
+    ST_AsText(ST_Collect(DISTINCT g) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)),
+    ST_AsText(ST_Collect(g) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING))
+FROM samples WHERE grp=1 ORDER BY id;
+SELECT ST_AsText(ST_Collect(g)) FROM samples WHERE id IN (1,5);
+SELECT ST_AsText(ST_Collect(ST_GeomFromText('MULTIPOINT((1 2),(3 4))')));
+SELECT ST_AsText(ST_Collect(ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0),(1 1,2 1,2 2,1 2,1 1))')));
+SELECT ST_AsText(ST_Collect(ST_GeomFromText('POLYGON((0 0,0 4,4 4,4 0,0 0))',4326)));
+SELECT ST_AsText(ST_Collect(DISTINCT g)) FROM
+    (SELECT POINT(1,1) AS g UNION ALL SELECT POINT(1.0000000000000002,1) UNION ALL SELECT POINT(1.0000000000000004,1)) AS p;
+SELECT ST_AsText(ST_Collect(DISTINCT g)) FROM
+    (SELECT ST_GeomFromText('GEOMETRYCOLLECTION EMPTY') AS g
+     UNION ALL SELECT ST_GeomFromText('GEOMETRYCOLLECTION(GEOMETRYCOLLECTION EMPTY)')) AS p;
+SELECT ST_AsText(ST_Collect(DISTINCT g)) FROM
+    (SELECT ST_GeomFromText('GEOMETRYCOLLECTION(POINT(0 0),LINESTRING(0 0,2 2))',4326) AS g
+     UNION ALL SELECT ST_GeomFromText('LINESTRING(2 2,0 0)',4326)) AS p;
+SELECT ST_AsText(ST_Collect(DISTINCT g)) FROM
+    (SELECT ST_GeomFromText('GEOMETRYCOLLECTION(MULTIPOINT((3 4)),LINESTRING(0 0,2 2))',4326) AS g
+     UNION ALL SELECT ST_GeomFromText('LINESTRING(0 0,2 2)',4326)) AS p;
+SELECT COLLATION(ST_Collect(g)), COERCIBILITY(ST_Collect(g)), CHARSET(ST_Collect(g)) FROM samples WHERE grp=1;
+SELECT ST_Collect(g) FROM samples WHERE grp=5;
+SELECT ST_Collect(1);
+SELECT ST_Collect('invalid');
+DROP DATABASE fsdb_spatial_collect;

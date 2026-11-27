@@ -647,7 +647,7 @@ let private whitespaceSensitiveFunctionNames =
           "date_add"; "date_sub"; "extract"; "group_concat"; "max"; "mid"; "min"; "now"
           "position"; "session_user"; "std"; "stddev"; "stddev_pop"; "stddev_samp"; "subdate"
           "substr"; "substring"; "sum"; "sysdate"; "system_user"; "trim"; "variance"; "var_pop"
-          "var_samp" ],
+          "var_samp"; "st_collect" ],
         StringComparer.OrdinalIgnoreCase
     )
 
@@ -1416,6 +1416,9 @@ let private distinctAggregates =
 let private distinctArg: Parser<Expr, unit> =
     (attempt (keyword "DISTINCT" >>. expr) |>> Distinct) <|> expr
 
+let private collectArguments =
+    ((keyword "ALL" >>. expr) <|> distinctArg) |>> List.singleton
+
 /// A function call built from a *raw* word rather than `identifier` — tried
 /// before the reserved-word check, the same way MySQL disambiguates a
 /// function name from a keyword (`IF(...)`, `LEFT(...)`): a word
@@ -1516,6 +1519,8 @@ let private genericFuncCall: Parser<Expr, unit> =
                     if not qualified && normalizedName = "name_const" then nameConstArguments
                     elif not qualified && normalizedName = "point" then
                         pipe2 (expr .>> sym ",") expr (fun x y -> [ x; y ])
+                    elif not qualified && normalizedName = "st_collect" then
+                        collectArguments
                     else sepBy (if not qualified && distinctAggregates.Contains name then distinctArg else expr) (sym ",")
 
                 openParen
@@ -1636,7 +1641,7 @@ let private windowFunctionNames =
         [ yield! windowOnlyFunctionNames
           "SUM"; "COUNT"; "AVG"; "MIN"; "MAX"; "GROUP_CONCAT"; "BIT_AND"; "BIT_OR"; "BIT_XOR"
           "STD"; "STDDEV"; "STDDEV_POP"; "STDDEV_SAMP"; "VARIANCE"; "VAR_POP"; "VAR_SAMP"
-          "JSON_ARRAYAGG"; "JSON_OBJECTAGG" ],
+          "JSON_ARRAYAGG"; "JSON_OBJECTAGG"; "ST_COLLECT" ],
         System.StringComparer.OrdinalIgnoreCase
     )
 
@@ -1676,8 +1681,12 @@ let private windowCallAtom: Parser<Expr, unit> =
             if not (windowFunctionNames.Contains name) then
                 fail "not a window function"
             else
+                let arguments =
+                    if name.Equals("ST_COLLECT", StringComparison.OrdinalIgnoreCase) then collectArguments
+                    else sepBy (if distinctAggregates.Contains name then distinctArg else expr) (sym ",")
+
                 functionOpenParen (whitespaceSensitiveFunctionNames.Contains name)
-                >>. sepBy (if distinctAggregates.Contains name then distinctArg else expr) (sym ",")
+                >>. arguments
                 .>> sym ")"
                 .>> followedByL (keyword "OVER") "OVER"
                 |>> fun args -> name, args

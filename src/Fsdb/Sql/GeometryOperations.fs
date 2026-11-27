@@ -92,15 +92,15 @@ let private simplifyPath squaredTolerance (points: (float * float) array) =
         | [ first; second ] when sameCartesianPosition first second -> [ first ]
         | simplified -> simplified
 
+let private planarRingAreaSign ring =
+    // The trapezoidal sum is positive for counter-clockwise rings.
+    let area = ring |> List.pairwise |> List.sumBy (fun ((x, y), (u, v)) -> (x + u) * (v - y))
+    if area > 0.0 then 1 elif area < 0.0 then -1 else 0
+
 let internal simplifyPlanar tolerance (geometry: Geometry) =
     let squaredTolerance = tolerance * tolerance
-    let ringAreaSign ring =
-        // The trapezoidal sum is positive for counter-clockwise rings.
-        let area = ring |> List.pairwise |> List.sumBy (fun ((x, y), (u, v)) -> (x + u) * (v - y))
-        if area > 0.0 then 1 elif area < 0.0 then -1 else 0
-
     let simplifyRing expectedSign ring =
-        let sign = ringAreaSign ring
+        let sign = planarRingAreaSign ring
         let source = (if sign = -expectedSign then List.rev ring else ring) |> List.toArray
         let sign = if sign = 0 then 0 else expectedSign
         let size = source.Length
@@ -118,7 +118,7 @@ let internal simplifyPlanar tolerance (geometry: Geometry) =
                     else
                         let rotated = Array.init size (fun index -> source.[(anchor + index) % contourSize])
                         let reduced = simplifyPath squaredTolerance rotated
-                        if ringAreaSign reduced = sign then Some reduced
+                        if planarRingAreaSign reduced = sign then Some reduced
                         elif visited.IsEmpty && (ring |> List.pairwise |> List.sumBy (fun (a, b) -> planarPointDistance a b)) < 3.0 * tolerance then None
                         else tryAnchors anchor (Set.add anchor visited) rest
 
@@ -691,6 +691,25 @@ let private orientGeographicPolygonRings referenceSystem =
 
     List.mapi (fun index ring -> orient (index > 0) ring)
 
+let internal normalizePolygonWinding referenceSystem geometry =
+    let orient =
+        if referenceSystem.SemiMajorAxis.IsSome then orientGeographicPolygonRings referenceSystem
+        else
+            List.mapi (fun index ring ->
+                let sign = planarRingAreaSign ring
+                if (index = 0 && sign < 0) || (index > 0 && sign > 0) then List.rev ring else ring)
+
+    let rec normalize geometry =
+        let shape =
+            match geometry.Shape with
+            | GPolygon rings -> GPolygon(orient rings)
+            | GMultiPolygon polygons -> GMultiPolygon(List.map orient polygons)
+            | GGeometryCollection members -> GGeometryCollection(List.map normalize members)
+            | shape -> shape
+        { geometry with Shape = shape }
+
+    normalize geometry
+
 let private geographicRingContains referenceSystem includeBoundary point ring =
     let flattening = referenceSystem.InverseFlattening |> Option.map (fun value -> 1.0 / value) |> Option.defaultValue 0.0
     let area = geographicRingAreaSign referenceSystem ring
@@ -1222,6 +1241,17 @@ let internal geographicLineLineTopology referenceSystem firstLines secondLines =
       Overlaps = overlaps && not crosses
       FirstContainsSecond = firstContainsSecond
       SecondContainsFirst = secondContainsFirst }
+
+let internal geographicLineworkEquals referenceSystem first second =
+    let undirectedSegments lines =
+        geographicLineSegments lines
+        |> Seq.map (fun (start, finish) -> if start <= finish then start, finish else finish, start)
+        |> Set.ofSeq
+
+    // Matching endpoints define the same geodesic without an approximate midpoint test.
+    undirectedSegments first = undirectedSegments second
+    || (let topology = geographicLineLineTopology referenceSystem first second
+        topology.FirstContainsSecond && topology.SecondContainsFirst)
 
 let internal geographicLineLineDistance referenceSystem firstLines secondLines =
     let firstSegments = geographicLineSegments firstLines
@@ -2049,12 +2079,12 @@ let private compareRelationPoint (y, x) (otherY, otherX) =
 // MySQL's lower-bound search depends on the ordering of near-equal points
 // because the coordinate tolerance is not transitive. Match the oracle's
 // partition and insertion order, with bounds and an exact depth fallback.
-let internal geographicOrderedPointMembership points =
-    let ordered = points |> List.map geographicPointRadians |> List.toArray
+let private orderedPointMembership coordinates points =
+    let ordered = points |> List.map coordinates |> List.toArray
     orderRelationPoints compareRelationPoint ordered
 
     fun point ->
-        let target = geographicPointRadians point
+        let target = coordinates point
         let mutable lower = 0
         let mutable upper = ordered.Length
         while lower < upper do
@@ -2063,6 +2093,9 @@ let internal geographicOrderedPointMembership points =
             else upper <- middle
 
         lower < ordered.Length && compareRelationPoint target ordered[lower] >= 0
+
+let internal geographicOrderedPointMembership = orderedPointMembership geographicPointRadians
+let internal cartesianOrderedPointMembership = orderedPointMembership (fun (x, y) -> y, x)
 
 let private overlayGeographicPoints kind firstShape (first: (float * float) list) secondShape (second: (float * float) list) =
     // MySQL dispatches a Point before a MultiPoint for the commutative
@@ -3374,11 +3407,11 @@ let private geographicCoveredPoint referenceSystem = function
     | GMultiPolygon polygons -> Some(geographicAreaCoversPoint referenceSystem polygons)
     | _ -> None
 
-let rec private tryGeographicPointTree = function
+let rec internal tryPointTree = function
     | GEmpty -> Some []
     | GGeometryCollection members ->
         members
-        |> List.map (fun memberGeometry -> tryGeographicPointTree memberGeometry.Shape)
+        |> List.map (fun memberGeometry -> tryPointTree memberGeometry.Shape)
         |> tryAllSome
         |> Option.map List.concat
     | shape -> geographicPointMembers shape
@@ -3389,7 +3422,7 @@ let private cleanGeographicPointTree shape =
         | GGeometryCollection members ->
             let addMember retained (memberGeometry: Geometry) =
                 let cleaned = removeDuplicates memberGeometry.Shape
-                match tryGeographicPointTree cleaned with
+                match tryPointTree cleaned with
                 | Some (_ :: _ as points) ->
                     let contains = geographicOrderedPointMembership points
                     let duplicate =
@@ -3567,6 +3600,48 @@ let private subtractGeographicPolygonsFromLines referenceSystem srid lines polyg
             | GEmpty -> Some []
             | _ -> None)
 
+let private dissolveGeographicAreas referenceSystem polygons =
+    (Some [], polygons)
+    ||> List.fold (fun state polygon ->
+        state |> Option.bind (fun existing -> tryGeographicPolygonUnion referenceSystem (polygon :: existing)))
+
+let internal geographicCollectionEquals referenceSystem (first: Geometry) (second: Geometry) =
+    let withoutCoveredMembers geometry =
+        let points, lines, polygons = collectionParts geometry.Shape
+        match geometry.Shape with
+        | GGeometryCollection _ ->
+            dissolveGeographicAreas referenceSystem polygons
+            |> Option.bind (fun areas ->
+                subtractGeographicPolygonsFromLines referenceSystem geometry.Srid lines areas
+                |> Option.map (fun exterior ->
+                    let uncovered point =
+                        not (geographicAreaCoversPoint referenceSystem areas point
+                             || geographicLineworkCoversPoint referenceSystem exterior point)
+                    List.filter uncovered points, exterior, areas))
+        | _ -> Some(points, lines, polygons)
+
+    let sameMembers equivalent first second =
+        match first, second with
+        | [], [] -> true
+        | [], _ | _, [] -> false
+        | _ -> equivalent first second
+
+    let samePoints first second =
+        List.forall (geographicOrderedPointMembership first) second
+        && List.forall (geographicOrderedPointMembership second) first
+
+    let sameAreas first second =
+        let topology = geographicPolygonPolygonTopology referenceSystem first second
+        topology.FirstContainsSecond && topology.SecondContainsFirst
+
+    withoutCoveredMembers first
+    |> Option.bind (fun (points, lines, areas) ->
+        withoutCoveredMembers second
+        |> Option.map (fun (otherPoints, otherLines, otherAreas) ->
+            sameMembers samePoints points otherPoints
+            && sameMembers (geographicLineworkEquals referenceSystem) lines otherLines
+            && sameMembers sameAreas areas otherAreas))
+
 let private intersectGeographicCollectionWithPoints referenceSystem srid collection pointShape points =
     let memberPoints, lines, polygons = collectionParts collection
     subtractGeographicPolygonsFromLines referenceSystem srid lines polygons
@@ -3655,11 +3730,7 @@ let internal tryGeographicOverlay referenceSystem kind (first: Geometry) (second
             | areas ->
                 // Each member is unioned with the accumulated area. The
                 // next turn uses the geodesics through those output vertices.
-                let dissolved =
-                    (Some [], areas)
-                    ||> List.fold (fun state polygon ->
-                        state |> Option.bind (fun existing -> tryGeographicPolygonUnion referenceSystem (polygon :: existing)))
-                dissolved
+                dissolveGeographicAreas referenceSystem areas
                 |> Option.bind (fun polygons ->
                     subtractGeographicPolygonsFromLines referenceSystem first.Srid (lines @ otherLines) polygons
                     |> Option.map (fun exteriorLines ->
@@ -3719,7 +3790,7 @@ let internal tryGeographicOverlay referenceSystem kind (first: Geometry) (second
                     | None -> shape
                 | _ -> shape
 
-        match tryGeographicPointTree left, tryGeographicPointTree right with
+        match tryPointTree left, tryPointTree right with
         | Some [], Some _ when kind = OverlayKind.SymmetricDifference && rightCollection ->
             Some(cleanGeographicPointTree right)
         | Some [], Some rightPoints ->

@@ -5340,6 +5340,54 @@ let tests =
               | Error(1582, _) -> ()
               | other -> failtestf "expected the invalid argument count to fail at prepare time, got %A" other
 
+          testCase "ST_Collect preserves input order and deduplicates spatially equal shapes"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "USE fsdb"
+                        "CREATE TABLE samples (id INT PRIMARY KEY, grp INT, g GEOMETRY)"
+                        "INSERT INTO samples VALUES (1,1,POINT(2,2)),(2,1,NULL),(3,1,POINT(1,1)),(4,1,POINT(2,2)),(5,2,ST_GeomFromText('LINESTRING(0 0,1 1)')),(6,2,ST_GeomFromText('LINESTRING(1 1,0 0)')),(7,3,ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')),(8,4,NULL),(9,5,POINT(1,2)),(10,5,ST_GeomFromText('POINT(1 2)',4326))" ]
+
+              match run "SELECT grp,ST_AsText(ST_Collect(g)),ST_AsText(ST_Collect(DISTINCT g)) FROM samples WHERE grp<5 GROUP BY grp ORDER BY grp" with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows
+                      [ [ Some "1"; Some "MULTIPOINT((2 2),(1 1),(2 2))"; Some "MULTIPOINT((2 2),(1 1))" ]
+                        [ Some "2"; Some "MULTILINESTRING((0 0,1 1),(1 1,0 0))"; Some "MULTILINESTRING((0 0,1 1))" ]
+                        [ Some "3"; Some "GEOMETRYCOLLECTION(GEOMETRYCOLLECTION EMPTY)"; Some "GEOMETRYCOLLECTION(GEOMETRYCOLLECTION EMPTY)" ]
+                        [ Some "4"; None; None ] ]
+                      "grouped collections retain the first representative and ignore SQL NULL"
+              | other -> failtestf "expected grouped collections, got %A" other
+
+              match run "SELECT ST_AsText(ST_Collect(DISTINCT g) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)) FROM samples WHERE grp=1 ORDER BY id" with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows
+                      [ [ Some "MULTIPOINT((2 2))" ]; [ Some "MULTIPOINT((2 2))" ]
+                        [ Some "MULTIPOINT((1 1))" ]; [ Some "MULTIPOINT((1 1),(2 2))" ] ]
+                      "the moving window collects distinct shapes in frame order"
+              | other -> failtestf "expected window collections, got %A" other
+
+              TestSupport.Sql.expectError 4034 (run "SELECT ST_Collect(g) FROM samples WHERE grp=5") "mixed spatial references"
+              TestSupport.Sql.expectError 3037 (run "SELECT ST_Collect(1)") "invalid GIS input"
+              TestSupport.Sql.expectError 3548 (run "SELECT ST_Collect('invalid')") "undefined SRID in binary input"
+              TestSupport.Sql.expectError 1064 (run "SELECT ST_Collect()") "the native aggregate requires one argument"
+
+              match run "SELECT ST_AsText(ST_Collect(g)) FROM (SELECT NULL AS g UNION ALL SELECT POINT(3,4) UNION ALL SELECT ST_GeomFromText('LINESTRING(0 0,1 1)')) AS combined" with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "GEOMETRYCOLLECTION(POINT(3 4),LINESTRING(0 0,1 1))" ] ] "UNION ALL retains typed geometries"
+              | other -> failtestf "expected collection over UNION ALL, got %A" other
+
+              let session = create 1 (Fsdb.Storage.create ())
+              for sql in [ "SELECT ST_Collect(?) AS g"; "SELECT ST_Collect(DISTINCT ?) OVER () AS g" ] do
+                  match prepareStatementForSession session sql with
+                  | Ok(statement, count) ->
+                      let parameters, columns = preparedMetadata session statement count
+                      Expect.equal (parameters |> List.map _.TypeId) [ TypeVarString ] "native unconstrained placeholder"
+                      Expect.equal (columns |> List.map (fun column ->
+                          let metadata = column.Metadata
+                          metadata.TypeId, metadata.ColumnLength, metadata.Decimals, metadata.Flags, metadata.CollationId))
+                          [ TypeGeometry, 16777216u, 31uy, BinaryFlag, Some Fsdb.Collation.binaryId ] "nullable geometry metadata"
+                  | Error error -> failtestf "expected spatial aggregate to prepare, got %A" error
+
           testCase "ST_Simplify retains ordered vertices and drops collapsed components"
           <| fun _ ->
               let run = queryFixture [ "USE fsdb" ]

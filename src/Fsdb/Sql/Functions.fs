@@ -6981,6 +6981,11 @@ let private geometryPredicateFn functionName predicate =
         let result =
             match referenceSystem.SemiMajorAxis, first.Shape, second.Shape with
             | None, _, _ -> predicate first second
+            | Some _, GGeometryCollection _, _
+            | Some _, _, GGeometryCollection _ when functionName = "ST_EQUALS" ->
+                match geographicCollectionEquals referenceSystem first second with
+                | Some _ as result -> result
+                | None -> remainingGeographicPredicate referenceSystem first second
             | Some _, EmptyGeography, EmptyGeography ->
                 if functionName = "ST_EQUALS" then Some true else None
             | Some _, EmptyGeography, _
@@ -7011,15 +7016,16 @@ let private geometryPredicateFn functionName predicate =
                             pointLinePredicate referenceSystem lineFirst points lines
                         | None ->
                             match linework first.Shape, linework second.Shape, functionName with
-                            | Some firstLines, Some secondLines, ("ST_CROSSES" | "ST_TOUCHES" | "ST_OVERLAPS" | "ST_CONTAINS" | "ST_WITHIN" | "ST_EQUALS") ->
+                            | Some firstLines, Some secondLines, "ST_EQUALS" ->
+                                Some(geographicLineworkEquals referenceSystem firstLines secondLines)
+                            | Some firstLines, Some secondLines, ("ST_CROSSES" | "ST_TOUCHES" | "ST_OVERLAPS" | "ST_CONTAINS" | "ST_WITHIN") ->
                                 let topology = geographicLineLineTopology referenceSystem firstLines secondLines
                                 match functionName with
                                 | "ST_CROSSES" -> Some topology.Crosses
                                 | "ST_TOUCHES" -> Some topology.Touches
                                 | "ST_OVERLAPS" -> Some topology.Overlaps
                                 | "ST_CONTAINS" -> Some topology.FirstContainsSecond
-                                | "ST_WITHIN" -> Some topology.SecondContainsFirst
-                                | _ -> Some(topology.FirstContainsSecond && topology.SecondContainsFirst)
+                                | _ -> Some topology.SecondContainsFirst
                             | _ ->
                                 match functionName, linePolygonShapes first.Shape second.Shape with
                                 | ("ST_CROSSES" | "ST_TOUCHES" | "ST_CONTAINS" | "ST_WITHIN" | "ST_EQUALS"), Some(polygonFirst, lines, areas) ->
@@ -7045,6 +7051,65 @@ let private geometryPredicateFn functionName predicate =
         |> Option.map (fun value -> VInt(if value then 1L else 0L))
         |> Option.defaultValue VNull
     | _ -> nativeParameterCountError (functionName.ToLowerInvariant())
+
+let private geometryEqualsFn =
+    let planarEquals first second =
+        match tryPointTree first.Shape, tryPointTree second.Shape with
+        | Some points, Some other ->
+            Some(List.forall (cartesianOrderedPointMembership points) other
+                 && List.forall (cartesianOrderedPointMembership other) points)
+        | Some [], _ | _, Some [] -> Some false
+        | _ -> geometryEqualsPlanar first second
+
+    geometryPredicateFn "ST_EQUALS" planarEquals
+
+let internal collectGeometries distinct (inputs: seq<Result<Value, int * string>>) =
+    try
+        let geometries = ResizeArray<Geometry>()
+
+        inputs
+        |> Seq.iteri (fun index input ->
+            Limits.checkQueryCancellation index
+            match input with
+            | Error(code, message) -> raise (SqlError(code, message))
+            | Ok VNull -> ()
+            | Ok value ->
+                let geometry = gisStringGeometryArgument "st_collect" value
+                let referenceSystem = spatialReferenceSystem "st_collect" geometry.Srid
+                requireWellFormedGisGeometry "st_collect" geometry
+                if geometries.Count > 0 && geometries.[0].Srid <> geometry.Srid then
+                    let firstSrid = geometries.[0].Srid
+                    raise (SqlError(4034, $"Arguments to function st_collect contains geometries with different SRIDs: {firstSrid} and {geometry.Srid}. All geometries must have the same SRID."))
+                geometries.Add(normalizePolygonWinding referenceSystem geometry))
+
+        if geometries.Count = 0 then Ok VNull
+        else
+            let members =
+                if distinct then
+                    let unique = ResizeArray<Geometry>()
+                    for index = 0 to geometries.Count - 1 do
+                        Limits.checkQueryCancellation index
+                        let candidate = geometries.[index]
+                        let equivalent accepted =
+                            accepted.Shape = candidate.Shape
+                            || geometryEqualsFn [ VGeometry accepted; VGeometry candidate ] = VInt 1L
+                        if not (Seq.exists equivalent unique) then unique.Add candidate
+                    Seq.toList unique
+                else Seq.toList geometries
+
+            let narrow select construct =
+                let parts = members |> List.choose (fun geometry -> select geometry.Shape)
+                if parts.Length = members.Length then construct parts else GGeometryCollection members
+
+            let shape =
+                match (List.head members).Shape with
+                | GPoint _ -> narrow (function GPoint(x, y) -> Some(x, y) | _ -> None) GMultiPoint
+                | GLineString _ -> narrow (function GLineString line -> Some line | _ -> None) GMultiLineString
+                | GPolygon _ -> narrow (function GPolygon polygon -> Some polygon | _ -> None) GMultiPolygon
+                | _ -> GGeometryCollection members
+
+            Ok(VGeometry { Srid = geometries.[0].Srid; Shape = shape })
+    with SqlError(code, message) -> Error(code, message)
 
 let private mbrPredicateFn functionName relation =
     binaryGeometryWithSameSridFn functionName (fun first second ->
@@ -7168,7 +7233,7 @@ let private registerSpatialBuiltins registry =
     |> registerScalar "ST_LINEINTERPOLATEPOINT" (geometryLineInterpolateFn "ST_LineInterpolatePoint" FractionPoint)
     |> registerScalar "ST_LINEINTERPOLATEPOINTS" (geometryLineInterpolateFn "ST_LineInterpolatePoints" FractionPoints)
     |> registerScalar "ST_POINTATDISTANCE" (geometryLineInterpolateFn "ST_PointAtDistance" AbsolutePoint)
-    |> registerScalar "ST_EQUALS" (geometryPredicateFn "ST_EQUALS" geometryEqualsPlanar)
+    |> registerScalar "ST_EQUALS" geometryEqualsFn
     |> registerScalar "ST_CONTAINS" (geometryPredicateFn "ST_CONTAINS" geometryContainsPlanar)
     |> registerScalar "ST_WITHIN" (geometryPredicateFn "ST_WITHIN" (fun first second -> geometryContainsPlanar second first))
     |> registerScalar "ST_INTERSECTS" (geometryPredicateFn "ST_INTERSECTS" geometryIntersectsPlanar)

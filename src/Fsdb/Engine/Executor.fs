@@ -3280,8 +3280,9 @@ let rec private validateExpressionBindings resolve validateSubquery nodeDiagnost
 /// the same reason: an `Aggregate` sees one already-NULL-filtered value per
 /// row, and neither fits — `JSON_ARRAYAGG` must keep its NULL rows as JSON
 /// `null`, and `JSON_OBJECTAGG` takes two arguments per row.
+/// `ST_COLLECT` also needs its own fold because DISTINCT uses spatial equality.
 let private directAggregateNames =
-    set [ "GROUP_CONCAT"; "JSON_ARRAYAGG"; "JSON_OBJECTAGG" ]
+    set [ "GROUP_CONCAT"; "JSON_ARRAYAGG"; "JSON_OBJECTAGG"; "ST_COLLECT" ]
 
 let private isAggregateFunctionName (registry: Registry) (name: string) =
     directAggregateNames.Contains(name.ToUpperInvariant())
@@ -4674,6 +4675,15 @@ let private isBareNullProjection index (select: SelectStmt) =
         |> List.tryItem index
         |> Option.exists (fun projection -> match projection.Expression with Lit VNull -> true | _ -> false))
 
+let private geometryExpressionMetadata =
+    { ColumnWire.parameterMetadataOfType(TGeometry Geometry) with CollationId = Some Collation.binaryId }
+
+let private tryGeometryUnionMetadata (columns: ColumnMetadata list) =
+    if List.exists (fun column -> column.TypeId = TypeGeometry) columns
+       && List.forall (fun column -> column.TypeId = TypeGeometry || column.TypeId = TypeNull) columns then
+        Some geometryExpressionMetadata
+    else None
+
 let private tryMediumIntegerUnionMetadata (columns: ColumnMetadata list) =
     if columns |> List.exists (fun column -> column.TypeId = TypeInt24) then
         let types = [| TypeTiny; TypeShort; TypeInt24; TypeLong; TypeLongLong |]
@@ -5448,6 +5458,7 @@ let rec private expressionCollation (ctx: EvalContext) (expression: Expr) : Resu
         when name.Equals("JSON_ARRAYAGG", System.StringComparison.OrdinalIgnoreCase)
              || name.Equals("JSON_OBJECTAGG", System.StringComparison.OrdinalIgnoreCase) ->
         named "utf8mb4_bin" 2
+    | FuncCall(name, _) when equalsIgnoreCase name "ST_COLLECT" -> named "binary" 2
     | FuncCall(name, _) when
         match name.ToUpperInvariant() with
         | "USER"
@@ -9014,6 +9025,7 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | ("STD" | "STDDEV" | "STDDEV_POP" | "STDDEV_SAMP" | "VARIANCE" | "VAR_POP" | "VAR_SAMP"), _ -> simple TypeDouble
         | "GROUP_CONCAT", _ -> Some(ColumnWire.metadataOfType TText)
         | ("JSON_ARRAYAGG" | "JSON_OBJECTAGG"), _ -> json
+        | "ST_COLLECT", _ -> Some geometryExpressionMetadata
         | "GROUPING", _ -> simple TypeLongLong
         | ("MIN" | "MAX"), [ arg ] ->
             metadataOfExpr ctx arg
@@ -11073,6 +11085,10 @@ and private describeQueryColumnDescriptorsInScope
 
         let numericParts = columns |> List.map _.NumericParts
         let resolvedNumericParts = tryAllSome numericParts
+        let geometryMetadata =
+            columns
+            |> List.map (fun descriptor -> descriptor.WireMetadata |> Option.defaultWith (fun () -> ColumnWire.metadataOfType descriptor.Column.Type))
+            |> tryGeometryUnionMetadata
 
         let decimalType parts =
             let scale = parts |> List.map snd |> List.max
@@ -11093,6 +11109,10 @@ and private describeQueryColumnDescriptorsInScope
 
         let mergedType =
             match types, resolvedNumericParts with
+            | types, _ when geometryMetadata.IsSome ->
+                match types with
+                | (TGeometry _ as first) :: rest when List.forall ((=) first) rest -> first
+                | _ -> TGeometry Geometry
             | types, _ when types |> List.exists (stringLength >> Option.isSome) && types |> List.exists (fun ty -> decimalParts ty |> Option.isSome) ->
                 stringType
             | types, Some parts when types |> List.exists (function TDecimal _ -> true | _ -> false) -> decimalType parts
@@ -11136,7 +11156,12 @@ and private describeQueryColumnDescriptorsInScope
                     rest |> List.fold (fun combined next -> combined |> Result.bind (fun current -> combineStringCollations "UNION" current next)) (Ok first))
             |> Result.toOption
             |> Option.map (fun identity -> identity.Collation.Name, identity.Coercibility)
-        describeColumn { computedColumn first.Column.Name mergedType nullable clearedDefault collation with ExpressionCollation = expressionCollation }
+        let wireMetadata =
+            if columns |> List.forall (fun column -> column.WireMetadata |> Option.exists (fun metadata -> metadata.TypeId = TypeNull)) then
+                Some(Value.columnMetadata TypeNull)
+            else geometryMetadata
+        { describeColumn { computedColumn first.Column.Name mergedType nullable clearedDefault collation with ExpressionCollation = expressionCollation } with
+            WireMetadata = wireMetadata }
 
     let unionColumns (branches: ViewColumnDescriptor list list) =
         match branches with
@@ -11549,7 +11574,9 @@ and private describeQueryColumnDescriptorsInScope
                                 Some(computedColumn name (TVarchar(text.EnumerateRunes() |> Seq.length)) false (Some(DConst(VString ""))) (Some(Collation.defaultNameForCharset charset)) |> describeColumn)
                             | Lit(VString text) ->
                                 Some(computedColumn name (TVarchar(text.EnumerateRunes() |> Seq.length)) false (Some(DConst(VString ""))) (Some "utf8mb4_0900_ai_ci") |> describeColumn)
-                            | Lit VNull -> Some(computedColumn name (TVarBinary 0) true None None |> describeColumn)
+                            | Lit VNull ->
+                                Some { describeColumn (computedColumn name (TVarBinary 0) true None None) with
+                                           WireMetadata = Some(Value.columnMetadata TypeNull) }
                             | _ -> None
 
                         let decimalExpressionColumn () =
@@ -21405,11 +21432,11 @@ and private tryCumeDistDenseRanks
 /// FLOAT/DOUBLE promote it further; a string anywhere poisons the column to
 /// VAR_STRING (verified: `UNION` of '10', '9', 2, 1.5 sorts as strings —
 /// '1.5,10,2,9', not numerically); DATE + DATETIME lands on DATETIME;
-/// all-JSON branches (plus bare NULL) retain JSON; anything else falls back
-/// to text.
+/// JSON and geometry retain their types with bare NULL branches.
 and private unionAggregateType (columns: ColumnMetadata list) : ColumnMetadata =
     let types = columns |> List.map _.TypeId
     let mediumInteger = tryMediumIntegerUnionMetadata columns
+    let geometry = tryGeometryUnionMetadata columns
     let isInt t =
         t = Value.TypeTiny
         || t = Value.TypeShort
@@ -21419,7 +21446,8 @@ and private unionAggregateType (columns: ColumnMetadata list) : ColumnMetadata =
     let isDate t = t = Value.TypeDate
     let isDateTime t = t = Value.TypeDateTime || t = Value.TypeTimestamp
 
-    if types |> List.contains Value.TypeJson
+    if geometry.IsSome then geometry.Value
+    elif types |> List.contains Value.TypeJson
        && types |> List.forall (fun t -> t = Value.TypeJson || t = Value.TypeNull) then
         { Value.columnMetadata Value.TypeJson with Flags = Value.BinaryFlag }
     elif types |> List.exists (fun t -> t = Value.TypeVarString || t = Value.TypeString || t = Value.TypeVarchar || t = Value.TypeBlob) then
@@ -21952,6 +21980,9 @@ and private evalAggregateUsing<'row>
             |> traverse (fun row ->
                 evaluateArgument row 0 keyExpr |> Result.bind (fun k -> evaluateArgument row 1 valueExpr |> Result.map (fun v -> k, v)))
             |> Result.map Functions.jsonObjectAggregate
+    | [ arg ] when upper = "ST_COLLECT" ->
+        let distinct, expression = unwrapDistinct arg
+        rows |> Seq.map (fun row -> evaluateArgument row 0 expression) |> Functions.collectGeometries distinct
     | [ arg ] when not (directAggregateNames.Contains upper) ->
         let distinct, innerExpr = unwrapDistinct arg
         let isMin = equalsIgnoreCase name "MIN"
@@ -24667,7 +24698,7 @@ and private runWindowedSelect
                     // these as 1235 rather than evaluating them.
                     if System.String.Equals(name, "GROUP_CONCAT", System.StringComparison.OrdinalIgnoreCase) then
                         Error(1235, "This version of MySQL doesn't yet support 'group_concat as window function'")
-                    elif args |> List.exists (function Distinct _ -> true | _ -> false) then
+                    elif not (equalsIgnoreCase name "ST_COLLECT") && (args |> List.exists (function Distinct _ -> true | _ -> false)) then
                         Error(1235, "This version of MySQL doesn't yet support '<window function>(DISTINCT ..)'")
                     else
                         let values = aggregateValues name args
@@ -29776,8 +29807,10 @@ let private statementExpressionMetadata includeGeometry store registry schema st
                 |> List.map (fun candidates ->
                     candidates
                     |> tryAllSome
-                    |> Option.bind tryMediumIntegerUnionMetadata
-                    |> Option.map (fun metadata -> { metadata with Flags = metadata.Flags ||| BinaryFlag }))
+                    |> Option.bind (fun metadata ->
+                        let integer = tryMediumIntegerUnionMetadata metadata |> Option.map (fun column -> { column with Flags = column.Flags ||| BinaryFlag })
+                        if includeGeometry then integer |> Option.orElseWith (fun () -> tryGeometryUnionMetadata metadata)
+                        else integer))
                 |> Some
             | _ -> None)
     | _ -> None
