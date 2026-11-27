@@ -1709,7 +1709,9 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
     let primaryText (s: string) = s |> foldText |> trim
     let fullTextKeyText (s: string) =
         if name = "utf8mb4_general_ci" || name = "utf8mb3_general_ci" then
-            foldGeneral false s |> trim
+            // Lowercasing handles dotted capital I. Dotless i stays
+            // lowercase but has the same primary weight as ASCII i.
+            s.Replace('ı', 'i') |> foldGeneral false |> trim
         elif name = "utf8mb4_unicode_520_ci" then
             // MySQL's ngram index keeps the older token equivalence classes.
             s |> foldKanaLigatures |> foldUnicode520 false |> trim

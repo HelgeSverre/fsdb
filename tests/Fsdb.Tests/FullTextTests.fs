@@ -257,6 +257,45 @@ let tests =
                   for query, expected in [ "中ɥ", [ 2 ]; "中Ꭰ", [ 3 ]; "中ß", smallSharpS ] do
                       Expect.equal (booleanScores index ("\"" + query + "\"") |> ids) expected (name + " Boolean " + query)
 
+          testCase "legacy general ngram postings give dotted and dotless I the same weight"
+          <| fun _ ->
+              let documents =
+                  [ 1, [ "京İ花"; "京ı花" ]; 2, [ "雑音" ]; 3, [ "東京" ]; 4, [ "京Ｉ花" ] ]
+
+              for name in [ "utf8mb3_general_ci"; "utf8mb4_general_ci" ] do
+                  let index =
+                      buildIndexWithStopwords StopwordPolicy.Disabled (Ngrams 2) (tryFind name |> Option.get) documents
+
+                  for view in [ index; flushPostings index ] do
+                      for term, row, score in
+                          [ "京i", 1, 0.7249524593353271; "京I", 1, 0.7249524593353271
+                            "京İ", 1, 0.7249524593353271; "京ı", 1, 0.7249524593353271
+                            "京Ｉ", 4, 0.3624762296676636 ] do
+                          for scores in [ naturalScores view term; booleanScores view ("\"" + term + "\"") ] do
+                              let label = name + " " + term
+                              Expect.equal (scores |> Map.keys |> Seq.toList) [ row ] label
+                              closeTo score scores.[row] label
+
+          testCase "recovery syncs cached ngram streams whose collation keys have merged"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_general_ci" |> Option.get
+              let index =
+                  buildIndexWithStopwords StopwordPolicy.Disabled (Ngrams 2) collation []
+                  |> flushPostings
+                  |> addDocument 1 "京İ"
+                  |> addDocument 2 "京ı"
+                  |> removeDocument 2
+              let next = nextDocumentOrder index
+              let through = flushedThrough index
+              let spellings = Some [ "京i"; "京ı" ]
+              let recovered = restoreCache (Some next) through spellings None false index
+
+              Expect.equal (flushedThrough recovered) (Some(next - 1L)) "the merged postings are synced"
+              Expect.isEmpty (cachedTermsInInsertionOrder recovered) "the old cache has no pending terms"
+              Expect.isNonEmpty (deletedPostings index) "a cached delete is present"
+              Expect.equal (deletedPostings recovered) (deletedPostings index) "the cached delete is retained"
+              Expect.equal (naturalScores recovered "京ı") (naturalScores index "京i") "ranking uses the merged postings"
+
           testCase "legacy utf8mb3 ngram postings fold Kana and keep Hangul syllables distinct from Jamo"
           <| fun _ ->
               let rules = indexingRules (Ngrams 2) StopwordPolicy.BuiltIn

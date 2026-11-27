@@ -41,7 +41,7 @@ relevance, with a relative tolerance of 0.000005 for scores.
 | Total | 16,437 | 21,970 | 22,320 |
 
 All 3,720 query-expansion cases matched. No previously matching case
-regressed. The remaining differences cover wildcard behavior and
+regressed. Differences after that pass covered wildcard behavior and
 `utf8mb4_general_ci` ngram keys involving dotted and dotless I. The
 previous 180-case stopword grouping matrix now matches in full.
 
@@ -49,3 +49,47 @@ All 45 checks using mixed stored documents matched the oracle and
 reproduced after WAL-only recovery and checkpoint reload. The FSNZ
 snapshot records the document's build path. An FSNY checkpoint made
 before the change reloaded with its historical search results.
+
+## Dotted and dotless I
+
+Both `utf8mb3_general_ci` and `utf8mb4_general_ci` give `I`, `i`, `İ`,
+and `ı` the primary weight `0049`. Fullwidth `Ｉ` has the separate
+weight `FF29`. The pinned case table already lowercases `İ` to `i`.
+The full-text key now folds the remaining dotless `ı` to that same
+posting key. [MySQL legacy collation tables](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/strings/ctype-utf8.cc)
+
+```sql
+SET SESSION innodb_ft_enable_stopword=OFF;
+CREATE TABLE docs(id INT PRIMARY KEY,a TEXT,b TEXT) COLLATE utf8mb4_general_ci;
+INSERT INTO docs VALUES (1,'京İ花','京ı花'),(2,'雑音',''),(3,'東京',''),(4,'京Ｉ花','');
+ALTER TABLE docs ADD FULLTEXT(a,b) WITH PARSER ngram;
+SELECT id, MATCH(a,b) AGAINST('京i' IN BOOLEAN MODE) AS score
+FROM docs WHERE MATCH(a,b) AGAINST('京i' IN BOOLEAN MODE) ORDER BY id;
+-- 1, 0.7249524593353271 on MySQL 8.4.11
+```
+
+The score previously counted one occurrence and was about 0.3624762.
+All 36 focused wire checks match, including natural and Boolean searches,
+quoted terms, and the fullwidth control. A checkpoint with the two old
+cache keys syncs the merged postings on load, including retained deletes.
+All 48 recovery queries match MySQL after loading WAL and checkpoints
+written both before and after this change.
+All 378 custom-stopword checks also match across the two general
+collations and `utf8mb4_bin`, varying the stopword table and index
+collations independently in bulk, mixed, and incremental histories.
+
+The 22,320-query matrix now matches 22,060 results, up from 21,970.
+The ngram parser gained 72 matches and the default parser gained 18,
+with no regressions. All 260 remaining differences in that matrix are
+Boolean wildcard searches. SQL comparison and weight-string handling
+of dotless I remain open.
+
+In a default-parser probe, eight documents include three with words
+starting with `京ap`. The first matching document contains three
+`京apple`, one `京apply`, and two `京apex`. The other matching documents
+contain three `京apply` and one `京apex`. For `京ap*`, MySQL uses a
+document frequency of five, the sum of matching word postings, and
+the first visited word's frequency for each row. The first document
+scores about 0.08333 after a bulk build and 0.12499 when it is in the
+write cache. Fsdb currently scores it about 1.08870 in both histories.
+[MySQL posting frequency accumulation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L2736-L2824)

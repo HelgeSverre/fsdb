@@ -1612,7 +1612,10 @@ preserve the rule used by each document. [Bulk full-text builds](torture/finding
 check the original spelling against stopwords and store lowercase postings
 for both parsers, including under binary collations. Phrase anchors use
 retained posting positions and query expansion reads the document spelling.
-Some short wildcard searches and legacy collation keys remain open.
+[Dotted and dotless I in both legacy general collations](torture/findings/2026-11-27-fulltext-bulk-spelling.md#dotted-and-dotless-i)
+now share a full-text posting key. Recovery syncs historical cache streams
+when their keys merge. Some wildcard searches and other legacy collation
+keys remain open.
 
 [Exact legacy `WEIGHT_STRING` bytes](torture/findings/2026-11-04-extension-a-exact-weights.md#implicit-ideograph-encoder-follow-up)
 now match all 137,910 adjacent-pair oracle cases across Extension A and the

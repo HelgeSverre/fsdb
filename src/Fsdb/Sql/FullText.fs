@@ -906,15 +906,18 @@ let internal restoreCache nextOrder through saved savedBudget hasSegmentEnds (in
     | None -> index
     | Some through ->
         let rebuilt = lazy (cacheDocumentsAfter through index (FullTextCache.empty, FullTextCache.emptyBudget))
-        let terms =
+        let terms, mergedTerms =
             match saved with
             | _ when usesAccentSensitivePrefixes index.Collation index.Rules.Tokenizer ->
-                restoreAccentCacheTerms through index
+                restoreAccentCacheTerms through index, false
             | Some spellings ->
-                spellings |> Seq.fold (addTermSpelling index.Collation) FullTextCache.empty
+                ((FullTextCache.empty, false), spellings)
+                ||> List.fold (fun (terms, merged) spelling ->
+                    let added = addTermSpelling index.Collation terms spelling
+                    added, merged || obj.ReferenceEquals(terms, added))
             | None ->
                 // Older snapshots can reproduce the insertion order of live documents.
-                fst rebuilt.Value
+                fst rebuilt.Value, false
         let budget: FullTextCache.Budget =
             match savedBudget with
             | None -> snd rebuilt.Value
@@ -939,7 +942,10 @@ let internal restoreCache nextOrder through saved savedBudget hasSegmentEnds (in
                         | _ -> tail
                     key, restored) |> Map.ofList
                 { Bytes = bytes; Tails = tails }
-        { index with CachedTerms = terms; CacheBudget = budget }
+        let index = { index with CachedTerms = terms; CacheBudget = budget }
+        // The old tails describe separate posting streams. The rebuilt
+        // index already holds the merged postings, including deletes.
+        if mergedTerms then syncCachedPostings index else index
 
 let internal publishCachedTerms (baseline: Index<'id>) (index: Index<'id>) =
     if index.FlushedThrough.IsNone
