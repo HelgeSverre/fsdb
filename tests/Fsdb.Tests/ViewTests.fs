@@ -57,6 +57,47 @@ let tests =
               let live = "WITH c AS (SELECT id FROM base) SELECT id,n FROM base WHERE EXISTS (SELECT 1 FROM c WHERE c.id=base.id)"
               TestSupport.Sql.expectError 1368 (run store $"CREATE VIEW live_check AS {live} WITH CHECK OPTION") "a live self-read still blocks CHECK OPTION"
 
+          testCase "check options follow the outer view shape over read-only query sources"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE base(id INT PRIMARY KEY,n INT)"
+                    "CREATE TABLE partner(id INT PRIMARY KEY)"
+                    "INSERT INTO base VALUES(1,10),(3,30)"
+                    "INSERT INTO partner VALUES(1)" ] do
+                  expectOk (run store sql) sql
+
+              for name, definition, option in
+                  [ "checked_cte", "WITH c AS (SELECT id,n FROM base) SELECT id,n FROM c", "CASCADED"
+                    "checked_derived", "SELECT id,n FROM (SELECT id,n FROM base) c", "LOCAL"
+                    "checked_aggregate_cte", "WITH c AS (SELECT COUNT(*) AS n FROM base) SELECT n FROM c", "LOCAL"
+                    "checked_two_derived", "SELECT c.id,c.n FROM (SELECT id,n FROM base) c JOIN (SELECT id FROM partner) p USING(id)", "CASCADED"
+                    "checked_nested", "SELECT id,n FROM checked_cte", "LOCAL"
+                    "checked_join", "WITH c AS (SELECT id,n FROM base) SELECT c.id,c.n FROM c JOIN partner p USING(id)", "CASCADED" ] do
+                  let create = $"CREATE VIEW {name} AS {definition} WITH {option} CHECK OPTION"
+                  expectOk (run store create) create
+                  Expect.equal
+                      (rows store $"SELECT is_updatable,check_option FROM information_schema.views WHERE table_name='{name}'")
+                      [ [ Some "YES"; Some option ] ] "the outer projection supplies the updatable metadata"
+
+              for name in [ "checked_cte"; "checked_derived"; "checked_two_derived"; "checked_nested"; "checked_join" ] do
+                  TestSupport.Sql.expectError 1288 (run store $"UPDATE {name} SET n=11 WHERE id=1") name
+                  TestSupport.Sql.expectError 1471 (run store $"INSERT INTO {name} VALUES(2,20)") name
+              for name in [ "checked_cte"; "checked_derived" ] do
+                  TestSupport.Sql.expectError 1288 (run store $"DELETE FROM {name} WHERE id=3") name
+
+              for definition in
+                  [ "VIEW outer_distinct AS WITH c AS (SELECT * FROM base) SELECT DISTINCT * FROM c"
+                    "VIEW outer_constant AS SELECT 1 AS n FROM (SELECT * FROM base) c"
+                    "VIEW outer_limit AS WITH c AS (SELECT * FROM base) SELECT * FROM c LIMIT 1"
+                    "VIEW outer_window AS WITH c AS (SELECT * FROM base) SELECT n,ROW_NUMBER() OVER() AS w FROM c"
+                    "VIEW ordered_window AS SELECT id FROM base ORDER BY ROW_NUMBER() OVER(ORDER BY n)"
+                    "ALGORITHM=TEMPTABLE VIEW temp_view AS WITH c AS (SELECT * FROM base) SELECT * FROM c" ] do
+                  TestSupport.Sql.expectError 1368 (run store $"CREATE {definition} WITH CHECK OPTION") definition
+
+              Expect.equal (rows store "SELECT id,n FROM base ORDER BY id") [ [ Some "1"; Some "10" ]; [ Some "3"; Some "30" ] ]
+                  "unwritable projections leave the base rows intact"
+
           testCase "variable writes disable heuristic view merging for one statement"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

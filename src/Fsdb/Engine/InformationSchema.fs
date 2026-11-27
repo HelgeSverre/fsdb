@@ -2222,8 +2222,14 @@ let internal viewDefinitionInheritsSelfRead catalog schema select =
             | _ -> false)
     check Set.empty schema select
 
-let private isUpdatableView (catalog: Catalog) (view: SystemCatalog.View.Entry) =
-    let views = viewCatalogEntries catalog
+let internal viewDefinitionHasWindow (select: SelectStmt) =
+    let hasWindow = Expression.exists (function WindowOver _ -> true | _ -> false)
+    not select.Windows.IsEmpty
+    || (select.Projections |> List.exists (_.Expression >> hasWindow))
+    || (select.OrderBy |> List.exists (fst >> hasWindow))
+
+let internal viewDefinitionIsUpdatable (catalog: Catalog) schema algorithm statement =
+    let views = lazy (viewCatalogEntries catalog)
 
     let isPhysicalTable defaultSchema (source: TableRef) =
         let sourceSchema = source.Database |> Option.defaultValue defaultSchema
@@ -2233,8 +2239,7 @@ let private isUpdatableView (catalog: Catalog) (view: SystemCatalog.View.Entry) 
         |> Option.bind (Map.tryFind (source.Table.ToLowerInvariant()))
         |> Option.isSome
 
-    let rec check seen (view: SystemCatalog.View.Entry) =
-        let schema = view.Schema
+    let rec check seen schema (algorithm: string) statement =
         let sourceAllowsUpdates (source: TableRef) =
             let sourceSchema = source.Database |> Option.defaultValue schema
             let key = sourceSchema.ToLowerInvariant(), source.Table.ToLowerInvariant()
@@ -2242,29 +2247,21 @@ let private isUpdatableView (catalog: Catalog) (view: SystemCatalog.View.Entry) 
             if isPhysicalTable schema source then
                 true
             else
-                views
+                views.Value
                 |> List.tryFind (fun view ->
                     view.Schema.Equals(sourceSchema, StringComparison.OrdinalIgnoreCase)
                     && view.Name.Equals(source.Table, StringComparison.OrdinalIgnoreCase))
                 |> Option.exists (fun sourceView ->
-                    not (Set.contains key seen) && check (Set.add key seen) sourceView)
+                    not (Set.contains key seen)
+                    && (match Parser.parseSavedViewDefinition sourceView.Definition with
+                        | Ok parsed -> check (Set.add key seen) sourceView.Schema sourceView.Algorithm parsed.Statement
+                        | Error _ -> false))
 
-        match view.Algorithm.Equals("TEMPTABLE", StringComparison.OrdinalIgnoreCase),
-              (Parser.parseSavedViewDefinition view.Definition |> Result.map _.Statement) with
+        match algorithm.Equals("TEMPTABLE", StringComparison.OrdinalIgnoreCase), statement with
         | true, _ -> false
-        | _, Ok(Select parsed) ->
-            // Direct CTE projections have MySQL's updatable metadata even when
-            // the source CTE itself is read-only.
-            let directCteSource =
-                parsed.Joins.IsEmpty
-                && (match parsed.From with
-                    | Some(FromTable table) when table.Database.IsNone ->
-                        parsed.Ctes
-                        |> List.exists (fun cte -> cte.CteName.Equals(table.Table, StringComparison.OrdinalIgnoreCase))
-                    | _ -> false)
+        | _, Select parsed ->
             let select =
-                if directCteSource then { parsed with Ctes = [] }
-                else parsed |> inlineReadOnlyViewCtes catalog schema |> flattenInnerJoinedOperands catalog schema
+                parsed |> inlineReadOnlyViewCtes catalog schema |> flattenInnerJoinedOperands catalog schema
             match select.From with
             | Some source ->
                 let sourceAllowsUpdates = function
@@ -2277,13 +2274,9 @@ let private isUpdatableView (catalog: Catalog) (view: SystemCatalog.View.Entry) 
                     // when the source itself cannot accept a write.
                     | FromSubquery _ -> true
                     | _ -> false
-                let sourceOrderAllowsUpdates =
-                    match source, select.Joins with
-                    | FromTable _, _ -> true
-                    | FromSubquery _, [] -> true
-                    | (FromSubquery _ | FromLateral _ | FromJsonTable _), _ :: _ ->
-                        tryLeadingReadOnlyWritableTarget source select.Joins |> Option.isSome
-                    | _ -> false
+                let sourceSupported = function
+                    | FromTable _ | FromSubquery _ | FromLateral _ | FromJsonTable _ -> true
+                    | FromJoinGroup _ -> false
                 let joinsSupported =
                     select.Joins
                     |> List.forall (fun join ->
@@ -2291,13 +2284,13 @@ let private isUpdatableView (catalog: Catalog) (view: SystemCatalog.View.Entry) 
                          || join.Kind = StraightJoin
                          || join.Kind = CrossJoin
                          || join.Kind = NaturalJoin)
-                        && (match join.Table with FromTable _ | FromSubquery _ | FromLateral _ | FromJsonTable _ -> true | _ -> false))
+                        && sourceSupported join.Table)
                 let queryAllowsUpdates =
                     not select.Distinct
                     && not select.CalculateFoundRows
                     && select.GroupBy.IsEmpty
                     && not select.Rollup
-                    && select.Windows.IsEmpty
+                    && not (viewDefinitionHasWindow select)
                     && select.Having.IsNone
                     && select.Limit.IsNone
                     && select.Offset.IsNone
@@ -2313,25 +2306,17 @@ let private isUpdatableView (catalog: Catalog) (view: SystemCatalog.View.Entry) 
                 let writableSource =
                     sourceAllowsUpdates source
                     || (select.Joins |> List.exists (fun join -> sourceAllowsUpdates join.Table))
-                let ordinaryShape =
-                    sourceOrderAllowsUpdates
-                    && joinsSupported
-                    && select.Ctes.IsEmpty
-                    && writableSource
-                // MySQL reports a direct outer projection over a recursive
-                // read-only source as updatable, although UPDATE rejects it.
-                let recursiveReadOnlyShape =
-                    (parsed.Ctes |> List.exists _.Recursive)
-                    && (match source with FromSubquery _ -> true | _ -> false)
-                    && joinsSupported
-                if not queryAllowsUpdates || viewDefinitionReadsOwnTable catalog schema parsed then
-                    false
-                else
-                    ordinaryShape || recursiveReadOnlyShape || directCteSource
+                queryAllowsUpdates && sourceSupported source && joinsSupported && writableSource
+                && not (viewDefinitionReadsOwnTable catalog schema parsed)
             | _ -> false
         | _ -> false
 
-    check Set.empty view
+    check Set.empty schema algorithm statement
+
+let private isUpdatableView catalog (view: SystemCatalog.View.Entry) =
+    match Parser.parseSavedViewDefinition view.Definition with
+    | Ok parsed -> viewDefinitionIsUpdatable catalog view.Schema view.Algorithm parsed.Statement
+    | Error _ -> false
 
 let private viewsRows (catalog: Catalog) : Value[] list =
     viewCatalogEntries catalog

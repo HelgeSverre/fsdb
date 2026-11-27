@@ -35238,7 +35238,7 @@ let rec private executeAsWithViewSources
                 && not select.CalculateFoundRows
                 && select.GroupBy.IsEmpty
                 && not select.Rollup
-                && select.Windows.IsEmpty
+                && not (InformationSchema.viewDefinitionHasWindow select)
                 && select.Having.IsNone
                 && select.Limit.IsNone
                 && select.Offset.IsNone
@@ -35247,10 +35247,15 @@ let rec private executeAsWithViewSources
                 && not (select.OrderBy |> List.exists (fst >> containsAggregate registry))
             | _ -> false
 
-        let supportsCheckOption definer = function
-            | Select select ->
-                not (InformationSchema.viewDefinitionInheritsSelfRead (storeForStoredView store).Catalog db select)
-                && (updatableViewOfSelect store (candidateView algorithm definer) select |> Option.isSome)
+        let supportsCheckOption algorithm definer = function
+            | Select select as statement ->
+                let catalog = (storeForStoredView store).Catalog
+                supportsMergeAlgorithm statement
+                && not (InformationSchema.viewDefinitionInheritsSelfRead catalog db select)
+                && ((updatableViewOfSelect store (candidateView algorithm definer) select |> Option.isSome)
+                    // An updatable outer projection can accept CHECK OPTION
+                    // even when its source cannot be targeted by a write.
+                    || InformationSchema.viewDefinitionIsUpdatable catalog db algorithm statement)
             | _ -> false
 
         match parsedView, Map.containsKey db store.Catalog, duplicateColumns, objectError, definer with
@@ -35285,7 +35290,7 @@ let rec private executeAsWithViewSources
             | _ when viewContainsSessionVariable view ->
                 ids, Err(1351, "View's SELECT contains a variable or parameter")
             | Error error -> ids, Err error
-            | Ok() when checkOption <> "NONE" && not (supportsCheckOption definer view) ->
+            | Ok() when checkOption <> "NONE" && not (supportsCheckOption algorithm definer view) ->
                 ids, Err(1368, sprintf "CHECK OPTION on non-updatable view '%s.%s'" db viewName)
             | Ok() ->
                 missingDefiner

@@ -54,13 +54,30 @@ information schema omit unused top-level bindings in their canonical
 definitions, as MySQL does. Unused declarations can include recursive
 queries and references to missing tables or columns.
 
-The pinned MySQL 8.4.11 comparison matched 74 of 75 observations across
+The initial MySQL 8.4.11 comparison matched 74 of 75 observations across
 15 definitions in memory, with WAL, and after a checkpoint restart. It
 checked IS_UPDATABLE, UPDATE, INSERT, DELETE, and WITH CHECK OPTION.
 The check option still rejected an update that would remove a row from the
-view. The remaining difference is WITH CHECK OPTION on a view that selects
-directly from a live CTE. MySQL accepts the declaration and refuses writes
-through that view. Fsdb rejects the declaration with 1368.
+view. The live CTE case led to the follow-up below.
+
+## CHECK OPTION over read-only sources
+
+MySQL accepts LOCAL and CASCADED CHECK OPTION when the outer view exposes
+columns from a derived table or CTE. This includes recursive and aggregate
+CTEs, nested saved views, and inner joins whose sources are all read-only.
+The outer query's DISTINCT, LIMIT, and window functions still make the view
+ineligible. A window used only in ORDER BY counts at the outer level as well.
+The metadata and DDL classification are separate from write target resolution.
+
+The pinned MySQL 8.4.11 comparison matched all 42 tested CREATE, ALTER,
+and CREATE OR REPLACE decisions in memory and with WAL. The returned
+view metadata and rows in the restart fixture also matched before and
+after reopening the checkpoint. Rejected writes preserved the base rows.
+In a follow-up matrix of 13 standalone and joined DELETE statements, seven
+reported 1288 in Fsdb and 1395 in MySQL. The seven exposed a physical
+table alongside a CTE or derived table, including through a nested view
+and with a constant-only projection. Both engines rejected every write.
+Fsdb also quotes the view name in the corresponding 1471 INSERT diagnostic.
 
 ## Direct joined updates
 
