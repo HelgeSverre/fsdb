@@ -4034,6 +4034,35 @@ let private intersectGeographicCollectionWithPoints referenceSystem srid collect
             |> GGeometryCollection
         | _ -> matches)
 
+let private geographicCollectionGroups referenceSystem srid collection =
+    geographicUncoveredMembers referenceSystem srid collection
+    |> Option.map (fun (points, lines, polygons) ->
+        [ if not polygons.IsEmpty then GMultiPolygon polygons
+          if not lines.IsEmpty then GMultiLineString(distinctGeographicLines referenceSystem lines)
+          if not points.IsEmpty then GMultiPoint(distinctGeographicPoints points) ])
+
+let private geographicOverlayMembers = function
+    | GEmpty -> []
+    | GMultiPolygon polygons -> List.map GPolygon polygons
+    | GMultiLineString lines -> List.map GLineString lines
+    | GMultiPoint points -> List.map (fun (latitude, longitude) -> GPoint(latitude, longitude)) points
+    | GGeometryCollection members -> List.map _.Shape members
+    | shape -> [ shape ]
+
+let private geographicOverlayCollection srid = function
+    | [] -> GEmpty
+    | [ shape ] -> shape
+    | shapes -> GGeometryCollection(shapes |> List.map (fun shape -> { Srid = srid; Shape = shape }))
+
+let private tryOverlayGeographicGroups groups overlay compose =
+    groups
+    |> List.map overlay
+    |> tryAllSome
+    |> Option.map (function
+        | [] -> GEmpty
+        | [ shape ] -> narrowGeographicOverlayShape shape
+        | remaining -> List.collect geographicOverlayMembers remaining |> compose)
+
 let private tryGeographicCollectionDifference referenceSystem srid subtractMember left right =
     let rec subtract source mask =
         match source, mask with
@@ -4044,35 +4073,35 @@ let private tryGeographicCollectionDifference referenceSystem srid subtractMembe
                 state |> Option.bind (fun remaining -> subtract remaining memberGeometry.Shape))
         | _ -> subtractMember source mask
 
-    let expand = function
-        | GEmpty -> []
-        | GMultiPolygon polygons -> List.map GPolygon polygons
-        | GMultiLineString lines -> List.map GLineString lines
-        | GMultiPoint points -> List.map (fun (latitude, longitude) -> GPoint(latitude, longitude)) points
-        | shape -> [ shape ]
-
     match left with
     | GGeometryCollection _ ->
-        geographicUncoveredMembers referenceSystem srid left
-        |> Option.bind (fun (points, lines, polygons) ->
-            // Remove covered members before subtraction so opening a hole
-            // cannot reveal lower-dimensional members of the source.
-            let groups =
-                [ if not polygons.IsEmpty then GMultiPolygon polygons
-                  if not lines.IsEmpty then GMultiLineString(distinctGeographicLines referenceSystem lines)
-                  if not points.IsEmpty then GMultiPoint(distinctGeographicPoints points) ]
-            groups
-            |> List.map (fun group -> subtract group right)
-            |> tryAllSome
-            |> Option.map (function
-                | [] -> GEmpty
-                | [ shape ] -> narrowGeographicOverlayShape shape
-                | remaining ->
-                    match List.collect expand remaining with
-                    | [] -> GEmpty
-                    | [ shape ] -> shape
-                    | members -> GGeometryCollection(members |> List.map (fun shape -> { Srid = srid; Shape = shape }))))
+        // Opening a hole leaves covered members of the original source
+        // removed. Normalize the source before applying any mask member.
+        geographicCollectionGroups referenceSystem srid left
+        |> Option.bind (fun groups ->
+            tryOverlayGeographicGroups groups (fun group -> subtract group right) (geographicOverlayCollection srid))
     | _ -> subtract left right |> Option.map (orientGeographicPolygons referenceSystem >> narrowGeographicOverlayShape)
+
+let private tryGeographicCollectionIntersection referenceSystem srid intersectMember collection other =
+    let geometry shape = { Srid = srid; Shape = shape }
+    let equivalent first second =
+        first = second
+        || (geographicCollectionEquals referenceSystem (geometry first) (geometry second) |> Option.defaultValue false)
+    let compose = distinctComponents equivalent >> geographicOverlayCollection srid
+
+    let intersectGroups groups =
+        match other with
+        | GGeometryCollection _ ->
+            geographicCollectionGroups referenceSystem srid other
+            |> Option.bind (fun otherGroups ->
+                let againstOther group =
+                    // A collection supplies the groups when its partner is
+                    // a single shape, including a group from the first input.
+                    tryOverlayGeographicGroups otherGroups (fun otherGroup -> intersectMember otherGroup group) compose
+                tryOverlayGeographicGroups groups againstOther compose)
+        | _ -> tryOverlayGeographicGroups groups (fun group -> intersectMember group other) compose
+
+    geographicCollectionGroups referenceSystem srid collection |> Option.bind intersectGroups
 
 let rec internal tryGeographicOverlay referenceSystem kind (first: Geometry) (second: Geometry) =
     let result shape = { Srid = first.Srid; Shape = shape }
@@ -4237,15 +4266,20 @@ let rec internal tryGeographicOverlay referenceSystem kind (first: Geometry) (se
                         tryGeographicOverlay referenceSystem OverlayKind.Difference (result source) (result mask)
                         |> Option.map _.Shape
                     tryGeographicCollectionDifference referenceSystem first.Srid subtractMember left right
-            | _ ->
+            | OverlayKind.Intersection ->
+                let collection, other = if leftCollection then left, right else right, left
+                match geographicPointMembers other with
+                | Some points ->
+                    intersectGeographicCollectionWithPoints referenceSystem first.Srid collection other points
+                | None ->
+                    let intersectMember firstShape secondShape =
+                        tryGeographicOverlay referenceSystem OverlayKind.Intersection (result firstShape) (result secondShape)
+                        |> Option.map _.Shape
+                    tryGeographicCollectionIntersection referenceSystem first.Srid intersectMember collection other
+            | OverlayKind.SymmetricDifference ->
                 match tryAreas left, tryAreas right with
                 | Some a, Some b -> tryGeographicPolygonOverlay referenceSystem kind first.Srid a b
-                | _ ->
-                    let pointShape, collection = if leftCollection then right, left else left, right
-                    match kind, geographicPointMembers pointShape with
-                    | OverlayKind.Intersection, Some points ->
-                        intersectGeographicCollectionWithPoints referenceSystem first.Srid collection pointShape points
-                    | _ -> None
+                | _ -> None
 
     let shape =
         match first.Shape, second.Shape with

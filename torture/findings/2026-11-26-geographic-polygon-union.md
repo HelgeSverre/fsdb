@@ -162,3 +162,30 @@ in ring start and coordinate rounding. Of the earlier 612
 polygon comparisons, six differences involving polygon-only collections
 now match MySQL's WKT order. The other 606 results retained their
 previous Fsdb output.
+
+### Mixed collection intersection
+
+`ST_Intersection` normalizes each input collection before intersecting
+its area, line, and point groups. When both inputs are collections,
+each first-input group is intersected with the groups of the second.
+The output keeps the order of those intersections and removes equivalent
+members. A point returned by an area intersection can remain next to a
+line from a different group, even at that line's endpoint. Two surviving
+lines can remain separate geometry collection members. A single
+surviving member is returned on its own. [MySQL collection intersection](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/intersection_functor.cc#L175-L234) [MySQL result normalization](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/so_utils.cc#L88-L156)
+
+The intersection audit reused the 72 pairs, both directions, and
+three SRIDs from the difference audit. The baseline at `288b52ab`
+returned error 1235 in 324 of 432 cases. Fsdb now returns the same
+SQL geometry type as pinned MySQL 8.4.11 in all 432 cases. All
+point sets are within 0.0001° planar Hausdorff distance, with two
+empty results counted as a match. Normalized members and vertices match
+within 10⁻⁸ degrees in 388 cases. WKT matches exactly in 334 cases.
+Memory and WAL results agree. Near-boundary contacts can still
+produce different points, and some crossings differ in grouping
+or coordinates.
+
+Sixteen of 18 ordered controls match exact WKT. The other two
+combined multipart areas, boundary lines, and points and differ
+in coordinate serialization. The 612 earlier polygon cases and
+432 mixed difference cases retained their previous Fsdb outputs.

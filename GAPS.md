@@ -3536,8 +3536,11 @@ implementation effort:
    clipping ring's start, serialized ring starts, member ordering,
    and polar endpoints. [Geographic collection difference](torture/findings/2026-11-26-geographic-polygon-union.md#mixed-collection-difference)
    normalizes areas, lines, and points before applying the mask.
-   General mixed-collection intersection and symmetric difference
-   remain open.
+   [Geographic collection intersection](torture/findings/2026-11-26-geographic-polygon-union.md#mixed-collection-intersection)
+   also clips normalized dimensions against each other and retains
+   the collection's result order. Some near-boundary points and member
+   grouping still differ. Mixed-collection symmetric difference remains
+   open.
    Broader geographic polygon relation and precision rules remain open.
    Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
    and [line-to-line distance](torture/findings/2026-10-11-geographic-line-line-distance.md)

@@ -764,6 +764,28 @@ let tests =
                         Expect.equal (call "ST_SRID" [ result ]) (VInt 4326L) "the operation retains the SRID"
                         Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"{operation} of {left} and {right}"
 
+                testCase "geographic collection intersection keeps ordered dimension results"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let area = "POLYGON((0 -2,6 -2,6 2,0 2,0 -2))"
+                    let line = "LINESTRING(-4 0,10 0)"
+                    let inner = "POLYGON((2 -1,4 -1,4 1,2 1,2 -1))"
+                    let source = $"GEOMETRYCOLLECTION({area},GEOMETRYCOLLECTION({line},POINT(-5 0),POINT(3 0),POINT(8 0)))"
+                    let mask = $"GEOMETRYCOLLECTION({inner},LINESTRING(6 0,8 0),POINT(-5 0))"
+                    let far = "GEOMETRYCOLLECTION(POLYGON((12 -2,15 -2,15 2,12 2,12 -2)),LINESTRING(-4 0,-2 0),POINT(11 0))"
+                    let points = "GEOMETRYCOLLECTION(GEOMETRYCOLLECTION(POINT(-5 0)),POINT(3 0))"
+
+                    for first, second, expected in
+                        [ source, mask, $"GEOMETRYCOLLECTION({inner},POINT(6 0),LINESTRING(6 0,8 0),POINT(-5 0))"
+                          area, mask, $"GEOMETRYCOLLECTION({inner},POINT(6 0))"
+                          line, mask, "GEOMETRYCOLLECTION(LINESTRING(2 0,4 0),LINESTRING(6 0,8 0))"
+                          source, far, "LINESTRING(-4 0,-2 0)"
+                          source, points, "GEOMETRYCOLLECTION(POINT(3 0),POINT(-5 0))" ] do
+                        for left, right in [ first, second; second, first ] do
+                            let result = call "ST_Intersection" [ geometry left; geometry right ]
+                            Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"intersection of {left} and {right}"
+
                 testCase "geographic collection difference normalizes source dimensions before subtraction"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"
