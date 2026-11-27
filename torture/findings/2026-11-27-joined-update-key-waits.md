@@ -39,6 +39,18 @@ on disk. It covered autocommit, explicit transactions, more than
 one writable target, a cross-database foreign key, a CTE source,
 and a correlated EXISTS filter.
 
-Using a session-local temporary table as the source still diverges.
-The same competing insert led to 1205 in both audited Fsdb session
-modes, while MySQL skipped the conflicting update and changed row 3.
+## Session-local join sources
+
+For the same race, create and populate `selected` as a temporary
+table in session B. Before the fix, the competing insert could lead to
+1205 in Fsdb. The temporary overlay now shares the outer transaction's
+catalog refresh for permanent writes. It publishes permanent changes
+back to that transaction and retains temporary changes in session B.
+
+Twenty additional schedules matched MySQL 8.4.11 in memory and on disk.
+They covered ordinary UPDATE, UPDATE IGNORE, a cross-database foreign
+key, and a statement that updated both a permanent and a temporary
+target. The temporary source shadowed a permanent table with different
+rows, and the permanent table's contents stayed unchanged. A waiter
+rollback and a rollback to a savepoint both preserved the competing
+transaction's commit.

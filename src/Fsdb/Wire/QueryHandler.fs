@@ -4274,11 +4274,29 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
                 |> Seq.map (fun key -> key, CatalogOverlay.tryTable baseCatalog key)
                 |> Map.ofSeq }
     let workingSession = { session with Store = working; Tx = None }
+    // The overlay executes without its own transaction, but permanent writes
+    // still share the outer transaction's lock owner and catalog refresh.
+    let startedRebase =
+        match action, stmt with
+        | None, Update update when not update.Joins.IsEmpty ->
+            beginDynamicWriteRebaseForStatement session baseStore stmt
+        | _ -> false
+
+    let mutable rebasedBase = None
     let (executed, result), permanent =
-        Executor.withPermanentMutationResult working session.Store (fun () -> executeParsedCoreUnderLock workingSession stmt)
+        try
+            Executor.withPermanentMutationResult working session.Store (fun () -> executeParsedCoreUnderLock workingSession stmt)
+        finally
+            if startedRebase then
+                rebasedBase <- Storage.finishDynamicWriteRebase baseStore
+
+    let transaction =
+        match session.Tx, rebasedBase with
+        | Some tx, Some catalog -> Some { tx with BaseCatalog = catalog }
+        | _ -> session.Tx
 
     match result with
-    | Err _ -> { executed with Store = session.Store; Tx = session.Tx }, result
+    | Err _ -> { executed with Store = session.Store; Tx = transaction }, result
     | _ ->
         let afterKeys =
             match action with
@@ -4317,12 +4335,15 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
             |> Option.bind _.PendingEvents
             |> Option.iter events.AddRange)
 
-        Storage.commitCatalogInto baseStore baseCatalog working
+        if startedRebase && permanent.IsSome then
+            Storage.adoptTransactionSnapshot baseStore working
+        else
+            Storage.commitCatalogInto baseStore baseCatalog working
 
         let transaction =
             if action.IsNone && isDataChangeStatement stmt then
-                session.Tx |> Option.map (rememberTemporaryRows beforeKeys session.TemporaryCatalog temporaryCatalog)
-            else session.Tx
+                transaction |> Option.map (rememberTemporaryRows beforeKeys session.TemporaryCatalog temporaryCatalog)
+            else transaction
 
         { executed with
             Store = session.Store

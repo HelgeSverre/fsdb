@@ -7074,21 +7074,28 @@ let tests =
                   | ResultSet(_, actual) -> Expect.equal actual (expected |> List.map (List.map (string >> Some))) ending
                   | other -> failtestf "expected committed rows, got %A" other
 
-          testCase "autocommit joined updates see the key committed during their wait"
+          testCase "joined updates see the key committed during their wait with permanent or temporary sources"
           <| fun _ ->
               let run session sql expected =
                   let next, result = handle session sql
                   Expect.equal result expected sql
                   next
 
-              for ignoreDuplicate, ending in
-                  [ true, "COMMIT"; true, "ROLLBACK"; false, "COMMIT"; false, "ROLLBACK" ] do
+              for source, explicitTransaction, ignoreDuplicate, ending in
+                  [ yield! [ for ignoreDuplicate in [ true; false ] do
+                                 for ending in [ "COMMIT"; "ROLLBACK" ] do
+                                     yield "", false, ignoreDuplicate, ending ]
+                    yield! [ for explicitTransaction in [ true; false ] do
+                                 for ignoreDuplicate in [ true; false ] do
+                                     for ending in [ "COMMIT"; "ROLLBACK" ] do
+                                         yield "TEMPORARY ", explicitTransaction, ignoreDuplicate, ending ] ] do
                   let store = Fsdb.Storage.create ()
                   let setup = create 1 store
                   run setup "CREATE TABLE target(id INT PRIMARY KEY,k INT UNIQUE,qty INT)" (Affected 0UL) |> ignore
-                  run setup "CREATE TABLE selected(id INT PRIMARY KEY)" (Affected 0UL) |> ignore
                   run setup "INSERT INTO target VALUES(1,1,5),(3,5,5)" (Affected 2UL) |> ignore
-                  run setup "INSERT INTO selected VALUES(1),(3)" (Affected 2UL) |> ignore
+                  let waiter = run (create 3 store) $"CREATE {source}TABLE selected(id INT PRIMARY KEY)" (Affected 0UL)
+                  let waiter = run waiter "INSERT INTO selected VALUES(1),(3)" (Affected 2UL)
+                  let waiter = if explicitTransaction then run waiter "START TRANSACTION" (Affected 0UL) else waiter
                   let owner = run (create 2 store) "START TRANSACTION" (Affected 0UL)
                   let owner = run owner "INSERT INTO target VALUES(9,2,7)" (Affected 1UL)
                   let update = if ignoreDuplicate then "UPDATE IGNORE" else "UPDATE"
@@ -7097,7 +7104,7 @@ let tests =
                   let pending =
                       Threading.Tasks.Task.Run(fun () ->
                           started.Set()
-                          handle (create 3 store)
+                          handle waiter
                               $"{update} target a JOIN selected s ON s.id=a.id SET a.k=CASE a.id WHEN 1 THEN 2 ELSE 6 END,a.qty=a.qty+1")
                   Expect.isTrue (started.Wait 5000) "the joined update starts"
                   let blocked = not (pending.Wait 100)
@@ -7111,6 +7118,7 @@ let tests =
                       | true, _ -> Affected 1UL
                       | false, _ -> Err(1062, "Duplicate entry '2' for key 'target.k'")
                   Expect.equal result expectedResult ending
+                  let waiter = if explicitTransaction then run waiter "COMMIT" (Affected 0UL) else waiter
                   let expected =
                       match ignoreDuplicate, ending with
                       | _, "ROLLBACK" -> [ [ 1; 2; 6 ]; [ 3; 6; 6 ] ]
