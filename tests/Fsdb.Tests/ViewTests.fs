@@ -377,6 +377,33 @@ let tests =
               Expect.equal (rows store "SELECT id,n FROM a ORDER BY id") [ [ Some "1"; Some "10" ]; [ Some "3"; Some "30" ] ] "base rows remain"
               Expect.equal (rows store "SELECT id FROM b") [ [ Some "1" ] ] "join partner remains"
 
+          testCase "DELETE resolves base rows through computed-only view outputs"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE items(id INT PRIMARY KEY,n INT)"
+                    "INSERT INTO items VALUES(1,10),(2,20),(3,30),(4,40),(5,50)"
+                    "CREATE TABLE partner(score INT PRIMARY KEY)"
+                    "INSERT INTO partner VALUES(81)"
+                    "CREATE VIEW computed_rows AS SELECT n*2 AS score FROM items WHERE n>=20"
+                    "CREATE VIEW layered_rows AS SELECT score+1 AS score FROM computed_rows WHERE score>40"
+                    "CREATE VIEW constant_rows AS SELECT 1 AS marker FROM items WHERE id=2"
+                    "CREATE VIEW aggregate_rows AS SELECT SUM(n) AS score FROM items"
+                    "CREATE VIEW window_rows AS SELECT ROW_NUMBER() OVER (ORDER BY n) AS score FROM items"
+                    "CREATE ALGORITHM=TEMPTABLE VIEW read_only AS SELECT n*2 AS score FROM items" ] do
+                  expectOk (run store sql) sql
+
+              for name in [ "read_only"; "aggregate_rows"; "window_rows" ] do
+                  TestSupport.Sql.expectError 1288 (run store $"DELETE FROM {name}") "the view cannot merge with its base table"
+              for sql in
+                  [ "DELETE FROM computed_rows AS v WHERE v.score>=60 ORDER BY v.score DESC LIMIT 1"
+                    "DELETE v FROM layered_rows v JOIN partner p USING(score)"
+                    "DELETE FROM constant_rows WHERE marker=1"
+                    "DELETE FROM layered_rows WHERE score=61" ] do
+                  Expect.equal (run store sql) (Affected 1UL) sql
+              Expect.equal (rows store "SELECT id,n FROM items ORDER BY id") [ [ Some "1"; Some "10" ] ]
+                  "only the four visible target rows are deleted"
+
           testCase "a layer over a materialized view cannot write its base rows"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

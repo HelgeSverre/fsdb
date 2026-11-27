@@ -1131,8 +1131,12 @@ sources.
 reports the join-view error when a physical table remains writable, including
 when no projected column belongs to it.
 [Nested TEMPTABLE views](torture/findings/2026-11-27-saved-view-self-reads.md#nested-temptable-views)
-reject writes through outer layers. Some PREPARE and EXPLAIN diagnostics
-and writes through projections containing only computed columns still differ.
+reject writes through outer layers. Some joined UPDATE, PREPARE, and EXPLAIN
+diagnostics still differ.
+[DELETE through computed-only projections](torture/findings/2026-11-27-saved-view-self-reads.md#delete-through-computed-projections)
+locates physical rows in audited merged single-table views, including nested
+layers and when the view is a target of a joined DELETE. EXPLAIN still
+names the view, and UPDATE and INSERT return different diagnostics.
 [Audited `UNION DISTINCT` derived and CTE read sources](torture/findings/2026-11-04-union-distinct-updatable-view.md)
 also precede a writable physical target in an inner joined view, including
 duplicate elimination, ordered limited sources, one target write, and cascaded

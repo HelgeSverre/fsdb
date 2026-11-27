@@ -105,9 +105,27 @@ original rows.
 Some diagnostic wording still differs for these writes. In the three-layer
 fixture, joined UPDATE reports 1146 instead of 1288. PREPARE can defer the
 rejection until EXECUTE, and PREPARE and EXPLAIN can report an outer binding
-error before the non-updatable error that MySQL returns. MySQL permits
-DELETE through a merged view over a physical table whose outputs are all
-computed or constant. Fsdb still refuses that shape.
+error before the non-updatable error that MySQL returns.
+
+## DELETE through computed projections
+
+DELETE through a merged single-table view resolves the physical row
+independently of the output columns. The view can expose only computed
+or constant expressions. Each layer still has to merge, and TEMPTABLE,
+aggregate, and window views refuse the delete.
+
+The pinned MySQL 8.4.11 comparison matched row counts and final rows for
+standalone, ordered and limited, joined, and prepared DELETE in memory
+and with WAL. The base rows persisted after reopening a checkpoint.
+A joined DELETE through equal computed values in a keyless table
+deleted both distinct source rows and fired the trigger once for each
+row. A self-read of the physical target still returned 1443. A two-session
+WAL test also matched MySQL's row-lock timeout and deleted the row after the
+holding transaction rolled back.
+
+For fully computed projections, UPDATE and INSERT refuse the write with
+different diagnostics from MySQL. EXPLAIN DELETE still names the view
+and omits the base table estimate that MySQL reports.
 
 ## Direct joined updates
 

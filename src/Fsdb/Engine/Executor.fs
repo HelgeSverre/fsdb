@@ -1362,6 +1362,10 @@ let private viewTargetKey (target: ViewColumnTarget) =
 
 type private ViewTargetKey = string * string * string
 
+type private ViewMutation =
+    | ColumnWrite
+    | RowDelete of (SelectStmt -> bool)
+
 type private JoinViewCheck = { Predicate: Expr option }
 
 type private WritableViewSource =
@@ -1404,6 +1408,9 @@ type private UpdatableView =
       ReadAccessPaths: ViewReadAccess list list
       Definer: string
       SecurityType: string }
+
+let private viewDeleteTargetKey (view: UpdatableView) : ViewTargetKey =
+    view.Database, view.Table, (view.UpdateFrom.Alias |> Option.defaultValue view.UpdateFrom.Table)
 
 type private StoredTrigger =
     { Name: string
@@ -1670,7 +1677,7 @@ let private resolveViewOrderExpression projections expression =
     | Col name as column -> tryProjectionExpressionNamed projections name |> Option.defaultValue column
     | resolved -> resolved
 
-let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store: Store) (view: StoredView) (select: SelectStmt) : UpdatableView option =
+let private updatableViewOfSelectWith mutation allowHeuristicMerge forceRootMerge (store: Store) (view: StoredView) (select: SelectStmt) : UpdatableView option =
     let combine left right =
         match left, right with
         | Some left, Some right -> Some(BinOp(And, left, right))
@@ -1880,7 +1887,11 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
             |> InformationSchema.flattenInnerJoinedOperands store.Catalog view.Schema
         let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
 
-        if equalsIgnoreCase view.Algorithm "TEMPTABLE"
+        let supportsMutation =
+            match mutation with
+            | ColumnWrite -> true
+            | RowDelete canMerge -> canMerge select
+        if not supportsMutation || equalsIgnoreCase view.Algorithm "TEMPTABLE"
            || Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting
            || (not allowHeuristicMerge && not (equalsIgnoreCase view.Algorithm "MERGE")
                && not (seen.IsEmpty && forceRootMerge && equalsIgnoreCase view.Algorithm "UNDEFINED")) then
@@ -2043,13 +2054,17 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
 
                     let outputNames = if view.Columns.IsEmpty then projected |> List.map (fun (name, _, _) -> name) else view.Columns
 
+                    let canDeleteRows =
+                        match mutation with
+                        | RowDelete _ -> not projectedColumns.IsEmpty
+                        | ColumnWrite -> false
                     if
                         unresolvedStar
                         || (underlyingStored.IsSome && underlying.IsNone)
                         || dependentProjection
                         || dependentPredicate
                         || not (namesMatchProjections outputNames projected)
-                        || not (hasWritableProjection projected)
+                        || not (canDeleteRows || hasWritableProjection projected)
                     then
                         None
                     else
@@ -2072,8 +2087,15 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
                             | "LOCAL" -> combine underlyingCheck ownPredicate
                             | _ -> underlyingCheck
 
-                        let firstTarget = writableTargets |> Map.toSeq |> Seq.head |> snd
-                        let database, table = firstTarget.Database, firstTarget.Table
+                        let targetKey =
+                            writableTargets
+                            |> Map.values
+                            |> Seq.tryHead
+                            |> Option.map viewTargetKey
+                            |> Option.defaultWith (fun () ->
+                                underlying |> Option.map viewDeleteTargetKey
+                                |> Option.defaultValue (sourceDb, source.Table, physicalQualifier))
+                        let database, table, _ = targetKey
 
                         let updateFrom =
                             underlying
@@ -2139,9 +2161,7 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
                                 | Some nested when not nested.UpdateJoins.IsEmpty -> nested.CheckPredicates
                                 | _ ->
                                     match checkPredicate with
-                                    | Some predicate ->
-                                        let targetKey = firstTarget.Database, firstTarget.Table, firstTarget.Qualifier
-                                        Map.ofList [ targetKey, predicate ]
+                                    | Some predicate -> Map.ofList [ targetKey, predicate ]
                                     | None -> Map.empty
                               Insertable = not insertableTargets.IsEmpty
                               InsertableTargets = insertableTargets
@@ -3148,7 +3168,7 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
     classify Set.empty view select
 
 let private updatableViewOfSelect store view select =
-    updatableViewOfSelectWith true false store view select
+    updatableViewOfSelectWith ColumnWrite true false store view select
 
 let private storedChecks (store: Store) (dbName: string) (tableName: string) : StoredCheck list =
     match scan store "mysql" "check_constraints" with
@@ -27451,18 +27471,23 @@ let private withStatementViewMerge store dbName statement run =
                 |> Set.ofList)
     DynamicScope.withValue disableHeuristicViewMerge assignsVariable (fun () -> DynamicScope.withValue forcedViewMerges forced run)
 
-let private tryUpdatableViewWith allowHeuristicMerge (store: Store) (dbName: string) (viewName: string) : UpdatableView option =
+let private tryViewMutationWith mutation allowHeuristicMerge (store: Store) (dbName: string) (viewName: string) : UpdatableView option =
     match tryStoredView store dbName viewName with
     | None -> None
     | Some view ->
         match parseStoredViewStatement view with
         | Ok(Select select) ->
             let forceRoot = not allowHeuristicMerge && (forcedViewMerges.Value |> Option.exists (Set.contains (dbName.ToLowerInvariant(), viewName.ToLowerInvariant())))
-            updatableViewOfSelectWith allowHeuristicMerge forceRoot (storeForStoredView store) view select
+            updatableViewOfSelectWith mutation allowHeuristicMerge forceRoot (storeForStoredView store) view select
         | _ -> None
 
 let private tryUpdatableView store dbName viewName =
-    tryUpdatableViewWith (not disableHeuristicViewMerge.Value) store dbName viewName
+    tryViewMutationWith ColumnWrite (not disableHeuristicViewMerge.Value) store dbName viewName
+
+let private tryDeletableView store registry dbName viewName =
+    let canMerge select =
+        selectHasMergeableShape registry select && not (InformationSchema.viewDefinitionHasWindow select)
+    tryViewMutationWith (RowDelete canMerge) (not disableHeuristicViewMerge.Value) store dbName viewName
 
 /// DELETE checks whether a merged view has an updatable underlying table before
 /// checking its table count. The projected columns do not determine either fact.
@@ -27519,7 +27544,7 @@ let private tryJoinViewDeleteError store registry stored = function
 let rec private viewWriteMergeError store dbName statement =
     let insertError fullName =
         let schema, name = splitQualified dbName fullName
-        match tryUpdatableViewWith true store schema name with
+        match tryViewMutationWith ColumnWrite true store schema name with
         | Some view when view.Insertable && (tryUpdatableView store schema name |> Option.forall (fun current -> not current.Insertable)) ->
             Some(1471, $"The target table {name} of the INSERT is not insertable-into")
         | _ -> None
@@ -27552,7 +27577,7 @@ let rec private viewWriteMergeError store dbName statement =
                 | FromTable source when not (isCte source) ->
                     let schema = source.Database |> Option.defaultValue dbName
                     let qualifier = source.Alias |> Option.defaultValue source.Table
-                    tryUpdatableViewWith true store schema source.Table
+                    tryViewMutationWith ColumnWrite true store schema source.Table
                     |> Option.bind (fun previous ->
                         let current = tryUpdatableView store schema source.Table
                         let writable (view: UpdatableView) (column: string) = Map.containsKey (column.ToLowerInvariant()) view.Targets
@@ -27640,7 +27665,7 @@ let private validateJoinedDeleteTargets store registry dbName (delete: DeleteStm
             match tryStoredView store schema table.Table with
             | None -> None
             | Some stored ->
-                let plan = tryUpdatableView store schema table.Table
+                let plan = tryDeletableView store registry schema table.Table
                 tryJoinViewDeleteError store registry stored plan
                 |> Option.orElseWith (fun () ->
                     if plan.IsNone && rejectNonUpdatable then Some(nonUpdatableTarget "DELETE" target) else None)
@@ -27803,7 +27828,7 @@ let private prepareDeleteViewSources store registry dbName (delete: DeleteStmt) 
             else
                 tryStoredView store schema source.Table
                 |> Option.bind (fun stored ->
-                    tryUpdatableView store schema source.Table
+                    tryDeletableView store registry schema source.Table
                     |> Option.filter (fun view ->
                         view.UpdateJoins.IsEmpty
                         && (not (Map.containsKey (view.Database.ToLowerInvariant(), view.Table.ToLowerInvariant()) store.TableShadows)
@@ -30954,32 +30979,37 @@ let private mutationSubqueryTargetError store registry schema statement =
                    |> List.map (fun (key, owner, alias) -> key, owner, alias, None))
             if reads.IsEmpty then None
             else
+                let isDelete = operation = "DELETE"
                 let writable table =
                     let database, name = tableKey schema table
-                    if isTemporaryTable store database name then [], None
+                    if isTemporaryTable store database name then [], None, None
                     else
-                        match tryUpdatableView store database name with
-                        | Some view when operation <> "DELETE" || view.UpdateJoins.IsEmpty ->
+                        let plan =
+                            if isDelete then tryDeletableView store registry database name
+                            else tryUpdatableView store database name
+                        match plan with
+                        | Some view when not isDelete || view.UpdateJoins.IsEmpty ->
                             let columns =
                                 view.Targets |> Map.toList
                                 |> List.map (fun (column, target) -> column, (target.Database.ToLowerInvariant(), normalizeTableName target.Table))
-                            columns, Some(database, name)
+                            columns, Some(database, name), Some(view.Database.ToLowerInvariant(), normalizeTableName view.Table)
                         | _ ->
-                            let columns =
-                                tableSnapshot store database name |> Result.toOption |> Option.toList
-                                |> List.collect (fun snapshot -> snapshot.Columns |> List.map (fun column -> column.Name.ToLowerInvariant(), (database, name)))
-                            columns, None
+                            match tableSnapshot store database name with
+                            | Ok snapshot ->
+                                let columns = snapshot.Columns |> List.map (fun column -> column.Name.ToLowerInvariant(), (database, name))
+                                columns, None, Some(database, name)
+                            | Error _ -> [], None, None
                 let bound =
                     inputs |> List.map (fun table ->
-                        let columns, view = writable table
-                        table, columns, view)
+                        let columns, view, physical = writable table
+                        table, columns, view, physical)
                 let assigned =
                     match writes with
                     | Choice1Of2 assignments ->
                         assignments
                         |> List.map (fun assignment ->
                             bound
-                            |> List.choose (fun (table, columns, _) ->
+                            |> List.choose (fun (table, columns, _, _) ->
                                 if assignment.Table |> Option.forall (equalsIgnoreCase (qualifier table)) then
                                     List.tryFind (fst >> equalsIgnoreCase assignment.Column) columns
                                     |> Option.map (fun (_, key) -> table, key)
@@ -30989,8 +31019,10 @@ let private mutationSubqueryTargetError store registry schema statement =
                         |> Option.defaultValue []
                     | Choice2Of2 targets ->
                         bound
-                        |> List.filter (fun (table, _, _) -> targets |> List.exists (equalsIgnoreCase (qualifier table)))
-                        |> List.collect (fun (table, columns, _) -> columns |> List.map (fun (_, key) -> table, key))
+                        |> List.choose (fun (table, _, _, physical) ->
+                            if targets |> List.exists (equalsIgnoreCase (qualifier table)) then
+                                physical |> Option.map (fun key -> table, key)
+                            else None)
 
                 let rec leadingLeaf strategyForSource (first: FromItem) (joins: Join list) =
                     let first =
@@ -31006,9 +31038,10 @@ let private mutationSubqueryTargetError store registry schema statement =
                     | _ -> first
 
                 bound
-                |> List.tryPick (fun (table, columns, view) ->
-                    columns
-                    |> List.tryPick (fun (_, key) ->
+                |> List.tryPick (fun (table, columns, view, physical) ->
+                    let keys = if isDelete then Option.toList physical else List.map snd columns
+                    keys
+                    |> List.tryPick (fun key ->
                         if List.contains (table, key) assigned then
                             reads |> List.tryFind (fun (read, _, _, _) -> read = key)
                         else None)
@@ -31021,11 +31054,11 @@ let private mutationSubqueryTargetError store registry schema statement =
                             match leadingLeaf rootStrategy source joins with
                             | FromTable table ->
                                 let view =
-                                    bound |> List.tryPick (fun (candidate, _, view) ->
+                                    bound |> List.tryPick (fun (candidate, _, view, _) ->
                                         if obj.ReferenceEquals(candidate, table) then view else None)
                                 Some table, qualifier table, view
                             | item -> None, FromItem.tryQualifier item |> Option.defaultValue (qualifier target), None
-                        | None, "UPDATE", (first, _, firstView) :: _ -> Some first, qualifier first, firstView
+                        | None, "UPDATE", (first, _, firstView, _) :: _ -> Some first, qualifier first, firstView
                         | _ -> Some target, qualifier target, targetView
                     match targetView, readView with
                     | _ when joinedViewSource |> Option.exists (fun view -> first |> Option.exists (fun leaf -> obj.ReferenceEquals(view, leaf))) ->
@@ -31038,8 +31071,8 @@ let private mutationSubqueryTargetError store registry schema statement =
                         let definition = if readView.IsSome then readAlias else name
                         1443, sprintf "The definition of table '%s' prevents operation %s on table '%s'." definition operation name))
 
-let private savedViewWriteError store registry operation alias (view: UpdatableView) (target: ViewColumnTarget) =
-    let key = target.Database.ToLowerInvariant(), normalizeTableName target.Table
+let private savedViewWriteError store registry operation alias (view: UpdatableView) ((database, table, _): ViewTargetKey) =
+    let key = database.ToLowerInvariant(), normalizeTableName table
     let catalog = (storeForStoredView store).Catalog
     let readTables schema merge projection select =
         InformationSchema.viewExpressionReadTables catalog schema merge projection select
@@ -31103,14 +31136,14 @@ let rec private standaloneSavedViewWriteError store registry dbName = function
         tryUpdatableView store database source.Table
         |> Option.bind (fun view ->
             rewriteStandaloneViewUpdate view update |> Result.toOption
-            |> Option.bind (fun (_, target) -> savedViewWriteError store registry "UPDATE" alias view target))
+            |> Option.bind (fun (_, target) -> savedViewWriteError store registry "UPDATE" alias view (viewTargetKey target)))
     | Delete { Source = SingleDeleteTable source } ->
         let database = source.Database |> Option.defaultValue dbName
         let alias = source.Alias |> Option.defaultValue source.Table
-        tryUpdatableView store database source.Table
+        tryDeletableView store registry database source.Table
         |> Option.bind (fun view ->
             if not view.UpdateJoins.IsEmpty then None
-            else view.Targets |> Map.values |> Seq.tryHead |> Option.bind (savedViewWriteError store registry "DELETE" alias view))
+            else savedViewWriteError store registry "DELETE" alias view (viewDeleteTargetKey view))
     | statement ->
         savedViewInsertShape statement
         |> Option.bind (fun (table, replacing, implicitColumns) ->
@@ -31119,7 +31152,7 @@ let rec private standaloneSavedViewWriteError store registry dbName = function
                 let database, name = splitQualified dbName table
                 tryUpdatableView store database name
                 |> Option.bind (fun view ->
-                    view.Targets |> Map.values |> Seq.tryHead
+                    view.Targets |> Map.values |> Seq.tryHead |> Option.map viewTargetKey
                     |> Option.bind (savedViewInsertError store registry replacing implicitColumns view)))
 
 let internal skipsViewWriteLocks store registry dbName statement =
@@ -33888,11 +33921,11 @@ let rec private executeAsWithViewSources
             (fun targetStore tableColumns _ candidate ->
                 finishInsertRow targetStore db table tableColumns candidate)
 
-    let executeViewWrite (view: UpdatableView) (runtimeView: UpdatableView) (target: ViewColumnTarget) (runtimeTarget: ViewColumnTarget) statement (originalUpdate: UpdateStmt option) predicate =
+    let executeViewWrite (view: UpdatableView) (runtimeView: UpdatableView) (targetKey: ViewTargetKey) (runtimeTargetKey: ViewTargetKey) statement (originalUpdate: UpdateStmt option) predicate =
         let executionStore = store
         let store = storeForStoredView executionStore
-        let targetKey = target.Database, target.Table, target.Qualifier
-        let runtimeTargetKey = runtimeTarget.Database, runtimeTarget.Table, runtimeTarget.Qualifier
+        let targetDatabase, targetTable, targetQualifier = targetKey
+        let _, _, runtimeQualifier = runtimeTargetKey
         let sourceAliases (source: UpdatableView) =
             (source.UpdateFrom.Alias |> Option.defaultValue source.UpdateFrom.Table)
             :: (source.UpdateJoins
@@ -34132,7 +34165,7 @@ let rec private executeAsWithViewSources
                     let componentSource =
                         sourceRefs
                         |> List.tryFind (fun source ->
-                            (source.Alias |> Option.defaultValue source.Table).Equals(target.Qualifier, System.StringComparison.OrdinalIgnoreCase))
+                            (source.Alias |> Option.defaultValue source.Table).Equals(targetQualifier, System.StringComparison.OrdinalIgnoreCase))
 
                     match componentSource, registryAccount current with
                     | Some source, Some account ->
@@ -34354,14 +34387,14 @@ let rec private executeAsWithViewSources
                 match stmt, originalUpdate with
                 | Update _, Some update ->
                     let alias = update.From.Alias |> Option.defaultValue update.From.Table
-                    savedViewWriteError store registry "UPDATE" alias view target
+                    savedViewWriteError store registry "UPDATE" alias view targetKey
                 | Delete { Source = SingleDeleteTable source }, _ ->
                     let alias = source.Alias |> Option.defaultValue source.Table
-                    savedViewWriteError store registry "DELETE" alias view target
+                    savedViewWriteError store registry "DELETE" alias view targetKey
                 | _ ->
                     savedViewInsertShape stmt
                     |> Option.bind (fun (_, replacing, implicitColumns) ->
-                        savedViewInsertError store registry replacing implicitColumns view target))
+                        savedViewInsertError store registry replacing implicitColumns view targetKey))
 
         match authorizedRegistry with
         | Error(code, message) -> ids, Err(code, message)
@@ -34430,9 +34463,9 @@ let rec private executeAsWithViewSources
                 DynamicScope.withValue
                     viewCheckScope
                     (Some
-                        { Database = target.Database
-                          Table = target.Table
-                          Qualifier = runtimeTarget.Qualifier
+                        { Database = targetDatabase
+                          Table = targetTable
+                          Qualifier = runtimeQualifier
                           View = view.ViewDatabase + "." + normalizeTableName view.ViewName
                           CheckPredicate = checkPredicate
                           VisibilityPredicate = visibilityPredicate
@@ -35687,7 +35720,7 @@ let rec private executeAsWithViewSources
                                 Fields = baseFields
                                 Assignments = assignments }
 
-                    executeViewWrite view view target target rewritten None None
+                    executeViewWrite view view (viewTargetKey target) (viewTargetKey target) rewritten None None
 
     | LoadData load ->
         let db, table = splitQualified dbName load.Table
@@ -35833,7 +35866,7 @@ let rec private executeAsWithViewSources
                 | Ok(), Ok assignments ->
                     let rewritten = Insert(SqlText.objectName (Some target.Database) target.Table, baseColumns, rowsExprs, assignments, ignoreDuplicates)
 
-                    executeViewWrite view view target target rewritten None None
+                    executeViewWrite view view (viewTargetKey target) (viewTargetKey target) rewritten None None
 
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
@@ -35887,7 +35920,7 @@ let rec private executeAsWithViewSources
                 | Ok(), Ok assignments ->
                     let rewritten = InsertSelect(SqlText.objectName (Some target.Database) target.Table, baseColumns, select, assignments, ignoreDuplicates)
 
-                    executeViewWrite view view target target rewritten None None
+                    executeViewWrite view view (viewTargetKey target) (viewTargetKey target) rewritten None None
 
     | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
@@ -35961,7 +35994,7 @@ let rec private executeAsWithViewSources
             | Ok(target, baseColumns) ->
                 let rewritten = Replace(SqlText.objectName (Some target.Database) target.Table, baseColumns, rowsExprs)
 
-                executeViewWrite view view target target rewritten None None
+                executeViewWrite view view (viewTargetKey target) (viewTargetKey target) rewritten None None
 
     | Replace(table, columns, rowsExprs) ->
         let db, table = splitQualified dbName table
@@ -35989,7 +36022,7 @@ let rec private executeAsWithViewSources
             | Ok(target, baseColumns) ->
                 let rewritten = ReplaceSelect(SqlText.objectName (Some target.Database) target.Table, baseColumns, select)
 
-                executeViewWrite view view target target rewritten None None
+                executeViewWrite view view (viewTargetKey target) (viewTargetKey target) rewritten None None
 
     | ReplaceSelect(table, columns, select) ->
         let db, table = splitQualified dbName table
@@ -36019,7 +36052,7 @@ let rec private executeAsWithViewSources
             | Ok(target, _), Ok rewrittenAssignments ->
                 let rewritten = ReplaceSet(SqlText.objectName (Some target.Database) target.Table, rewrittenAssignments)
 
-                executeViewWrite view view target target rewritten None None
+                executeViewWrite view view (viewTargetKey target) (viewTargetKey target) rewritten None None
 
     | ReplaceSet(table, assignments) ->
         let db, table = splitQualified dbName table
@@ -36383,7 +36416,7 @@ let rec private executeAsWithViewSources
                         let runtimeTarget = runtimeView.Targets.[exposed.Column.ToLowerInvariant()]
                         let classified =
                             { updateStmt with Assignments = assignments |> List.map fst }
-                        executeViewWrite view runtimeView target runtimeTarget (Update rewritten) (Some classified) viewPredicate
+                        executeViewWrite view runtimeView (viewTargetKey target) (viewTargetKey runtimeTarget) (Update rewritten) (Some classified) viewPredicate
 
     | Update updateStmt when updateStmt.Joins.IsEmpty && tryStoredView store (updateStmt.From.Database |> Option.defaultValue dbName) updateStmt.From.Table |> Option.isSome ->
         let viewDb = updateStmt.From.Database |> Option.defaultValue dbName
@@ -36397,7 +36430,7 @@ let rec private executeAsWithViewSources
             match rewriteStandaloneViewUpdate view updateStmt with
             | Error(code, message) -> ids, Err(code, message)
             | Ok(rewritten, target) ->
-                executeViewWrite view view target target (Update rewritten) (Some updateStmt) view.Predicate
+                executeViewWrite view view (viewTargetKey target) (viewTargetKey target) (Update rewritten) (Some updateStmt) view.Predicate
 
     | Update updateStmt when updateStmt.Joins.IsEmpty ->
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
@@ -36894,7 +36927,7 @@ let rec private executeAsWithViewSources
     | Delete ({ Source = SingleDeleteTable source } as deleteStmt) when tryStoredView store (source.Database |> Option.defaultValue dbName) source.Table |> Option.isSome ->
         let viewDb = source.Database |> Option.defaultValue dbName
 
-        let plan = tryUpdatableView store viewDb source.Table
+        let plan = tryDeletableView store registry viewDb source.Table
         let joinError =
             tryStoredView store viewDb source.Table
             |> Option.bind (fun stored -> tryJoinViewDeleteError store registry stored plan)
@@ -36920,8 +36953,8 @@ let rec private executeAsWithViewSources
                             deleteStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                     Limit = deleteStmt.Limit |> Option.map rewrite }
 
-            let target = view.Targets |> Map.values |> Seq.head
-            executeViewWrite view view target target (Delete rewritten) None None
+            let targetKey = viewDeleteTargetKey view
+            executeViewWrite view view targetKey targetKey (Delete rewritten) None None
 
     | Delete ({ Source = SingleDeleteTable source } as deleteStmt) ->
         let db, table = (source.Database |> Option.defaultValue dbName), source.Table
@@ -38652,7 +38685,7 @@ let private transactionWriteTargetsIn
     | Delete ({ Source = SingleDeleteTable source } as delete) ->
         let viewDatabase = source.Database |> Option.defaultValue dbName
 
-        match tryUpdatableView store viewDatabase source.Table with
+        match tryDeletableView store registry viewDatabase source.Table with
         | Some view when view.UpdateJoins.IsEmpty ->
             let predicate =
                 delete.Where
@@ -38673,7 +38706,7 @@ let private transactionWriteTargetsIn
                 None
             else
                 let database = source.Database |> Option.defaultValue dbName
-                match tryUpdatableView store database source.Table with
+                match tryDeletableView store registry database source.Table with
                 | Some view when view.UpdateJoins.IsEmpty ->
                     let reference = viewBaseReference view
                     primaryViewTarget primaryBounds (tableQualifier source) reference view (fun _ -> true)
