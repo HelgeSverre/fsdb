@@ -3467,9 +3467,15 @@ let private primaryLockingSelect isolation (select: SelectStmt) =
         else None
     | _ -> None
 
-let private beginDynamicWriteRebaseForStatement (session: Session) (store: Store) =
+let private beginDynamicWriteRebaseForStatement (session: Session) (store: Store) statement =
+    // A wrapped autocommit UPDATE also needs the latest keys after a wait.
+    let canRebase =
+        match statement with
+        | Update _ -> true
+        | _ -> retainsTransactionAfterStatement session
+
     match session.Tx with
-    | Some transaction when retainsTransactionAfterStatement session && not (Storage.dynamicWriteRebaseActive store) ->
+    | Some transaction when canRebase && not (Storage.dynamicWriteRebaseActive store) ->
         let prepare baseCatalog privateCatalog =
             let liveCatalog, rebasedTransaction = Storage.beginTransactionSnapshotWithBase session.Store
             Storage.mergeCatalogInto rebasedTransaction baseCatalog transaction.Snapshot.Catalog
@@ -3754,7 +3760,7 @@ let private executeParsedStatement accesses (session: Session) (stmt: Statement)
             | Diagnostics.RaisedCondition error ->
                 session.LastInsertId, session.LastGeneratedId, ErrInfo error, [], None
 
-        let startedDynamicWriteRebase = beginDynamicWriteRebaseForStatement session store
+        let startedDynamicWriteRebase = beginDynamicWriteRebaseForStatement session store stmt
 
         let mutable dynamicWriteBase = None
 

@@ -39,9 +39,9 @@ a session counter that confirmed exactly one assignment evaluation
 per candidate. The regression also checks the committed rows after
 WAL replay.
 
-Autocommit joined UPDATE IGNORE can still return 1205 after the wait.
-The same tested join succeeds in an open transaction. If an initial
-duplicate and a newly committed duplicate affect the same batch,
-Fsdb can report the initial duplicate first even when its row came
-later in the statement. The tested mixed batch retained the correct
-rows and warning contents.
+The [joined UPDATE follow-up](2026-11-27-joined-update-key-waits.md)
+fixes the corresponding wait in audited autocommit joins. If an
+initial duplicate and a newly committed duplicate affect the same
+batch, Fsdb can report the initial duplicate first even when its row
+came later in the statement. The tested mixed batch retained the
+correct rows and warning contents.

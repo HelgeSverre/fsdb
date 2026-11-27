@@ -1016,7 +1016,17 @@ let appendPendingEvents (target: Store) (source: Store) =
     | _ -> ()
 
 let adoptTransactionSnapshot (target: Store) (source: Store) =
-    target.Catalog <- source.Catalog
+    let catalog = source.Catalog
+    publishCatalogRoots target (fun () ->
+        for database in target.Databases.Keys do
+            if not (Map.containsKey database catalog) then
+                target.Databases.TryRemove database |> ignore
+
+        // A trigger can adopt its writes while its caller still holds a database cell.
+        for KeyValue(database, root) in catalog do
+            match target.Databases.TryGetValue database with
+            | true, slot -> slot.Value <- root
+            | false, _ -> target.Databases.[database] <- ref root)
     appendPendingEvents target source
 
 let transactionRollbackWork (store: Store) =

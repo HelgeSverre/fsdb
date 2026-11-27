@@ -28,5 +28,6 @@ nullable keys, and reverse commit and rollback in autocommit and an
 open transaction.
 
 The [UPDATE IGNORE follow-up](2026-11-27-ignored-update-key-waits.md)
-fixes the original 1205 for single-table batches. Joined autocommit
-writes and mixed warning ordering have separate gaps.
+fixes the original 1205 for single-table batches. [Wrapped autocommit
+updates](2026-11-27-joined-update-key-waits.md) cover the corresponding
+joined race.

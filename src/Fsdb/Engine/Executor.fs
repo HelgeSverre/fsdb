@@ -32067,7 +32067,7 @@ let rec private executeAsWithViewSources
                 | Some(Err(code, message)) -> Error(ExpressionError(code, message))
                 | _ -> finishInsertRow runStore db table columns candidate)
 
-    let publishInsertStatement baseCatalog snapshot =
+    let publishMutationSnapshot baseCatalog snapshot =
         if Storage.dynamicWriteRebaseActive store then
             Storage.adoptTransactionSnapshot store snapshot
         else
@@ -32133,7 +32133,7 @@ let rec private executeAsWithViewSources
             | Ok outcome when outcome.InsertedRows.IsEmpty ->
                 // Nothing actually inserted (all-duplicate upsert/IGNORE) —
                 // nothing to fire, but the update-path writes still count.
-                publishInsertStatement baseCatalog snapshot
+                publishMutationSnapshot baseCatalog snapshot
                 ok outcome
             | Ok outcome ->
                 let rows = outcome.InsertedRows |> List.map (fun row -> None, Some row)
@@ -32141,7 +32141,7 @@ let rec private executeAsWithViewSources
                 match fireTriggers snapshot db table After TriggerInsert triggers rows with
                 | Some err -> ids, err
                 | None ->
-                    publishInsertStatement baseCatalog snapshot
+                    publishMutationSnapshot baseCatalog snapshot
                     ok outcome
 
     let onDuplicateUpdater
@@ -32379,7 +32379,7 @@ let rec private executeAsWithViewSources
             match rowsValues |> List.indexed |> List.fold step (Ok(None, None, 0, [])) with
             | Error error -> ids, error
             | Ok(firstAuto, lastExplicit, affected, inserted) ->
-                publishInsertStatement baseCatalog snapshot
+                publishMutationSnapshot baseCatalog snapshot
 
                 let outcome =
                     { LastInsertId = Option.defaultValue 0L (Option.orElse lastExplicit firstAuto)
@@ -35347,7 +35347,9 @@ let rec private executeAsWithViewSources
 
                         match apply with
                         | Ok counts ->
-                            commitJoinedMutation store baseCatalog snapshot split
+                            match split with
+                            | Some _ -> commitJoinedMutation store baseCatalog snapshot split
+                            | None -> publishMutationSnapshot baseCatalog snapshot
                             // CLIENT_FOUND_ROWS reports claimed rows; the
                             // default reports rows changed after BEFORE triggers.
                             let matched = pending |> Array.sumBy (fun d -> d.Count)
