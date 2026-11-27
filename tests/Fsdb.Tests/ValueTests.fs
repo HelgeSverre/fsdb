@@ -764,6 +764,40 @@ let tests =
                         Expect.equal (call "ST_SRID" [ result ]) (VInt 4326L) "the operation retains the SRID"
                         Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"{operation} of {left} and {right}"
 
+                testCase "geographic polygon intersection follows the first shared ring"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let split = "POLYGON((0 0,4 0,4 2,4 4,0 4,0 0))"
+                    let plain = "POLYGON((4 0,6 0,6 4,4 4,4 0))"
+                    let rotated = "POLYGON((4 2,4 4,0 4,0 0,4 0,4 2))"
+                    let reversed = "POLYGON((0 0,0 4,4 4,4 2,4 0,0 0))"
+                    let corner = "POLYGON((4 2,4 4,0 4,0 5,5 5,5 2,4 2))"
+                    let partial = "POLYGON((4 1,6 1,6 3,4 3,4 1))"
+                    let connected = "MULTIPOLYGON(((4 0,6 0,6 1.5,4 2,4 0)),((4 2,6 2.5,6 4,4 4,4 2)))"
+                    let leftMulti = "MULTIPOLYGON(((0 0,4 0,4 2,4 4,0 4,0 0)),((8 0,12 0,12 2,12 4,8 4,8 0)))"
+                    let rightMulti = "MULTIPOLYGON(((12 0,14 0,14 4,12 4,12 0)),((4 0,6 0,6 4,4 4,4 0)))"
+                    let hole = "POLYGON((-1 -1,7 -1,7 6,-1 6,-1 -1),(0 0,0 4,4 4,4 2,4 0,0 0))"
+                    let inner = "POLYGON((2 1,4 1,4 3,2 3,2 1))"
+                    for first, second, expected in
+                        [ split, plain, "LINESTRING(4 0,4 2,4 4)"
+                          plain, split, "LINESTRING(4 4,4 0)"
+                          rotated, plain, "MULTILINESTRING((4 2,4 4),(4 0,4 2))"
+                          plain, rotated, "LINESTRING(4 4,4 0)"
+                          reversed, plain, "LINESTRING(4 0,4 2,4 4)"
+                          split, corner, "LINESTRING(4 2,4 4,0 4)"
+                          corner, split, "LINESTRING(0 4,4 4,4 2)"
+                          split, partial, "LINESTRING(4 1,4 2,4 3)"
+                          partial, split, "LINESTRING(4 3,4 1)"
+                          split, connected, "MULTILINESTRING((4 0,4 2),(4 2,4 4))"
+                          connected, split, "MULTILINESTRING((4 0,4 2),(4 2,4 4))"
+                          leftMulti, rightMulti, "MULTILINESTRING((4 0,4 2,4 4),(12 0,12 2,12 4))"
+                          rightMulti, leftMulti, "MULTILINESTRING((12 4,12 0),(4 4,4 0))"
+                          hole, inner, "LINESTRING(4 3,4 2,4 1)"
+                          inner, hole, "LINESTRING(4 1,4 3)" ] do
+                        let result = call "ST_Intersection" [ geometry first; geometry second ]
+                        Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"intersection of {first} and {second}"
+
                 testCase "geographic polygon crossings retain separately rounded contacts"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"

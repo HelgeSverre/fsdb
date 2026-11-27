@@ -3445,23 +3445,36 @@ let private geographicAreaCoversPoint referenceSystem polygons point =
 
 type private GeographicPolygonEdge =
     { Polygon: int
+      Ring: int
       Segment: (float * float) * (float * float)
       Bounds: GeographicBounds
       Cuts: ResizeArray<float * float> }
+
+type private GeographicPolygonFragment =
+    { Polygon: int
+      Ring: int
+      Segment: (float * float) * (float * float)
+      StartsEdge: bool }
+
+let private undirectedGeographicSegment (start, endpoint) =
+    min start endpoint, max start endpoint
 
 let private splitGeographicPolygonEdges referenceSystem flattening clockwise includePointTurn polygons =
     let pointTurns = ResizeArray()
     let edges =
         polygons
-        |> List.mapi (fun polygon rings ->
-            rings |> List.collect (List.pairwise >> List.choose (fun (start, endpoint) ->
+        |> List.mapi (fun polygon rings -> List.map (fun ring -> polygon, ring) rings)
+        |> List.concat
+        |> List.mapi (fun ring (polygon, vertices) ->
+            vertices |> List.pairwise |> List.choose (fun (start, endpoint) ->
                 if start = endpoint then None
                 else
                     let segment = start, endpoint
                     Some { Polygon = polygon
+                           Ring = ring
                            Segment = segment
                            Bounds = geographicSectionBounds flattening [ segment ]
-                           Cuts = ResizeArray() })))
+                           Cuts = ResizeArray() }))
         |> List.concat
         |> List.toArray
 
@@ -3479,7 +3492,7 @@ let private splitGeographicPolygonEdges referenceSystem flattening clockwise inc
                             if accept first.Polygon second.Polygon then
                                 tryGeographicCrossingPoint normalizedLongitudeRadians referenceSystem first.Segment second.Segment
                                 |> Option.iter pointTurns.Add)
-                        let directed edge =
+                        let directed (edge: GeographicPolygonEdge) =
                             let start, endpoint = edge.Segment
                             if clockwise edge.Polygon then endpoint, start else start, endpoint
                         tryGeographicCrossingPoint normalizedLongitudeRadians referenceSystem (directed first) (directed second)
@@ -3502,7 +3515,11 @@ let private splitGeographicPolygonEdges referenceSystem flattening clockwise inc
                 |> Seq.toList
             start :: (cuts @ [ endpoint ])
             |> List.pairwise
-            |> List.map (fun segment -> edge.Polygon, segment))
+            |> List.mapi (fun index segment ->
+                { Polygon = edge.Polygon
+                  Ring = edge.Ring
+                  Segment = segment
+                  StartsEdge = index = 0 }))
     fragments, List.ofSeq pointTurns
 
 let private geographicBoundaryRings flattening fragments =
@@ -3587,13 +3604,13 @@ let private tryGeographicPolygonUnion referenceSystem polygons =
         else
             let fragments, _ = splitGeographicPolygonEdges referenceSystem flattening (fun _ -> true) None polygons
             fragments
-            |> List.groupBy (fun (_, (start, endpoint)) -> min start endpoint, max start endpoint)
+            |> List.groupBy (_.Segment >> undirectedGeographicSegment)
             |> List.choose (fun (_, coincident) ->
-                let _, ((start, endpoint) as segment) = List.head coincident
+                let ((start, endpoint) as segment) = (List.head coincident).Segment
                 // Opposite coincident edges have fill on both sides.
-                if coincident |> List.exists (fun (_, other) -> segment <> other) then None
+                if coincident |> List.exists (fun other -> segment <> other.Segment) then None
                 else
-                    let owners = coincident |> List.map fst |> Set.ofList
+                    let owners = coincident |> List.map _.Polygon |> Set.ofList
                     let length = geographicVertexDistance referenceSystem start endpoint
                     let midpoint = geographicPointAlong referenceSystem start endpoint (length / 2.0)
                     if indexedPolygons |> List.exists (fun (index, polygon) ->
@@ -3607,6 +3624,26 @@ let private geographicAreaShape = function
     | [] -> GEmpty
     | [ polygon ] -> GPolygon polygon
     | polygons -> GMultiPolygon polygons
+
+let private geographicSharedPolygonLines referenceSystem belongsToLeft shared fragments =
+    if Map.isEmpty shared then []
+    else
+        // Follow each first-operand ring from its source start. Consecutive
+        // cuts on the same edge can omit vertices introduced by the clip.
+        fragments
+        |> List.filter (_.Polygon >> belongsToLeft)
+        |> List.groupBy _.Ring
+        |> List.collect (fun (_, ring) ->
+            ring
+            |> List.map (fun fragment ->
+                let start, endpoint = fragment.Segment
+                let key = undirectedGeographicSegment fragment.Segment
+                { Start = start
+                  End = endpoint
+                  CoveringComponents = Map.tryFind key shared |> Option.defaultValue []
+                  StartsSegment = fragment.StartsEdge })
+            |> geographicLineFragments referenceSystem true)
+        |> distinctGeographicLines referenceSystem
 
 let private tryGeographicPolygonBoundaryOverlay referenceSystem kind srid left right =
     let polygons = prepareGeographicOverlayPolygons referenceSystem (left @ right)
@@ -3630,10 +3667,10 @@ let private tryGeographicPolygonBoundaryOverlay referenceSystem kind srid left r
             splitGeographicPolygonEdges referenceSystem flattening clockwise pointOutput polygons
         let classified =
             fragments
-            |> List.groupBy (fun (_, (start, endpoint)) -> min start endpoint, max start endpoint)
-            |> List.map (fun (_, coincident) ->
-                let _, ((start, endpoint) as segment) = List.head coincident
-                let owners = Map.ofList coincident
+            |> List.groupBy (_.Segment >> undirectedGeographicSegment)
+            |> List.map (fun (key, coincident) ->
+                let ((start, endpoint) as segment) = (List.head coincident).Segment
+                let owners = coincident |> List.map (fun fragment -> fragment.Polygon, fragment.Segment) |> Map.ofList
                 let length = geographicVertexDistance referenceSystem start endpoint
                 let midpoint = geographicPointAlong referenceSystem start endpoint (length / 2.0)
 
@@ -3656,10 +3693,10 @@ let private tryGeographicPolygonBoundaryOverlay referenceSystem kind srid left r
                 let onRight = filled (includes snd true) (includes snd false)
                 if onLeft && not onRight then Some segment, None
                 elif onRight && not onLeft then Some(endpoint, start), None
-                elif intersection && not onLeft
-                     && (coincident |> List.exists (fst >> belongsToLeft))
-                     && (coincident |> List.exists (fst >> belongsToLeft >> not)) then
-                    None, Some segment
+                elif intersection && not onLeft && (coincident |> List.exists (_.Polygon >> belongsToLeft)) then
+                    let covering = coincident |> List.choose (fun fragment ->
+                        if belongsToLeft fragment.Polygon then None else Some fragment.Ring)
+                    None, (if covering.IsEmpty then None else Some(key, covering))
                 else None, None)
 
         let boundary = classified |> List.choose fst
@@ -3688,7 +3725,8 @@ let private tryGeographicPolygonBoundaryOverlay referenceSystem kind srid left r
             let area = geographicAreaShape areas
             if not intersection then area
             else
-                let lines = classified |> List.choose (snd >> Option.map (fun (start, endpoint) -> [ start; endpoint ]))
+                let shared = classified |> List.choose snd |> Map.ofList
+                let lines = geographicSharedPolygonLines referenceSystem belongsToLeft shared fragments
                 let lineShape =
                     match lines with
                     | [] -> GEmpty
@@ -3696,8 +3734,10 @@ let private tryGeographicPolygonBoundaryOverlay referenceSystem kind srid left r
                     | _ -> GMultiLineString lines
                 let vertices =
                     fragments
-                    |> List.collect (fun (index, (start, endpoint)) ->
-                        [ start, belongsToLeft index; endpoint, belongsToLeft index ])
+                    |> List.collect (fun fragment ->
+                        let start, endpoint = fragment.Segment
+                        let isLeft = belongsToLeft fragment.Polygon
+                        [ start, isLeft; endpoint, isLeft ])
                     |> List.groupBy fst
                     |> List.choose (fun (point, owners) ->
                         if List.exists snd owners && List.exists (snd >> not) owners then Some point else None)
@@ -4185,6 +4225,8 @@ let internal tryGeographicOverlay referenceSystem kind (first: Geometry) (second
             tryGeographicLineOverlay referenceSystem kind first.Srid left right
         | GMultiPolygon left, GPolygon right when kind = OverlayKind.Union ->
             tryGeographicPolygonUnion referenceSystem (right :: left) |> Option.map geographicAreaShape
+        | GMultiPolygon left, GPolygon right when kind = OverlayKind.Intersection ->
+            tryGeographicPolygonOverlay referenceSystem kind first.Srid [ right ] left
         | Area left, Area right when kind = OverlayKind.Union ->
             tryGeographicPolygonUnion referenceSystem (left @ right) |> Option.map geographicAreaShape
         | Area left, Area right ->

@@ -3531,8 +3531,10 @@ implementation effort:
    extend intersection, difference, and symmetric difference to polygon,
    multipolygon, and polygon-only collection operands. Near-degenerate
    turns still affect isolated intersection points and symmetric difference
-   lobes. Shared-edge segmentation, ring start and member order, polar
-   endpoints, and general mixed-collection overlays remain open.
+   lobes. Shared-edge intersection now follows the source ring and
+   preserves its vertices. Remaining gaps include some cuts at the
+   clipping ring's start, serialized ring starts, member ordering,
+   polar endpoints, and general mixed-collection overlays.
    Broader geographic polygon relation and precision rules remain open.
    Geographic [point-to-line distance](torture/findings/2026-10-11-geographic-point-line-distance.md)
    and [line-to-line distance](torture/findings/2026-10-11-geographic-line-line-distance.md)

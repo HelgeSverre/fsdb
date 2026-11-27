@@ -100,8 +100,29 @@ empty results as a match.
 The intersection type differences come from near-vertex point members which
 one engine retains and the other absorbs. In several symmetric difference
 crossings MySQL emits one lobe, while Fsdb retains both. Serialized ring
-starts and member ordering also differ. When one polygon subdivides a
-shared meridian, MySQL can return one line with the first operand's
-vertices while Fsdb emits multiple line members. The audit covers
-polygon-only collections. Collections mixing areas, lines, and points
-still have unsupported cases.
+starts and member ordering also differ. The audit covers polygon-only
+collections. Collections mixing areas, lines, and points still have
+unsupported cases.
+
+### Shared edges
+
+For an intersection limited to boundary lines, MySQL walks the source
+ring from its start, keeps its vertices, and can drop subdivision
+vertices from the clipping ring. It uses the polygon as the source for
+a polygon paired with a multipolygon, regardless of argument order.
+For like types the first operand supplies the source. Fsdb keeps the
+source ring and edge identities while splitting polygons, then uses
+the geographic line assembly for coincident fragments outside the
+result area. [Boost areal intersection line dispatch](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/overlay/intersection_insert.hpp#L803-L841) [MySQL multipolygon dispatch](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/intersection_functor.cc#L795-L805)
+
+On the pinned MySQL 8.4.11 image, 16 ordered controls matched exact WKT,
+including reversed and rotated rings, partial edges, corners, holes,
+and multipolygon components meeting at a point. A seeded audit of 48
+polygon pairs in both orders at SRIDs 4326, 4269, and 4267 matched
+directed line components and vertices in 273 of 288 cases, up from 6.
+The fixtures subdivide meridian and equator edges and rotate or reverse
+the subdivided rings using `random.Random(623)`. Vertex comparison
+rounds each coordinate to 10 decimal places. In the 15 remaining cases
+MySQL splits a shared line at the clipping ring's start while Fsdb
+returns one continuous line. All 612 earlier polygon comparisons
+retained their previous Fsdb results.
