@@ -127,6 +127,40 @@ MySQL splits a shared line at the clipping ring's start while Fsdb
 returns one continuous line. All 612 earlier polygon comparisons
 retained their previous Fsdb results.
 
+### Clipping-ring start cuts
+
+MySQL's boundary pass may leave and re-enter the same clipping ring at
+its closure vertex. When both turns fall within a source edge, it orders
+them by their fraction along that edge, with the clipping edge order as
+the tie-breaker. The geographic strategy measures each pair from the
+shorter segment's origin, so the two computed fractions may differ at the
+same coordinate. Fsdb now keeps the original edge information through
+polygon subdivision and starts a new line when the leave sorts first.
+The rule applies at the clipping ring's closure. At other subdivision
+vertices, Fsdb continues to retain the source line and its own vertices.
+When the closure coincides with a vertex on a straight source boundary,
+both turns have fraction one on the preceding source edge, so the
+clipping edge order decides whether the line splits.
+[Boost geographic segment fractions](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/intersection.hpp#L350-L440) · [Boost turn ordering](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/turns/compare_turns.hpp#L70-L110)
+
+The original 288 cases now match the digest-pinned MySQL 8.4.11 image
+on Linux arm64, up from 273. An expanded sweep uses seed 8807 to vary
+equatorial and meridional edges, both operand orders, three SRIDs,
+and whether the shared coordinate also divides a source edge.
+Across both sweeps there were 2,280 comparisons, with coordinates rounded
+to 10 decimal places. On Linux arm64 and amd64, Fsdb matched 2,268 results
+against the pinned Linux oracle, up from 1,782. On macOS it matched all
+2,280 results against native MySQL, up from 1,773, and returned identical
+results in memory and with WAL. All 612 earlier polygon comparisons kept
+their previous Fsdb results. The two MySQL builds disagreed on 15 results.
+The 12 remaining Linux mismatches all agree with macOS MySQL. Nine of
+those previously matched the pinned Linux build. A standalone Boost
+1.84 replay of the 760 WGS 84 cases reproduced native MySQL's split
+decisions with floating-point contraction enabled. Disabling contraction
+in the Linux probe brought three of the five disagreements into line with
+the pinned image. The other two persisted. Other geographic endpoint
+cases, including polar edges, remain open.
+
 ### Mixed collection difference
 
 `ST_Difference` first dissolves the source collection's polygons,

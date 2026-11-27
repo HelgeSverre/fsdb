@@ -894,6 +894,23 @@ let tests =
                         let result = call "ST_Intersection" [ geometry first; geometry second ]
                         Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"intersection of {first} and {second}"
 
+                testCase "geographic polygon shared edges follow MySQL at the clipping ring start"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let equatorSource = "POLYGON((57 0,59 0,59 8,57 8,57 0))"
+                    let meridianSource = "POLYGON((-22 -30,-18 -30,-18 -24,-22 -24,-22 -30))"
+                    for source, clip, expected in
+                        [ equatorSource, "POLYGON((58 0,56 0,56 -8,60 -8,60 0,58 0))", "MULTILINESTRING((57 0,58 0),(58 0,59 0))"
+                          equatorSource, "POLYGON((56 0,56 -8,60 -8,60 0,58 0,56 0))", "LINESTRING(57 0,59 0)"
+                          meridianSource, "POLYGON((-22 -26,-22 -28,-22 -31,-26 -31,-26 -23,-22 -23,-22 -26))", "MULTILINESTRING((-22 -24,-22 -26),(-22 -26,-22 -30))"
+                          "POLYGON((134 0,138 0,138 7,134 7,134 0))", "POLYGON((137 0,136 0,135 0,133 0,133 -7,139 -7,139 0,137 0))", "LINESTRING(134 0,138 0)"
+                          "POLYGON((-49 0,-48 0,-44 0,-44 7,-49 7,-49 0))", "POLYGON((-48 0,-50 0,-50 -6,-38 -6,-38 0,-48 0))", "MULTILINESTRING((-49 0,-48 0),(-48 0,-44 0))"
+                          "POLYGON((-50 0,-45 0,-45 5,-50 5,-50 1,-50 0))", "POLYGON((-50 1,-50 11,-55 11,-55 -1,-50 -1,-50 1))", "MULTILINESTRING((-50 5,-50 1),(-50 1,-50 0))"
+                          "POLYGON((4 3,4 1,6 1,6 3,4 3))", "POLYGON((4 2,4 4,0 4,0 0,4 0,4 2))", "LINESTRING(4 3,4 1)" ] do
+                        let result = call "ST_Intersection" [ geometry source; geometry clip ]
+                        Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"intersection of {source} and {clip}"
+
                 testCase "geographic polygon crossings retain separately rounded contacts"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"

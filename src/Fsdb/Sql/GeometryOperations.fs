@@ -2436,7 +2436,8 @@ type private GeographicLinePiece =
     { Start: float * float
       End: float * float
       CoveringComponents: int list
-      StartsSegment: bool }
+      StartsSegment: bool
+      BreakBefore: bool }
 
 let private partitionGeographicLineSegment referenceSystem pointContacts otherSegments ((start, endpoint) as segment) =
     let equatorial = equatorialSegment segment
@@ -2469,7 +2470,7 @@ let private partitionGeographicLineSegment referenceSystem pointContacts otherSe
 
     let pieces =
         if List.isEmpty intervals then
-            [ { Start = start; End = endpoint; CoveringComponents = []; StartsSegment = true } ]
+            [ { Start = start; End = endpoint; CoveringComponents = []; StartsSegment = true; BreakBefore = false } ]
         else
             let covered = intervals |> List.map (fun (first, last, componentIndex) -> distance first, distance last, componentIndex)
             [ yield start
@@ -2485,7 +2486,7 @@ let private partitionGeographicLineSegment referenceSystem pointContacts otherSe
                 let covering =
                     covered |> List.choose (fun (lower, upper, componentIndex) ->
                         if lower <= from && until <= upper then Some componentIndex else None)
-                { Start = first; End = last; CoveringComponents = covering; StartsSegment = index = 0 })
+                { Start = first; End = last; CoveringComponents = covering; StartsSegment = index = 0; BreakBefore = false })
 
     pieces, List.sortBy distance contacts
 
@@ -2511,7 +2512,7 @@ let private geographicLineFragments referenceSystem retainShared pieces =
                             // component can continue the current fragment.
                             not (geographicPointOnLineSegment referenceSystem piece.Start (previousVertex, piece.End))
                         | _ -> false)
-                match current, continues with
+                match current, continues && not piece.BreakBefore with
                 | [], _ | _, false -> [ piece.End; piece.Start ], finish current complete, covering
                 | _ :: rest, true ->
                     // Keep source vertices and cuts between components that
@@ -3446,6 +3447,7 @@ let private geographicAreaCoversPoint referenceSystem polygons point =
 type private GeographicPolygonEdge =
     { Polygon: int
       Ring: int
+      EdgeIndex: int
       Segment: (float * float) * (float * float)
       Bounds: GeographicBounds
       Cuts: ResizeArray<float * float> }
@@ -3453,6 +3455,8 @@ type private GeographicPolygonEdge =
 type private GeographicPolygonFragment =
     { Polygon: int
       Ring: int
+      EdgeIndex: int
+      Edge: (float * float) * (float * float)
       Segment: (float * float) * (float * float)
       StartsEdge: bool }
 
@@ -3466,12 +3470,13 @@ let private splitGeographicPolygonEdges referenceSystem flattening clockwise inc
         |> List.mapi (fun polygon rings -> List.map (fun ring -> polygon, ring) rings)
         |> List.concat
         |> List.mapi (fun ring (polygon, vertices) ->
-            vertices |> List.pairwise |> List.choose (fun (start, endpoint) ->
+            vertices |> List.pairwise |> List.indexed |> List.choose (fun (edgeIndex, (start, endpoint)) ->
                 if start = endpoint then None
                 else
                     let segment = start, endpoint
                     Some { Polygon = polygon
                            Ring = ring
+                           EdgeIndex = edgeIndex
                            Segment = segment
                            Bounds = geographicSectionBounds flattening [ segment ]
                            Cuts = ResizeArray() }))
@@ -3518,6 +3523,8 @@ let private splitGeographicPolygonEdges referenceSystem flattening clockwise inc
             |> List.mapi (fun index segment ->
                 { Polygon = edge.Polygon
                   Ring = edge.Ring
+                  EdgeIndex = edge.EdgeIndex
+                  Edge = edge.Segment
                   Segment = segment
                   StartsEdge = index = 0 }))
     fragments, List.ofSeq pointTurns
@@ -3625,6 +3632,60 @@ let private geographicAreaShape = function
     | [ polygon ] -> GPolygon polygon
     | polygons -> GMultiPolygon polygons
 
+let private geographicCollinearTurnFraction referenceSystem source clip vertex =
+    let spheroid, flattening = geographicIntersectionSpheroid referenceSystem
+    let distance = geographicInverseDistanceRadians false spheroid
+    let azimuth first last = geographicSegmentAzimuthsRadians flattening first last |> fst
+    let a, b = geographicLatitudeOrderedSegment source
+    let c, d = geographicLatitudeOrderedSegment clip
+    let point = geographicPointRadians vertex
+    let sourceLength = distance a b
+    let clipLength = distance c d
+
+    // Each pair measures its fractions from the shorter segment's origin.
+    // Two clip edges sharing a vertex can therefore give different fractions.
+    let project start endpoint length value =
+        if equalGeographicCoordinates value start then 0.0
+        elif equalGeographicCoordinates value endpoint then length
+        else
+            let magnitude = distance start value
+            let turn = azimuth start value - azimuth start endpoint
+            if abs (normalizedLongitudeRadians turn) <= Math.PI / 2.0 then magnitude else -magnitude
+
+    let offset, length =
+        if sourceLength <= clipLength then project a b sourceLength point, sourceLength
+        else
+            let sourceStart = project c d clipLength a
+            let sourceEnd = project c d clipLength b
+            let offset = if point = c then -sourceStart else clipLength - sourceStart
+            offset, sourceEnd - sourceStart
+    if length = 0.0 then None
+    elif fst (fst source) > fst (snd source) then Some((length - offset) / length)
+    else Some(offset / length)
+
+let private geographicClipRingBreak referenceSystem (before: GeographicPolygonFragment) (after: GeographicPolygonFragment) leaving entering =
+    let vertex = fst after.Segment
+    if snd before.Segment <> vertex then false
+    else
+        leaving |> List.exists (fun (lastClip: GeographicPolygonFragment) ->
+            entering |> List.exists (fun (nextClip: GeographicPolygonFragment) ->
+                let earlierLeaves = lastClip.EdgeIndex = 0 && fst lastClip.Edge = vertex && snd nextClip.Edge = vertex
+                let earlierEnters = nextClip.EdgeIndex = 0 && fst nextClip.Edge = vertex && snd lastClip.Edge = vertex
+                if lastClip.Ring <> nextClip.Ring || not (earlierLeaves || earlierEnters) then false
+                elif after.StartsEdge then
+                    // Along a straight source boundary, both turns belong to
+                    // the end of the preceding edge and have fraction one.
+                    earlierLeaves && geographicPointOnLineSegment referenceSystem vertex (fst before.Edge, snd after.Edge)
+                else
+                    match geographicCollinearTurnFraction referenceSystem after.Edge lastClip.Edge vertex,
+                          geographicCollinearTurnFraction referenceSystem after.Edge nextClip.Edge vertex with
+                    | Some leaveAt, Some enterAt ->
+                        // Tied fractions use the clip's edge order. A leave
+                        // followed by an enter starts a new output line.
+                        if boostGeoEqual leaveAt enterAt then earlierLeaves
+                        else leaveAt < enterAt
+                    | _ -> false))
+
 let private geographicSharedPolygonLines referenceSystem belongsToLeft shared fragments =
     if Map.isEmpty shared then []
     else
@@ -3635,13 +3696,18 @@ let private geographicSharedPolygonLines referenceSystem belongsToLeft shared fr
         |> List.groupBy _.Ring
         |> List.collect (fun (_, ring) ->
             ring
-            |> List.map (fun fragment ->
+            |> List.mapFold (fun previous fragment ->
                 let start, endpoint = fragment.Segment
                 let key = undirectedGeographicSegment fragment.Segment
+                let covering = Map.tryFind key shared |> Option.defaultValue []
+                let breaks = previous |> Option.exists (fun (before, leaving) ->
+                    geographicClipRingBreak referenceSystem before fragment leaving covering)
                 { Start = start
                   End = endpoint
-                  CoveringComponents = Map.tryFind key shared |> Option.defaultValue []
-                  StartsSegment = fragment.StartsEdge })
+                  CoveringComponents = List.map _.Ring covering
+                  StartsSegment = fragment.StartsEdge
+                  BreakBefore = breaks }, Some(fragment, covering)) None
+            |> fst
             |> geographicLineFragments referenceSystem true)
         |> distinctGeographicLines referenceSystem
 
@@ -3695,7 +3761,7 @@ let private tryGeographicPolygonBoundaryOverlay referenceSystem kind srid left r
                 elif onRight && not onLeft then Some(endpoint, start), None
                 elif intersection && not onLeft && (coincident |> List.exists (_.Polygon >> belongsToLeft)) then
                     let covering = coincident |> List.choose (fun fragment ->
-                        if belongsToLeft fragment.Polygon then None else Some fragment.Ring)
+                        if belongsToLeft fragment.Polygon then None else Some fragment)
                     None, (if covering.IsEmpty then None else Some(key, covering))
                 else None, None)
 

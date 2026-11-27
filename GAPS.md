@@ -3586,9 +3586,11 @@ implementation effort:
    multipolygon, and polygon-only collection operands. Near-degenerate
    turns still affect isolated intersection points and symmetric difference
    lobes. Shared-edge intersection now follows the source ring and
-   preserves its vertices. Remaining gaps include some cuts at the
-   clipping ring's start, serialized ring starts, member ordering,
-   and polar endpoints. [Geographic collection difference](torture/findings/2026-11-26-geographic-polygon-union.md#mixed-collection-difference)
+   preserves its vertices. [Clipping-ring start cuts](torture/findings/2026-11-26-geographic-polygon-union.md#clipping-ring-start-cuts)
+   now follow MySQL's turn order inside a source edge and at straight
+   source vertices. A few split decisions differ across MySQL builds.
+   Serialized ring starts, member ordering, and polar endpoints remain
+   open. [Geographic collection difference](torture/findings/2026-11-26-geographic-polygon-union.md#mixed-collection-difference)
    normalizes areas, lines, and points before applying the mask.
    [Geographic collection intersection](torture/findings/2026-11-26-geographic-polygon-union.md#mixed-collection-intersection)
    also clips normalized dimensions against each other and retains
