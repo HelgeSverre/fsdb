@@ -35845,10 +35845,25 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                 |> Option.map _.Direction
                 |> Option.defaultValue Asc
 
+            let primaryIsOnlyChoice =
+                not source.IndexHints.IsEmpty
+                || not (table.Indexes |> List.exists (fun index ->
+                    index.Visible && index.Kind = BTree && not (equalsIgnoreCase "PRIMARY" index.Name)))
+
+            let canStopAtLimit limit =
+                literalRowCounts && not select.Distinct && not select.CalculateFoundRows && rowCount limit > 0
+
+            let scanThroughLimit limit direction =
+                let offset = select.Offset |> Option.map rowCount |> Option.defaultValue 0
+                let count = min (int64 System.Int32.MaxValue) (int64 offset + int64 (rowCount limit)) |> int
+                direction, count
+
             let rangeLimit prefixLength =
                 match select.Limit, select.OrderBy with
                 | None, [] when select.Offset.IsNone -> Some None
-                | Some limit, _ :: _ when literalRowCounts && not select.Distinct && not select.CalculateFoundRows && rowCount limit > 0 ->
+                | Some limit, [] when primaryIsOnlyChoice && canStopAtLimit limit ->
+                    Some(Some(scanThroughLimit limit Storage.ForwardScan))
+                | Some limit, _ :: _ when canStopAtLimit limit ->
                     let columnIndex = columnIndexOf table.Columns
                     let qualifiers = Map.ofList [ qualifier.ToLowerInvariant(), (table.Columns, 0) ]
                     let projections = expandOrderProjections table.Columns qualifiers select.Projections
@@ -35881,10 +35896,7 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                         else None
 
                     select.OrderBy |> List.map orderColumn |> tryAllSome |> Option.bind scanLimit
-                    |> Option.map (Option.map (fun direction ->
-                        let offset = select.Offset |> Option.map rowCount |> Option.defaultValue 0
-                        let count = min (int64 System.Int32.MaxValue) (int64 offset + int64 (rowCount limit)) |> int
-                        direction, count))
+                    |> Option.map (Option.map (scanThroughLimit limit))
                 | _ -> None
 
             let isIntegerColumn column =
@@ -35961,10 +35973,6 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                                 elif remaining.IsEmpty then
                                     limit |> Option.bind (fun _ -> point (prefix @ [ low ])) |> Option.map (fun access -> access, None)
                                 else
-                                    let primaryIsOnlyChoice =
-                                        not source.IndexHints.IsEmpty
-                                        || not (table.Indexes |> List.exists (fun index ->
-                                            index.Visible && index.Kind = BTree && not (equalsIgnoreCase "PRIMARY" index.Name)))
                                     match limit with
                                     | Some(Some(Storage.ForwardScan, _)) -> rangeRead
                                     | Some None when select.OrderBy.IsEmpty || primaryIsOnlyChoice -> rangeRead
@@ -35976,18 +35984,27 @@ let internal tryIntegerPrimaryRead (store: Store) dbName (select: SelectStmt) =
                             | _ -> rangeRead
                 | _ -> None
 
-            if keys.IsEmpty || conditions.IsEmpty || not (List.forall isIntegerColumn keys)
+            let boundedClusteredScan = select.OrderBy.IsEmpty && select.Limit.IsSome
+            if keys.IsEmpty || (conditions.IsEmpty && not boundedClusteredScan) || not (List.forall isIntegerColumn keys)
                || not (List.forall simpleProjection select.Projections) then None
             else
                 exact ()
                 |> Option.map (fun access -> access, None)
                 |> Option.orElseWith range
                 |> Option.map (fun (access, limit) ->
-                    { ReadDatabase = database
-                      ReadTableName = source.Table
-                      ReadSchemaRevision = table.SchemaRevision
-                      ReadAccess = access
-                      ReadRangeLimit = limit }))
+                    let plan: Storage.IntegerPrimaryReadPlan =
+                        { ReadDatabase = database
+                          ReadTableName = source.Table
+                          ReadSchemaRevision = table.SchemaRevision
+                          ReadAccess = access
+                          ReadRangeLimit = limit }
+                    let readSelect =
+                        if select.OrderBy.IsEmpty && limit.IsSome then
+                            // Evaluate OFFSET and LIMIT in the same physical order used to acquire locks.
+                            let order = keys |> List.map (fun key -> QualifiedCol(qualifier, key), keyDirection key)
+                            { select with OrderBy = order }
+                        else select
+                    plan, readSelect))
     | _ -> None
 
 let private transactionWriteTargetsIn

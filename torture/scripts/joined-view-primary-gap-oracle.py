@@ -907,6 +907,38 @@ def check(port, mysql):
             (("a=2 AND b=10", 1), ("a=4 AND b=10", 1)),
             (("(2,5)", TIMEOUT), ("(3,20)", TIMEOUT), ("(2,15)", 1)),
         ),
+        (
+            "unordered primary range with an offset",
+            ascending_range,
+            "SELECT id FROM gate FORCE INDEX(PRIMARY) WHERE id BETWEEN 12 AND 39 LIMIT 1 OFFSET 1",
+            ((30,),),
+            (("id=20", 3572), ("id=30", 3572), ("id=40", 1)),
+            (("(11)", TIMEOUT), ("(25)", TIMEOUT), ("(35)", 1)),
+        ),
+        (
+            "unordered mixed-direction primary prefix",
+            composite_range,
+            "SELECT b AS a FROM gate WHERE a=2 LIMIT 1 OFFSET 1",
+            ((30,),),
+            (("a=2 AND b=40", 3572), ("a=2 AND b=30", 3572), ("a=2 AND b=20", 1)),
+            (("(2,45)", TIMEOUT), ("(2,35)", TIMEOUT), ("(2,25)", 1)),
+        ),
+        (
+            "unordered exhausted primary range",
+            ascending_range,
+            "SELECT id FROM gate FORCE INDEX(PRIMARY) WHERE id BETWEEN 12 AND 28 LIMIT 1 OFFSET 2",
+            (),
+            (("id=20", 3572), ("id=30", 1)),
+            (("(11)", TIMEOUT), ("(29)", TIMEOUT), ("(35)", 1)),
+        ),
+        (
+            "unordered primary scan without a predicate",
+            (descending, ascending_range[1]),
+            "SELECT id FROM gate LIMIT 1 OFFSET 1",
+            ((30,),),
+            (("id=40", 3572), ("id=30", 3572), ("id=20", 1)),
+            (("(45)", TIMEOUT), ("(35)", TIMEOUT), ("(25)", 1)),
+        ),
     ):
         with fixture(port, schema, mysql, setup) as (_, _, reader, _, probe):
             execute(reader, "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE")
@@ -984,6 +1016,14 @@ def check(port, mysql):
             (later_key,),
             ((first_key,),),
         )
+    check_limited_wait(
+        "unordered primary range",
+        ascending_range,
+        "SELECT id FROM gate FORCE INDEX(PRIMARY) WHERE id BETWEEN 12 AND 39 LIMIT 1",
+        (15,),
+        (18,),
+        ((15,),),
+    )
     check_limited_wait(
         "reverse composite",
         composite_range,

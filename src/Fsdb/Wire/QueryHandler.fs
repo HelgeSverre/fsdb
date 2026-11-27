@@ -3654,15 +3654,29 @@ let private executeParsedStatement accesses (session: Session) (stmt: Statement)
                                 match session.Tx with
                                 | Some transaction when retainsTransactionAfterStatement session ->
                                     primaryLockingSelect transaction.Isolation select
-                                    |> Option.bind (fun (strength, readSelect) ->
-                                        Executor.tryIntegerPrimaryRead store dbName readSelect
-                                        |> Option.filter (fun plan ->
-                                            CatalogOverlay.tryTable session.TemporaryCatalog (plan.ReadDatabase.ToLowerInvariant(), plan.ReadTableName.ToLowerInvariant())
-                                            |> Option.isNone)
-                                        |> Option.map (fun plan ->
-                                            let refresh () = rebaseTransactionSnapshot session transaction |> snd
-                                            let readStore = Storage.lockIntegerPrimaryRead (lockWaitTimeout session) session.Store refresh strength plan
-                                            readStore, readSelect))
+                                    |> Option.map (fun (strength, readSelect) ->
+                                        match readSelect.From with
+                                        | Some(FromTable source) ->
+                                            let database = source.Database |> Option.defaultValue dbName
+                                            let key = database.ToLowerInvariant(), source.Table.ToLowerInvariant()
+                                            if (CatalogOverlay.tryTable session.TemporaryCatalog key).IsSome then store, select
+                                            else
+                                                let refresh () = rebaseTransactionSnapshot session transaction |> snd
+                                                let planningStore =
+                                                    if readSelect.OrderBy.IsEmpty && readSelect.Limit.IsSome
+                                                       && readSelect.Joins.IsEmpty && readSelect.Ctes.IsEmpty then
+                                                        let revision catalog =
+                                                            Storage.tableSnapshot catalog database source.Table
+                                                            |> Result.toOption |> Option.map _.SchemaRevision
+                                                        // A locking read can open a replacement table first accessed after the snapshot.
+                                                        if revision store <> revision session.Store then refresh () else store
+                                                    else store
+                                                Executor.tryIntegerPrimaryRead planningStore dbName readSelect
+                                                |> Option.map (fun (plan, orderedSelect) ->
+                                                    let readStore = Storage.lockIntegerPrimaryRead (lockWaitTimeout session) session.Store refresh strength plan
+                                                    readStore, orderedSelect)
+                                                |> Option.defaultValue (planningStore, select)
+                                        | _ -> store, select)
                                     |> Option.defaultValue (store, select)
                                 | _ -> store, select
                             Executor.runTopLevelSelect readStore registry dbName readSelect)

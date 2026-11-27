@@ -1235,6 +1235,67 @@ let tests =
               run writer write (Affected 1UL) |> ignore
               run writer "SELECT n FROM gate WHERE a=2 AND b=10" (ResultSet([ "n" ], [ [ Some "11" ] ])) |> ignore
 
+          testCase "unordered primary limits read and lock in physical key order"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let setup = run (create 1 store) "CREATE TABLE gate(a INT,b INT,PRIMARY KEY(a,b DESC))" (Affected 0UL)
+              run setup "INSERT INTO gate VALUES (4,40),(2,30),(1,40),(2,40),(4,10),(2,10),(1,10),(2,20)" (Affected 8UL) |> ignore
+              let probe = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let attempt sql =
+                  let tx = run probe "BEGIN" (Affected 0UL)
+                  let tx, result = handle tx sql
+                  run tx "ROLLBACK" (Affected 0UL) |> ignore
+                  result
+
+              let reader = run (create 3 store) "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE" (Affected 0UL)
+              for source in [ "gate g FORCE INDEX (PRIMARY) WHERE g.a BETWEEN 1 AND 3"; "gate g" ] do
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  try
+                      run reader $"SELECT g.b AS a FROM {source} LIMIT 1 OFFSET 1" (ResultSet([ "a" ], [ [ Some "10" ] ])) |> ignore
+                      for key in [ 40; 10 ] do
+                          match attempt $"SELECT b FROM gate WHERE a=1 AND b={key} FOR UPDATE NOWAIT" with
+                          | Err(3572, _) -> ()
+                          | result -> failtestf "%s must lock the visited row (1,%d), got %A" source key result
+                      match attempt "INSERT INTO gate VALUES (1,25)" with
+                      | Err(1205, _) -> ()
+                      | result -> failtestf "%s must lock the gap between the visited rows, got %A" source result
+                      Expect.equal (attempt "INSERT INTO gate VALUES (1,5)") (Affected 1UL) "the gap after the last visited row stays writable"
+                      Expect.equal (attempt "SELECT b FROM gate WHERE a=2 AND b=40 FOR UPDATE NOWAIT")
+                          (ResultSet([ "b" ], [ [ Some "40" ] ])) "an unvisited row stays writable"
+                  finally
+                      run reader "ROLLBACK" (Affected 0UL) |> ignore
+
+          testCase "unordered primary limits reopen a replaced table"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              let store = Fsdb.Storage.create ()
+              let admin = run (create 1 store) "CREATE TABLE gate(a INT PRIMARY KEY,v INT)" (Affected 0UL)
+              run admin "CREATE TABLE side(id INT PRIMARY KEY)" (Affected 0UL) |> ignore
+              run admin "INSERT INTO gate VALUES (7,11)" (Affected 1UL) |> ignore
+              run admin "INSERT INTO side VALUES (1)" (Affected 1UL) |> ignore
+              let reader = run (create 2 store) "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE" (Affected 0UL)
+              let reader = run reader "BEGIN" (Affected 0UL)
+              try
+                  let reader = run reader "SELECT id FROM side" (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                  run admin "DROP TABLE gate" (Affected 0UL) |> ignore
+                  run admin "CREATE TABLE gate(b INT PRIMARY KEY,v INT)" (Affected 0UL) |> ignore
+                  run admin "INSERT INTO gate VALUES (30,40),(20,50)" (Affected 2UL) |> ignore
+                  run reader "SELECT v FROM gate LIMIT 1" (ResultSet([ "v" ], [ [ Some "50" ] ])) |> ignore
+                  match handle admin "SELECT v FROM gate WHERE b=20 FOR UPDATE NOWAIT" |> snd with
+                  | Err(3572, _) -> ()
+                  | result -> failtestf "the reopened cursor must lock the new row, got %A" result
+              finally
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "table DDL waits for a transaction that accessed its target"
           <| fun _ ->
               let run session sql expected =

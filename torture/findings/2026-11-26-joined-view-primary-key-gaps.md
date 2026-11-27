@@ -279,6 +279,34 @@ deletes `20`, the reader waits and returns `30` after commit.
 MySQL and both Fsdb modes matched all 207 checks in the expanded oracle.
 [InnoDB next-key locking](https://dev.mysql.com/doc/refman/8.4/en/innodb-next-key-locking.html).
 
+### Unordered primary scans with LIMIT
+
+When MySQL 8.4.11 chooses a clustered primary-key scan, an unordered
+`LIMIT` stops after reading the skipped and returned rows. Fsdb now
+uses physical primary-key order for both locking and result evaluation
+on the supported integer-key scans. This applies to a primary-key range,
+an equality prefix, and a primary scan without a predicate. It covers
+`FORCE INDEX (PRIMARY)` and tables without a competing visible B-tree.
+
+With `(a ASC,b DESC)`, `a BETWEEN 1 AND 3 LIMIT 1 OFFSET 1` can visit
+`(1,40)` first and return `(1,10)`. Both records and their visited gaps
+are locked. Inserting `(1,5)` and locking `(2,40)` still succeed. Before
+the fix, Fsdb returned `(1,40)` for the fixture and left the visited
+rows unlocked. If a pending insert becomes the stopping row after
+commit, the read can return while a later insertion remains pending.
+
+If the table is replaced after the transaction reads a different table,
+the limited locking read plans against the new primary key. In the
+replacement fixture, renaming the key from `a` to `b` lets the read
+return the row for `b=20` and prevents a concurrent transaction from
+taking an exclusive lock on that row.
+
+An expanded comparison covered 40 scans and matched 620 result,
+record-lock, and gap checks. It included SERIALIZABLE reads and
+explicit locks under REPEATABLE READ. MySQL and both Fsdb modes passed
+all 635 maintained schedule checks. Queries with competing access
+paths can visit different records. [MySQL LIMIT optimization](https://dev.mysql.com/doc/refman/8.4/en/limit-optimization.html).
+
 ### Reverse ordered limits
 
 The reverse path covers an ordered limit over a single-column integer
@@ -340,7 +368,7 @@ equality-bound part can be skipped. A single `BETWEEN` with identical
 integer endpoints can extend the equality prefix. Separate inequalities
 that collapse to a partial key can use different scans. The suffix sort
 case is covered below. Access paths whose index scan choice depends on
-cost and unordered limits remain open.
+cost remain open.
 [MySQL 8.4.11 optimizer source](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_optimizer.cc#L1706-L1804).
 
 MySQL and both Fsdb modes matched all 328 maintained schedule checks.
