@@ -8737,6 +8737,95 @@ let tests =
                       (ResultSet([ "payload" ], [ [ Some otherPayload ]; [ Some "1" ] ]))
                   |> ignore
 
+          testCase "duplicate-key updates wait for the actual primary destination"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let setup = create 1 store
+              run setup "CREATE TABLE jobs(id INT PRIMARY KEY,u INT UNIQUE)" (Affected 0UL) |> ignore
+              run setup "INSERT INTO jobs VALUES(10,1),(20,2),(40,4)" (Affected 3UL) |> ignore
+              let holder = run setup "BEGIN" (Affected 0UL)
+              let holder = run holder "SELECT id FROM jobs WHERE id=15 FOR UPDATE" (ResultSet([ "id" ], []))
+              let writer = run (create 2 store) "SET innodb_lock_wait_timeout=1" (Affected 0UL)
+              let sql = "INSERT INTO jobs VALUES(40,4) ON DUPLICATE KEY UPDATE id=15"
+              let writer, result = handle writer sql
+              TestSupport.Sql.expectError 1205 result "the duplicate update enters a protected primary gap"
+              run holder "ROLLBACK" (Affected 0UL) |> ignore
+              run writer sql (Affected 2UL) |> ignore
+
+          testCase "duplicate-key updates recheck the actual unique destination after waiting"
+          <| fun _ ->
+              for transactional, ending in
+                  [ false, "COMMIT"; true, "COMMIT"; false, "ROLLBACK"; true, "ROLLBACK" ] do
+                  let store = Fsdb.Storage.create ()
+                  let run session sql expected =
+                      let next, result = handle session sql
+                      Expect.equal result expected sql
+                      next
+                  let setup = create 1 store
+                  run setup "CREATE TABLE jobs(id INT PRIMARY KEY,u INT NOT NULL,UNIQUE KEY ux(u))" (Affected 0UL) |> ignore
+                  run setup "INSERT INTO jobs VALUES(30,3),(40,4)" (Affected 2UL) |> ignore
+                  let holder = run (create 2 store) "BEGIN" (Affected 0UL)
+                  let holder = run holder "UPDATE jobs SET u=7 WHERE id=30" (Affected 1UL)
+                  let writer = run (create 3 store) "SET innodb_lock_wait_timeout=5" (Affected 0UL)
+                  let writer = if transactional then run writer "BEGIN" (Affected 0UL) else writer
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          handle writer "INSERT INTO jobs VALUES(40,4) ON DUPLICATE KEY UPDATE u=7")
+                  let blocked () = lock store.LockWaits.SyncRoot (fun () -> store.LockWaits.Edges.Count > 0)
+                  let entered =
+                      Threading.SpinWait.SpinUntil((fun () -> blocked () || waiting.IsCompleted), TimeSpan.FromSeconds 3.0)
+                  let wasWaiting = entered && blocked ()
+                  let _, holderResult = handle holder ending
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the upsert finishes after the holder ends"
+                  Expect.isTrue wasWaiting "the upsert waits for the destination owner"
+                  Expect.equal holderResult (Affected 0UL) "the holder can finish"
+                  let writer, result = waiting.Result
+                  let expected, rows =
+                      if ending = "COMMIT" then
+                          Err(1062, "Duplicate entry '7' for key 'jobs.ux'"), [ [ Some "7" ]; [ Some "4" ] ]
+                      else Affected 2UL, [ [ Some "3" ]; [ Some "7" ] ]
+                  Expect.equal result expected ending
+                  if transactional then run writer "COMMIT" (Affected 0UL) |> ignore
+                  run setup "SELECT u FROM jobs ORDER BY id" (ResultSet([ "u" ], rows)) |> ignore
+
+          testCase "duplicate-key updates preserve validated key moves when publishing after a wait"
+          <| fun _ ->
+              for values, affected, row20, row40 in
+                  [ "(40,4,7),(40,4,4)", 4UL, "2", "4"
+                    "(40,4,7),(20,2,4)", 4UL, "4", "7"
+                    "(40,4,7),(20,2,4),(40,4,2)", 6UL, "4", "2" ] do
+                  let store = Fsdb.Storage.create ()
+                  let run session sql expected =
+                      let next, result = handle session sql
+                      Expect.equal result expected sql
+                      next
+                  let setup = create 1 store
+                  run setup "CREATE TABLE jobs(id INT PRIMARY KEY,u INT UNIQUE,p INT)" (Affected 0UL) |> ignore
+                  run setup "INSERT INTO jobs VALUES(10,1,0),(20,2,0),(30,3,0),(40,4,0)" (Affected 4UL) |> ignore
+                  let holder = run (create 2 store) "BEGIN" (Affected 0UL)
+                  let holder = run holder "UPDATE jobs SET u=7 WHERE id=30" (Affected 1UL)
+                  let writer = run (create 3 store) "SET innodb_lock_wait_timeout=5" (Affected 0UL)
+                  let waiting =
+                      Threading.Tasks.Task.Run(fun () ->
+                          handle writer $"INSERT INTO jobs VALUES{values} ON DUPLICATE KEY UPDATE u=VALUES(p)")
+                  let blocked () = lock store.LockWaits.SyncRoot (fun () -> store.LockWaits.Edges.Count > 0)
+                  let entered =
+                      Threading.SpinWait.SpinUntil((fun () -> blocked () || waiting.IsCompleted), TimeSpan.FromSeconds 3.0)
+                  let wasWaiting = entered && blocked ()
+                  run setup "UPDATE jobs SET p=1 WHERE id=10" (Affected 1UL) |> ignore
+                  run holder "ROLLBACK" (Affected 0UL) |> ignore
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the upsert resumes"
+                  Expect.isTrue wasWaiting "the upsert waits for the intermediate key"
+                  Expect.equal (snd waiting.Result) (Affected affected) values
+                  run setup "SELECT u,p FROM jobs ORDER BY id"
+                      (ResultSet([ "u"; "p" ],
+                          [ [ Some "1"; Some "1" ]; [ Some row20; Some "0" ]; [ Some "3"; Some "0" ]; [ Some row40; Some "0" ] ]))
+                  |> ignore
+
           testCase "ordered secondary SKIP LOCKED retains the gap after the pending record"
           <| fun _ ->
               for ending in [ "COMMIT"; "ROLLBACK" ] do

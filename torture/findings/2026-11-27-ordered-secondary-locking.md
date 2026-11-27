@@ -148,12 +148,30 @@ stamp 30. MySQL blocked inserts at `(7,30,25)`, `(7,30,35)` and
 ## Primary and unique upsert destinations
 
 On `t(id INT PRIMARY KEY,u INT NOT NULL,UNIQUE KEY ux(u))`, a locking
-read of missing id 15 between ids 10 and 20 blocks an ordinary UPDATE
-to id 15 on both engines. An upsert changing id 40 to id 15 returns
-1205 on MySQL and succeeds on Fsdb.
+read of missing id 15 between ids 10 and 20 blocks both an ordinary
+UPDATE and an upsert changing id 40 to id 15. The pinned MySQL image
+and both Fsdb storage modes also agree for audited unsigned, DECIMAL,
+binary, and collated text primary keys. A REPEATABLE READ locking
+read yields error 1205 for the writer. A READ COMMITTED reader lets
+the writer move the row.
 
-When a transaction moves id 30 to unique value 7, MySQL waits for that
-transaction before an upsert can assign 7 to id 40. The upsert returns
-1062 after the holder commits and succeeds after the holder rolls back.
-Fsdb's upsert succeeds immediately and can cause the holder's commit to
-return 1205.
+When a transaction moves id 30 to unique value 7, the upsert waits
+before assigning 7 to id 40. After the holder commits, the upsert
+returns 1062 and rolls back the whole batch. After the holder rolls
+back, the upsert succeeds. VALUES, INSERT SELECT, checked views,
+and mixed insert and update batches agree with MySQL in the audited
+schedules. The assignments run once, including when the recheck
+rejects the staged row.
+
+A batch can restore a row's original key or transfer and swap keys
+between rows while another session commits a disjoint change. Fsdb
+publishes those final index entries together. WAL recovery also
+preserves repeated updates to one row, including an insert whose
+storage row ID moved when another session inserted first.
+
+Two schedules still differ. When the holder commits a new unique
+value, MySQL's INSERT IGNORE skips the conflicting update with a
+warning and Fsdb returns 1062. When the holder moves away from an
+already committed value, MySQL waits before deciding whether that
+value is available. Fsdb checks the initial unique index and returns
+1062 immediately in both the commit and rollback cases.

@@ -3883,7 +3883,9 @@ let private mergeFullTextDocuments sourceRowIds (baseline: Table) (source: Table
             |> FullText.publishCachedTerms original)
     { target with FullTextIndexes = indexes }
 
-let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (liveTable: Table) : Table =
+let private mergeRowChanges dbName (baseTable: Table) (batchTable: Table) (liveTable: Table) changes =
+    let changes = Seq.toArray changes
+    let released = if changes.Length > 1 then Array.zeroCreate changes.Length else Array.empty
     let conflict () = raise (LockWaitTimeout dbName)
     let rows = liveTable.RowsArray.ToBuilder()
     let uniqueGroups = uniqueKeyGroups liveTable
@@ -3908,28 +3910,44 @@ let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (l
         secondaryIndex <- updatedSecondary
         secondaryOrder <- updatedOrder
 
-    for iteration, (rowId, before, after) in batchTable.RowsArray.ChangesFrom baseTable.RowsArray |> Seq.indexed do
+    let existingRow rowId before =
+        if liveTable.RowsArray.TryFind rowId = Some before then Some(rowId, before)
+        else conflict ()
+
+    let releasesUniqueKey (before: Value[]) = function
+        | None -> not uniqueGroups.IsEmpty
+        | Some(after: Value[]) ->
+            uniqueGroups |> List.exists (fun group -> group.Indices |> List.exists (fun i -> before.[i] <> after.[i]))
+
+    // Several staged writes can transfer or swap keys. Release their old
+    // index entries before adding the final images in physical row order.
+    for iteration in 0 .. released.Length - 1 do
         Limits.checkQueryCancellation iteration
+        let rowId, before, after = changes.[iteration]
+        match before with
+        | Some row when releasesUniqueKey row after ->
+            publish (existingRow rowId row) None
+            released.[iteration] <- true
+        | _ -> ()
+
+    for iteration in 0 .. changes.Length - 1 do
+        Limits.checkQueryCancellation iteration
+        let rowId, before, after = changes.[iteration]
+        let removed =
+            if released.Length > 0 && released.[iteration] then None
+            else before |> Option.bind (existingRow rowId)
 
         match before, after with
-        | Some baseRow, replacement ->
-            match rows.TryFind rowId with
-            | Some liveRow when liveRow = baseRow ->
-                match replacement with
-                | Some row when not (collides rowId row) ->
-                    rows.[rowId] <- row
-                    publish (Some(rowId, baseRow)) (Some(rowId, row))
-                | Some _ -> conflict ()
-                | None ->
-                    rows.Remove rowId |> ignore
-                    publish (Some(rowId, baseRow)) None
-            | _ -> conflict ()
+        | Some _, Some row ->
+            if collides rowId row then conflict ()
+            rows.[rowId] <- row
+            publish removed (Some(rowId, row))
+        | Some _, None ->
+            rows.Remove rowId |> ignore
+            if removed.IsSome then publish removed None
         | None, Some row ->
             let addedId = rows.Add row
-
-            if collides addedId row then
-                conflict ()
-
+            if collides addedId row then conflict ()
             if addedId <> rowId && not batchTable.FullTextIndexes.IsEmpty then
                 sourceRowIds <- Map.add addedId rowId sourceRowIds
             publish None (Some(addedId, row))
@@ -3943,6 +3961,9 @@ let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (l
             SecondaryIndex = secondaryIndex
             SecondaryOrder = secondaryOrder }
     |> mergeFullTextDocuments sourceRowIds baseTable batchTable liveTable
+
+let private mergeRows dbName (baseTable: Table) (batchTable: Table) liveTable =
+    mergeRowChanges dbName baseTable batchTable liveTable (batchTable.RowsArray.ChangesFrom baseTable.RowsArray)
 
 let private overlayConsistentRows (pinned: Table) (baseline: Table) (working: Table) =
     let primary = uniqueKeyGroups pinned |> List.tryFind (fun group -> group.Name = "PRIMARY")
@@ -13666,46 +13687,13 @@ let private mergePointUpdate dbName tableKey rowIds (baseDb: Database) (batchDb:
 
     match Map.tryFind tableKey baseDb, Map.tryFind tableKey batchDb, Map.tryFind tableKey liveDb with
     | Some baseTable, Some batchTable, Some liveTable when sameTableSchema liveTable baseTable ->
-        let rows = liveTable.RowsArray.ToBuilder()
-        let uniqueGroups = uniqueKeyGroups liveTable
-        let secondaryGroups = secondaryKeyGroups liveTable
-        let mutable index = liveTable.UniqueIndex
-        let mutable secondaryIndex = liveTable.SecondaryIndex
-        let mutable secondaryOrder = liveTable.SecondaryOrder
-
-        for iteration, rowId in List.indexed rowIds do
-            Limits.checkQueryCancellation iteration
-
-            match baseTable.RowsArray.TryFind rowId, batchTable.RowsArray.TryFind rowId, rows.TryFind rowId with
-            | Some before, Some after, Some live when live = before ->
-                let collision =
-                    uniqueGroups
-                    |> List.exists (fun group ->
-                        match encodeUniqueKey liveTable.Columns group after with
-                        | Some key -> Map.tryFind key index.[group.Name] |> Option.exists ((<>) rowId)
-                        | None -> false)
-
-                if collision then
-                    conflict ()
-
-                rows.[rowId] <- after
-                let uniqueIndex, updatedSecondaryIndex, updatedSecondaryOrder = reindexRow liveTable.Columns uniqueGroups secondaryGroups (Some(rowId, before)) (Some(rowId, after)) index secondaryIndex secondaryOrder
-                index <- uniqueIndex
-                secondaryIndex <- updatedSecondaryIndex
-                secondaryOrder <- updatedSecondaryOrder
-            | _ -> conflict ()
-
-        let mergedTable =
-            publishRowsWithDocumentRules (documentRulesFrom batchTable Map.empty) liveTable
-                { liveTable with
-                    RowsArray = rows.DrainToImmutable()
-                    NextAutoId = max liveTable.NextAutoId batchTable.NextAutoId
-                    UniqueIndex = index
-                    SecondaryIndex = secondaryIndex
-                    SecondaryOrder = secondaryOrder }
-            |> mergeFullTextDocuments Map.empty baseTable batchTable liveTable
-
-        Map.add tableKey mergedTable liveDb
+        let changes =
+            rowIds
+            |> Seq.map (fun rowId ->
+                match baseTable.RowsArray.TryFind rowId, batchTable.RowsArray.TryFind rowId with
+                | Some before, Some after -> rowId, Some before, Some after
+                | _ -> conflict ())
+        Map.add tableKey (mergeRowChanges dbName baseTable batchTable liveTable changes) liveDb
     | _ -> conflict ()
 
 let private tryPointUpdate (baseDb: Database) (batchDb: Database) (liveDb: Database) =
@@ -14279,9 +14267,8 @@ let private directAndCascadedUpdates dbName tableName direct cascaded =
     if List.isEmpty direct then cascaded
     else Map.change (tableAddress dbName tableName) (fun affected -> Some(direct @ Option.defaultValue [] affected)) cascaded
 
-let private updateKeyClaims dbName tableName (batch: StagedUpdate) =
-    let catalog = batch.OriginalCatalog
-    directAndCascadedUpdates dbName tableName batch.Changes batch.Cascaded
+let private mutationKeyClaims dbName tableName catalog direct cascaded =
+    directAndCascadedUpdates dbName tableName direct cascaded
     |> Map.toList
     |> List.choose (fun (address, rows) ->
         tryCatalogTable address catalog
@@ -14307,6 +14294,9 @@ let private updateKeyClaims dbName tableName (batch: StagedUpdate) =
                       Moves = moves
                       OrderedKeys = orderedKeys }))
 
+let private updateKeyClaims dbName tableName (batch: StagedUpdate) =
+    mutationKeyClaims dbName tableName batch.OriginalCatalog batch.Changes batch.Cascaded
+
 let private currentUpdateCatalog (store: Store) =
     match prepareDynamicWriteRebase store with
     | Some(_, prepared) -> prepared.StatementCatalog
@@ -14317,7 +14307,7 @@ let private validateMovedUniqueKeys currentCatalog groups =
     |> List.tryPick (fun group ->
         match tryCatalogTable group.Address currentCatalog with
         | Some current when not (obj.ReferenceEquals(current, group.Original)) && sameTableSchema current group.Original ->
-            let changesByRow = group.Changes |> List.map (fun change -> change.RowId, change) |> Map.ofList
+            let finalRows = group.Changes |> List.map (fun change -> change.RowId, change.After) |> Map.ofList
             group.Moves
             |> List.tryPick (fun move ->
                 current.UniqueIndex
@@ -14325,11 +14315,11 @@ let private validateMovedUniqueKeys currentCatalog groups =
                 |> Option.bind (Map.tryFind move.Key)
                 |> Option.bind (fun otherId ->
                     let conflict =
-                        match Map.tryFind otherId changesByRow, current.RowsArray.TryFind otherId with
-                        | Some change, Some live when live = change.Before ->
+                        match Map.tryFind otherId finalRows, group.Original.RowsArray.TryFind otherId with
+                        | Some after, Some original when current.RowsArray.TryFind otherId = Some original ->
                             otherId <> move.Change.RowId
                             && withoutIndexExpressionDiagnostics (fun () ->
-                                encodeUniqueKey current.Columns move.Group change.After = Some move.Key)
+                                encodeUniqueKey current.Columns move.Group after = Some move.Key)
                         | _ -> true
                     if conflict then
                         let value = formatDuplicateUniqueValue current.Columns move.Group move.Change.After
@@ -14354,12 +14344,14 @@ let private withOwnedWriteLocks owner store database table rowIds keys body =
     withWriteLocksForContext (Some owner) (Fsdb.Limits.statementLockWaitTimeout ()) true
         store database table rowIds keys body
 
-let private withDestinationKeyClaims owner store destinations publish =
+let private withUpdateKeyClaims owner store groups publish =
     let rec claim = function
         | [] -> publish ()
-        | ((database, table), keys) :: remaining ->
-            withOwnedWriteLocks owner store database table [] keys (fun () -> claim remaining)
-    claim destinations
+        | group :: remaining ->
+            let database, table = group.Target
+            let uniqueKeys = group.Moves |> List.map (fun move -> uniqueKeyLockName move.Group move.Key)
+            withOwnedWriteLocks owner store database table [] (uniqueKeys @ group.OrderedKeys) (fun () -> claim remaining)
+    claim groups
 
 let internal tryIgnoreUpdateConstraintError = function
     | (ForeignKeyParentMissing _ | ForeignKeyRestrict _ | DuplicateKey _) as error ->
@@ -14421,11 +14413,7 @@ let private rebuildAcceptedUpdates (original: Table) changes =
             SecondaryOrder = order }
 
 let private withCheckedUpdateDestinations owner store policy groups replaceTable (batch, result: StagedUpdate) publish =
-    let destinations =
-        groups |> List.map (fun group ->
-            let uniqueKeys = group.Moves |> List.map (fun move -> uniqueKeyLockName move.Group move.Key)
-            group.Target, uniqueKeys @ group.OrderedKeys)
-    withDestinationKeyClaims owner store destinations (fun () ->
+    withUpdateKeyClaims owner store groups (fun () ->
         match policy, groups with
         | _, [] -> publish (batch, result)
         | RejectConstraintViolation, _ ->
@@ -14618,21 +14606,16 @@ and internal upsertRowsWithOrdinalChecked
             |> Result.map (fun (catalog', cascaded, summary) -> catalog', (summary, cascaded, catalog))
 
         let keysOf ((summary: UpsertSummary), cascaded, catalog) =
-            directAndCascadedUpdates dbName tableName summary.UpdatedRows cascaded
-            |> Map.toList
-            |> List.choose (fun (address, changes) ->
-                tryCatalogTable address catalog
-                |> Option.bind (fun table ->
-                    match orderedUpdateKeys table changes with
-                    | [] -> None
-                    | keys -> Some(catalogTableIdentity catalog address, keys)))
+            mutationKeyClaims dbName tableName catalog summary.UpdatedRows cascaded
 
         let result =
             captureIndexExpressionError (fun () ->
                 withIndexExpressionDiagnostics store (fun () ->
                     withWriteLockOwner store (fun owner ->
-                        let claimKeys destinations batch publish =
-                            withDestinationKeyClaims owner store destinations (fun () -> publish batch)
+                        let claimKeys groups batch publish =
+                            withUpdateKeyClaims owner store groups (fun () ->
+                                validateMovedUniqueKeys (currentUpdateCatalog store) groups
+                                |> Result.bind (fun () -> publish batch))
                         let publish () = withStagedCatalogPublishing store dbName eventsOf operation keysOf claimKeys
                         let lockRows = rowsIn |> List.choose (Result.toOption >> Option.map (List.map Some))
                         match tryInsertLockTargets store dbName tableName columns lockRows with
