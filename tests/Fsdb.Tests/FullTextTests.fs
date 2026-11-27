@@ -1032,6 +1032,32 @@ let tests =
                       closeTo scores.[id] windowed.[id] "a filter preserves corpus frequency"
                       closeTo scores.[id] fastPath.[id] "posting and general paths agree"
 
+              for index, repeatedScore, softScore in
+                  [ bulk, 0.018783101812005043, 1.5300445556640625
+                    cached, 0.02817465178668499, 1.5717095136642456 ] do
+                  let repeated = [ 1, repeatedScore; 2, 0.02817465178668499; 3, 0.009391550906002522 ]
+                  for query, expected in
+                      [ "京ap* 京ap*", repeated
+                        "+京ap* 京ap*", repeated
+                        "(京ap* 京ap*)", repeated
+                        "京apple* 京apple", [ 1, 1.0874286890029907 ]
+                        "京apple* \"京apple\"", [ 1, 1.0874286890029907 ]
+                        "京apple ~京ap*", [ 1, softScore ]
+                        "+京apple ~京ap*", [ 1, 2.4467146396636963 ]
+                        "~京ap* 京apple", [ 1, 2.4467146396636963 ]
+                        "京apple (~京app*)", [ 1, 2.4467146396636963 ]
+                        "~京ap*", [] ] do
+                      let scores = booleanScores index query
+                      Expect.equal (scores |> Map.keys |> Seq.toList) (List.map fst expected) query
+                      for id, score in expected do
+                          closeTo score scores.[id] query
+                      match tryFlatBooleanScoresDictionary index query with
+                      | Some fastPath ->
+                          Expect.equal (Seq.toList fastPath.Keys) (List.map fst expected) query
+                          for id, score in expected do
+                              closeTo score fastPath.[id] query
+                      | None -> ()
+
           testCase "ngram prefixes use per-word document frequency and the first matching word"
           <| fun _ ->
               let collation = tryFind "utf8mb4_bin" |> Option.get

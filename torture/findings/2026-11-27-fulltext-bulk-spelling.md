@@ -106,11 +106,9 @@ The 22,320-query matrix gained 204 matches with no regressions.
 The remaining 56 cases all use `utf8mb4_0900_as_cs` and involve
 Boolean wildcard matching of width variants.
 
-A separate 126-query compound search probe gained 45 matches with
-no regressions. Its remaining differences include repeated wildcard
-terms, exact and wildcard terms with the same key, and soft wildcard
-terms. For `京ap* 京ap*`, MySQL counts both visits toward document
-frequency and applies one relevance contribution for the prefix.
+A separate 126-query compound search probe gained 45 matches after
+the posting-count change. Repeated lookups and soft wildcard terms
+accounted for most of the differences that remained in that probe.
 
 A separate 270-query width probe found 15 divergences, all in
 `utf8mb4_0900_as_cs` ngrams. With rows containing `Ａ花`, `ａ花`,
@@ -121,3 +119,31 @@ MySQL uses a prefix comparator to traverse the cache and an InnoDB
 internal `LIKE` cursor for flushed postings.
 [Cache comparator](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/handler/ha_innodb.cc#L7460-L7475)
 [Flushed posting cursor](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0opt.cc#L448-L499)
+
+### Repeated and soft wildcard terms
+
+Word-parser wildcard queries now share the posting visitor used for
+ngram ranking. For `京ap* 京ap*`, MySQL counts both visits toward
+document frequency and applies one contribution for the prefix.
+A wildcard and an exact term with the same key share that state,
+including a quoted exact term. MySQL applies a soft wildcard to rows
+already selected in its group. For example, `~京ap* 京apple` keeps the
+unmodified `京apple` rank, while `京apple ~京ap*` adjusts it.
+[InnoDB Boolean visitor order](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0ast.cc#L478-L599)
+
+All 234 queries in the focused compound probes match MySQL after this
+change, up from 99. A separate 766-query stress probe gained 319 matches
+with no regressions. The 92 remaining differences in that probe involve
+the visitation or ranking of nested groups. The 22,320-query bulk spelling
+matrix retains its previous results. All 28 recovery checks match MySQL
+from WAL and checkpoints written before and after this change.
+
+The default parser can complete a run of operator terms before it
+merges a following parenthesized group. With the example corpus,
+`+京ap* (noise)` returns rows 1–4 in MySQL. Moving the group before
+the prefix, as in `(noise) +京ap*`, returns rows 1–3. Fsdb returns
+rows 1–3 for both.
+The MySQL grammar wraps preceding expressions in a list when it
+appends a group, giving required and excluded terms an earlier
+visit in the first query.
+[InnoDB group grammar](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0pars.y#L88-L127)
