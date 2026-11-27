@@ -15807,7 +15807,6 @@ and private tryOrderedSecondaryLockingRead store registry dbName (select: Select
     match select.Limit |> Option.bind literalCount with
     | Some limit
         when limit > 0
-             && (locking.Wait = NoWait || locking.Wait = SkipLocked)
              && store.TransactionLocks.IsSome && not select.OrderBy.IsEmpty
              && not select.Distinct && not select.CalculateFoundRows
              && select.Joins.IsEmpty && select.GroupBy.IsEmpty && select.Having.IsNone && select.Windows.IsEmpty
@@ -15845,7 +15844,8 @@ and private tryOrderedSecondaryLockingRead store registry dbName (select: Select
                                 List.map2 (fun (term: IndexOrderTerm) direction -> { term with Direction = direction }) matched.Terms directions
                                 |> storageOrderTerms
                             let count = min (int64 System.Int32.MaxValue) (int64 offset + int64 limit) |> int
-                            Storage.tryLockOrderedSecondaryRead store refresh database tref.Table name keyTerms resolved.PinnedValues
+                            let timeout = lockingReadTimeout.Value |> Option.defaultValue (Limits.lockWaitTimeout ())
+                            Storage.tryLockOrderedSecondaryRead timeout store refresh database tref.Table name keyTerms resolved.PinnedValues
                                 locking.Strength locking.Wait releaseLockingReadOffsetRows.Value offset count)))
     | _ -> None
 

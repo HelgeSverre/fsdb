@@ -964,6 +964,11 @@ also check pending insertion order before filling OFFSET and LIMIT. Audited
 FOR UPDATE reads retain only visited row locks, with lower isolation
 releasing OFFSET rows. Secondary next-key gaps and covering FOR SHARE
 record ownership remain open.
+The [blocking form](torture/findings/2026-11-27-ordered-secondary-locking.md#blocking-reads)
+waits for a pending insert or row lock before the limit and reopens the
+seek after the blocker resolves. Audited timeouts retain the visited
+prefix. A rolled-back secondary-key change can still leave an extra
+READ COMMITTED OFFSET row lock.
 [Locking reads with `LIMIT 0` and no offset](torture/findings/2026-11-27-missing-primary-write-gaps.md#locking-reads-with-limit-0)
 validate the statement and retain table metadata without claiming rows,
 including when the locking read is inside a subquery, CTE, or UNION.

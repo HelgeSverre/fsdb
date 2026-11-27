@@ -8634,6 +8634,68 @@ let tests =
                       run writer insert (Affected 1UL) |> ignore
                   else Expect.equal gap (Affected 1UL) "the neighboring insert can proceed"
 
+          testCase "ordered secondary blocking read reopens after a pending insert"
+          <| fun _ ->
+              for isolation, ending, expected in
+                  [ "READ COMMITTED", "COMMIT", "20"
+                    "READ COMMITTED", "ROLLBACK", "10"
+                    "REPEATABLE READ", "COMMIT", "20"
+                    "REPEATABLE READ", "ROLLBACK", "10"
+                    "READ COMMITTED", "COMMIT", "30"
+                    "REPEATABLE READ", "COMMIT", "30" ] do
+                  let store = Fsdb.Storage.create ()
+                  let run session sql count =
+                      let next, result = handle session sql
+                      Expect.equal result (Affected count) sql
+                      next
+                  let owner = create 1 store
+                  run owner "CREATE TABLE jobs(id INT PRIMARY KEY,k INT,stamp INT,KEY ix(k,stamp,id))" 0UL |> ignore
+                  run owner "INSERT INTO jobs VALUES(10,7,10),(30,7,30)" 2UL |> ignore
+                  let holder = run owner "BEGIN" 0UL
+                  let change =
+                      if expected = "30" then "UPDATE jobs SET stamp=40 WHERE id=10"
+                      else "INSERT INTO jobs VALUES(20,7,5)"
+                  let holder = run holder change 1UL
+                  let reader = run (create 2 store) $"SET TRANSACTION ISOLATION LEVEL {isolation}" 0UL
+                  let reader = run reader "SET innodb_lock_wait_timeout=5" 0UL
+                  let reader = run reader "BEGIN" 0UL
+                  let waiting = Threading.Tasks.Task.Run(fun () ->
+                      handle reader "SELECT id FROM jobs FORCE INDEX(ix) WHERE k=7 ORDER BY stamp,id LIMIT 1 FOR UPDATE")
+                  let blocked () = lock store.LockWaits.SyncRoot (fun () -> store.LockWaits.Edges.Count > 0)
+                  let entered = Threading.SpinWait.SpinUntil((fun () -> blocked () || waiting.IsCompleted), TimeSpan.FromSeconds 3.0)
+                  let wasWaiting = entered && blocked ()
+                  run holder ending 0UL |> ignore
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the read finishes after the write resolves"
+                  let reader, result = waiting.Result
+                  if expected = "30" then
+                      let moved = handle (create 3 store) "SELECT id FROM jobs WHERE id=10 FOR UPDATE NOWAIT" |> snd
+                      Expect.equal moved (ResultSet([ "id" ], [ [ Some "10" ] ])) "the moved record was outside the visited slice"
+                  run reader "ROLLBACK" 0UL |> ignore
+                  Expect.isTrue wasWaiting "the reader enters the wait graph before the holder ends"
+                  Expect.equal result (ResultSet([ "id" ], [ [ Some expected ] ])) "the seek reopens on the current index"
+
+          testCase "ordered secondary blocking read retains its visited prefix on timeout"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql count =
+                  let next, result = handle session sql
+                  Expect.equal result (Affected count) sql
+                  next
+              let owner = create 1 store
+              run owner "CREATE TABLE jobs(id INT PRIMARY KEY,k INT,stamp INT,KEY ix(k,stamp,id))" 0UL |> ignore
+              run owner "INSERT INTO jobs VALUES(10,7,10),(30,7,30)" 2UL |> ignore
+              let holder = run owner "BEGIN" 0UL
+              let holder = run holder "INSERT INTO jobs VALUES(20,7,20)" 1UL
+              let reader = run (create 2 store) "SET innodb_lock_wait_timeout=1" 0UL
+              let reader = run reader "BEGIN" 0UL
+              let reader, result = handle reader "SELECT id FROM jobs FORCE INDEX(ix) WHERE k=7 ORDER BY stamp,id LIMIT 2 FOR UPDATE"
+              run holder "ROLLBACK" 0UL |> ignore
+              TestSupport.Sql.expectError 1205 result "the read times out waiting for the pending insert"
+              let probe id = handle (create 3 store) $"SELECT id FROM jobs WHERE id={id} FOR UPDATE NOWAIT" |> snd
+              TestSupport.Sql.expectError 3572 (probe 10) "the first visited row remains locked"
+              Expect.equal (probe 30) (ResultSet([ "id" ], [ [ Some "30" ] ])) "the later record was not visited"
+              run reader "ROLLBACK" 0UL |> ignore
+
           testCase "ordered secondary NOWAIT visits pending inserts before the limit"
           <| fun _ ->
               let run session sql expected =
@@ -8711,7 +8773,7 @@ let tests =
               let db = Fsdb.Storage.defaultDatabase
               try
                   let selection =
-                      Fsdb.Storage.tryLockOrderedSecondaryRead initial refresh db "jobs" "ix" terms [ VInt 7L ]
+                      Fsdb.Storage.tryLockOrderedSecondaryRead TimeSpan.Zero initial refresh db "jobs" "ix" terms [ VInt 7L ]
                           UpdateLock NoWait true 0 1
                   let table = Fsdb.Storage.tableSnapshot latest db "jobs" |> Result.defaultWith (fun error -> failtestf "%A" error)
                   let remainingId, _ = table.RowsArray.Indexed |> Seq.exactlyOne

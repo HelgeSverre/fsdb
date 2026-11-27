@@ -42,7 +42,30 @@ concurrent deletion reopens the seek and releases the stale row claim.
 Covering FOR SHARE reads still differ in primary record ownership.
 Secondary next-key gaps and general residual filtering remain open.
 
-The blocking form of the same read is also open. Under READ COMMITTED
-and REPEATABLE READ, MySQL waits for the pending insertion. It returns
-the new first row after COMMIT and the original first row after ROLLBACK.
-Fsdb returns the original first row immediately in both schedules.
+## Blocking reads
+
+The same ordered seek without NOWAIT waits on a pending insert or locked
+row if the cursor reaches it before filling the limit. A wait uses the
+transaction lock graph and the session's lock wait timeout. The cursor
+reopens on the current index after the blocker resolves. In the fixture,
+both engines return the new first row after COMMIT and the original first
+row after ROLLBACK. Fsdb at `a1d11837` returned the original row immediately
+in both schedules.
+
+A timeout returns 1205 and retains the earlier visited row locks. A row
+that changes secondary key during the wait is rechecked at its new
+position. The read releases the claim on the obsolete index entry.
+Successive waits each get the session's configured timeout. With a
+one-second timeout and the first blocker released after 650 ms, both
+engines timed out on the second blocker after about 1.65 seconds total.
+A two-session cycle between pending insert keys returned 1213 for one
+reader and let the other reader complete.
+
+The pinned MySQL comparison matched the wait decision and result in all
+256 integer and DECIMAL schedules in memory and with WAL. It covered
+pending inserts and existing row locks before and after the limit,
+secondary-key changes, commit and rollback, both traversal directions,
+and OFFSET under READ COMMITTED and REPEATABLE READ. The primary row
+ownership probes matched in 248 schedules. In the other eight, a
+READ COMMITTED OFFSET consumed a row whose pending secondary-key change
+was rolled back. Fsdb retained that row lock and MySQL released it.

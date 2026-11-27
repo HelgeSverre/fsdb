@@ -8585,8 +8585,16 @@ let internal tryOrderedIndexPrefixLookup store dbName tableName terms prefixValu
 
 exception private ReopenOrderedSecondaryRead of Store
 
+type private OrderedSecondaryReadConflict =
+    | SecondaryNowait
+    | SecondaryPendingKey of string
+    | SecondaryLockedRow of RowId * Value list
+
+exception private OrderedSecondaryPending of string
+exception private OrderedSecondaryRowLocked of RowId * Value list
+
 let internal tryLockOrderedSecondaryRead
-    (store: Store) refresh database tableName indexName terms prefixValues strength wait releaseOffset offset limit =
+    timeout (store: Store) refresh database tableName indexName terms prefixValues strength wait releaseOffset offset limit =
     let exactNumeric = function TDecimal _ -> true | kind -> isIntegerKeyType kind
     let keyPart = function
         | VNull -> Some OrderedNull
@@ -8627,14 +8635,14 @@ let internal tryLockOrderedSecondaryRead
                             |> Option.defaultValue 0
 
                         let nextPending =
-                            if wait <> NoWait then None
+                            if wait = SkipLocked then None
                             else
                                 let types = group.Indices |> List.map (fun index -> table.Columns.[index].Type)
                                 let primaryTypes = primary |> List.map (fun index -> table.Columns.[index].Type)
                                 activeOrderedKeyClaims snapshot database tableName group.Name types primaryTypes
-                                |> List.fold (fun first (key, _, _) ->
+                                |> List.fold (fun first (key, _, claim) ->
                                     if List.take claimPrefix.Length key = claimPrefix
-                                       && (first |> Option.forall (fun current -> compareKeys key current < 0)) then Some key
+                                       && (first |> Option.forall (fun (current, _) -> compareKeys key current < 0)) then Some(key, claim)
                                     else first) None
 
                         let unchanged current =
@@ -8645,29 +8653,37 @@ let internal tryLockOrderedSecondaryRead
                                     |> Option.exists (fun order -> obj.ReferenceEquals(order, entries) || order.SetEquals entries)))
 
                         let scan current =
+                            let stopAtPending claim =
+                                if wait = NoWait then raise (LockNowait database)
+                                else raise (OrderedSecondaryPending claim)
+
                             let ids = ResizeArray<RowId>()
                             use rows = (orderedEntries traversal (slice (orderedPrefixBounds entries prefix))).GetEnumerator()
                             while ids.Count < limit && rows.MoveNext() do
                                 Limits.checkQueryInterruption queryCancellation.Value
                                 let entry = rows.Current
                                 match nextPending with
-                                | Some pending when
+                                | Some(pending, claim) when
                                     (entry.Values |> List.map keyPart |> tryAllSome
                                      |> Option.exists (fun key -> compareKeys pending key <= 0)) ->
-                                    raise (LockNowait database)
+                                    stopAtPending claim
                                 | _ -> ()
-                                // At lower isolation an OFFSET record checks
-                                // ownership but does not retain a row lock.
-                                if releaseOffset && ids.Count < offset then
-                                    try
+                                try
+                                    // Lower-isolation OFFSET records only retain
+                                    // a row lock if the cursor had to wait.
+                                    if releaseOffset && ids.Count < offset then
                                         checkTransactionReadTarget current database tableName strength entry.RowId
                                         ids.Add entry.RowId
-                                    with LockNowait _ when wait = SkipLocked -> ()
-                                else
-                                    let locked =
-                                        acquireTransactionReadTargets TimeSpan.Zero current database tableName strength wait [ entry.RowId ]
-                                    ids.AddRange locked
-                            if ids.Count < limit && nextPending.IsSome then raise (LockNowait database)
+                                    else
+                                        let admission = if wait = WaitForLocks then NoWait else wait
+                                        let locked =
+                                            acquireTransactionReadTargets TimeSpan.Zero current database tableName strength admission [ entry.RowId ]
+                                        ids.AddRange locked
+                                with
+                                | LockNowait _ when wait = SkipLocked -> ()
+                                | LockNowait _ when wait = WaitForLocks ->
+                                    raise (OrderedSecondaryRowLocked(entry.RowId, entry.Values))
+                            if ids.Count < limit then nextPending |> Option.iter (snd >> stopAtPending)
                             let consumedOffset = min offset ids.Count
                             ids |> Seq.skip consumedOffset |> Set.ofSeq, consumedOffset
 
@@ -8677,15 +8693,40 @@ let internal tryLockOrderedSecondaryRead
                             try
                                 withTransactionLockCheckpoint current (fun () ->
                                     // A completed seek must survive a concurrent
-                                    // delete or key move. A genuine NOWAIT
-                                    // conflict retains the earlier row locks.
-                                    match (try Ok(scan current) with LockNowait _ as conflict -> Error conflict) with
+                                    // delete or key move. A conflict retains
+                                    // the earlier row locks across the wait.
+                                    let scanned =
+                                        try Ok(scan current)
+                                        with
+                                        | LockNowait _ -> Error SecondaryNowait
+                                        | OrderedSecondaryPending claim -> Error(SecondaryPendingKey claim)
+                                        | OrderedSecondaryRowLocked(id, key) -> Error(SecondaryLockedRow(id, key))
+                                    match scanned with
                                     | Error conflict -> Error conflict
                                     | Ok(rows, offset) ->
                                         let latest = refresh ()
                                         if not (unchanged latest) then raise (ReopenOrderedSecondaryRead latest)
                                         Ok(latest, rows, offset))
-                                |> function Ok selection -> Some(Ok selection) | Error conflict -> raise conflict
+                                |> function
+                                    | Ok selection -> Some(Ok selection)
+                                    | Error SecondaryNowait -> raise (LockNowait database)
+                                    | Error(SecondaryPendingKey claim) ->
+                                        waitForTransactionReadDependencies timeout current database tableName [ claim ] []
+                                        Some(Error(refresh ()))
+                                    | Error(SecondaryLockedRow(id, key)) ->
+                                        withTransactionLockCheckpoint current (fun () ->
+                                            acquireTransactionReadTargets timeout current database tableName strength WaitForLocks [ id ]
+                                            |> ignore
+                                            let latest = refresh ()
+                                            let stillAtKey =
+                                                tableAt latest database tableName
+                                                |> Option.filter (fun candidate -> candidate.SchemaRevision = table.SchemaRevision)
+                                                |> Option.bind (fun candidate -> candidate.RowsArray.TryFind id)
+                                                |> Option.exists (fun row -> List.map (fun index -> row.[index]) group.Indices = key)
+                                            // A deleted or moved entry is no longer the
+                                            // record this cursor was waiting to visit.
+                                            if not stillAtKey then raise (ReopenOrderedSecondaryRead latest)
+                                            Some(Error latest))
                             with ReopenOrderedSecondaryRead latest -> Some(Error latest)))))
 
     let rec acquire snapshot =
