@@ -1368,6 +1368,7 @@ type private WritableViewSource =
 type private UpdatableView =
     { ViewDatabase: string
       ViewName: string
+      Definition: SelectStmt
       Database: string
       Table: string
       Columns: Map<string, string>
@@ -1777,6 +1778,7 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
             expression
 
     let rec classify seen (view: StoredView) (select: SelectStmt) =
+        let definition = select
         let expressionQueries (body: SelectStmt) =
             let queries = ResizeArray<SelectStmt>()
             Expression.iterStatement
@@ -2099,6 +2101,7 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
                         Some
                             { ViewDatabase = view.Schema
                               ViewName = view.Name
+                              Definition = definition
                               Database = database
                               Table = table
                               Columns = writableTargets |> Map.map (fun _ target -> target.Column)
@@ -2990,6 +2993,7 @@ let private updatableViewOfSelectWith allowHeuristicMerge forceRootMerge (store:
                         |> Option.map (fun (updateFrom, updateJoins, authorizationFrom, authorizationJoins) ->
                             { ViewDatabase = view.Schema
                               ViewName = view.Name
+                              Definition = definition
                               Database = firstTarget.Database
                               Table = firstTarget.Table
                               Columns = targets |> Map.map (fun _ target -> target.Column)
@@ -30079,9 +30083,94 @@ let private mutationSubqueryTargetError store registry schema statement =
                         let definition = if readView.IsSome then readAlias else name
                         1443, sprintf "The definition of table '%s' prevents operation %s on table '%s'." definition operation name))
 
+let private savedViewWriteError store registry operation alias (view: UpdatableView) (target: ViewColumnTarget) =
+    let key = target.Database.ToLowerInvariant(), normalizeTableName target.Table
+    let catalog = (storeForStoredView store).Catalog
+    let readTables schema merge projection select =
+        InformationSchema.viewExpressionReadTables catalog schema merge projection select
+    let definition schema name =
+        tryStoredView store schema name
+        |> Option.bind (fun stored ->
+            match parseStoredViewStatement stored with Ok(Select select) -> Some select | _ -> None)
+    let rec rejectsEveryRow = function
+        | LiteralValue value -> truthy value <> Some true
+        | BinOp(And, left, right) -> rejectsEveryRow left || rejectsEveryRow right
+        | _ -> false
+    let withoutEmptySubqueries =
+        Expression.rewriteSelectExpressions (fun expression ->
+            match Expression.subqueries expression with
+            | [ query ] when query.Where |> Option.exists rejectsEveryRow -> Some(Lit VNull)
+            | _ -> None)
+    let rec deleteError seen schema nested (select: SelectStmt) =
+        if nested && not (readTables schema None false (withoutEmptySubqueries select)).IsEmpty then
+            Some(joinViewDeleteError view)
+        elif operation = "DELETE" && Set.contains key (readTables schema None true { select with Where = None; OrderBy = [] }) then
+            Some(nonUpdatableTarget "DELETE" alias)
+        elif operation = "DELETE" && Set.contains key (readTables schema (Some(queryBodyCanMerge registry)) false select) then
+            Some(nonUpdatableTarget "DELETE" alias)
+        else
+            match select.From, select.Joins with
+            | Some(FromTable source), [] ->
+                let database = source.Database |> Option.defaultValue schema
+                let sourceKey = database.ToLowerInvariant(), normalizeTableName source.Table
+                let shadowed = source.Database.IsNone && (select.Ctes |> List.exists (fun cte -> equalsIgnoreCase cte.CteName source.Table))
+                if shadowed || Set.contains sourceKey seen || Set.count seen >= Limits.maxViewMetadataNesting then None
+                else definition database source.Table |> Option.bind (deleteError (Set.add sourceKey seen) database true)
+            | _ -> None
+
+    if operation = "UPDATE" then
+        if Set.contains key (readTables view.ViewDatabase (Some(queryBodyCanMerge registry)) false view.Definition) then
+            Some(nonUpdatableTarget "UPDATE" alias)
+        else None
+    else deleteError Set.empty view.ViewDatabase false view.Definition
+
+let private savedViewInsertError store registry replacing implicitColumns (view: UpdatableView) target =
+    if not view.UpdateJoins.IsEmpty || not (replacing || implicitColumns) then None
+    else
+        savedViewWriteError store registry "REPLACE" view.ViewName view target
+        |> Option.map (fun error ->
+            if implicitColumns then
+                1394, sprintf "Can not insert into join view '%s.%s' without fields list" view.ViewDatabase view.ViewName
+            else error)
+
+let private savedViewInsertShape = function
+    | Insert(table, columns, _, _, _) | InsertSelect(table, columns, _, _, _) -> Some(table, false, columns.IsEmpty)
+    | Replace(table, columns, _) | ReplaceSelect(table, columns, _) -> Some(table, true, columns.IsEmpty)
+    | ReplaceSet(table, _) -> Some(table, true, false)
+    | _ -> None
+
+let rec private standaloneSavedViewWriteError store registry dbName = function
+    | Explain(_, statement) -> standaloneSavedViewWriteError store registry dbName statement
+    | Update update when update.Joins.IsEmpty ->
+        let source = update.From
+        let database = source.Database |> Option.defaultValue dbName
+        let alias = source.Alias |> Option.defaultValue source.Table
+        tryUpdatableView store database source.Table
+        |> Option.bind (fun view ->
+            rewriteStandaloneViewUpdate view update |> Result.toOption
+            |> Option.bind (fun (_, target) -> savedViewWriteError store registry "UPDATE" alias view target))
+    | Delete { Source = SingleDeleteTable source } ->
+        let database = source.Database |> Option.defaultValue dbName
+        let alias = source.Alias |> Option.defaultValue source.Table
+        tryUpdatableView store database source.Table
+        |> Option.bind (fun view ->
+            if not view.UpdateJoins.IsEmpty then None
+            else view.Targets |> Map.values |> Seq.tryHead |> Option.bind (savedViewWriteError store registry "DELETE" alias view))
+    | statement ->
+        savedViewInsertShape statement
+        |> Option.bind (fun (table, replacing, implicitColumns) ->
+            if not (replacing || implicitColumns) then None
+            else
+                let database, name = splitQualified dbName table
+                tryUpdatableView store database name
+                |> Option.bind (fun view ->
+                    view.Targets |> Map.values |> Seq.tryHead
+                    |> Option.bind (savedViewInsertError store registry replacing implicitColumns view)))
+
 let internal skipsViewWriteLocks store registry dbName statement =
     withStatementViewMerge store dbName statement (fun () ->
         (mutationSubqueryTargetError store registry dbName statement).IsSome
+        || (standaloneSavedViewWriteError store registry dbName statement).IsSome
         || (disableHeuristicViewMerge.Value
             && (match statement with
                 | Delete delete -> validateJoinedDeleteTargets store registry dbName delete |> Result.isError
@@ -30091,7 +30180,8 @@ let validatePreparedBindings store registry schema statement =
     validateBindings store registry schema schema statement
     |> Result.bind (fun () ->
         withStatementViewMerge store schema statement (fun () ->
-            match mutationSubqueryTargetError store registry schema statement with
+            match mutationSubqueryTargetError store registry schema statement
+                  |> Option.orElseWith (fun () -> standaloneSavedViewWriteError store registry schema statement) with
             | Some error -> Error error
             | None -> Ok()))
 
@@ -33300,9 +33390,24 @@ let rec private executeAsWithViewSources
                         else error)
                     |> Result.bind checkReadPaths
 
+        let savedError =
+            lazy (
+                match stmt, originalUpdate with
+                | Update _, Some update ->
+                    let alias = update.From.Alias |> Option.defaultValue update.From.Table
+                    savedViewWriteError store registry "UPDATE" alias view target
+                | Delete { Source = SingleDeleteTable source }, _ ->
+                    let alias = source.Alias |> Option.defaultValue source.Table
+                    savedViewWriteError store registry "DELETE" alias view target
+                | _ ->
+                    savedViewInsertShape stmt
+                    |> Option.bind (fun (_, replacing, implicitColumns) ->
+                        savedViewInsertError store registry replacing implicitColumns view target))
+
         match authorizedRegistry with
         | Error(code, message) -> ids, Err(code, message)
         | Ok _ when subqueryTargetError.IsSome -> mutationTargetReadError subqueryTargetError.Value
+        | Ok _ when savedError.Value.IsSome -> ids, Err savedError.Value.Value
         | Ok authorized ->
             let callerSubqueries =
                 match originalUpdate with
@@ -33394,10 +33499,14 @@ let rec private executeAsWithViewSources
         | Delete { Source = SingleDeleteTable source }
             when (tryStoredView store (source.Database |> Option.defaultValue dbName) source.Table).IsSome -> None
         | _ -> subqueryTargetError
+    let (|SavedViewExplainError|_|) = function
+        | Explain(_, inner) -> standaloneSavedViewWriteError store registry dbName inner
+        | _ -> None
 
     match stmt with
     | UnmergedViewWrite error -> ids, error
     | MutationTargetRead conflict -> mutationTargetReadError conflict
+    | SavedViewExplainError error -> ids, Err error
     | Update update when not update.Ctes.IsEmpty ->
         let update = writableViewFirst store dbName update
         let expressions =
@@ -34240,8 +34349,8 @@ let rec private executeAsWithViewSources
 
         let supportsCheckOption definer = function
             | Select select ->
-                updatableViewOfSelect store (candidateView algorithm definer) select
-                |> Option.isSome
+                not (InformationSchema.viewDefinitionInheritsSelfRead (storeForStoredView store).Catalog db select)
+                && (updatableViewOfSelect store (candidateView algorithm definer) select |> Option.isSome)
             | _ -> false
 
         match parsedView, Map.containsKey db store.Catalog, duplicateColumns, objectError, definer with

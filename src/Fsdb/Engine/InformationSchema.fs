@@ -2109,6 +2109,109 @@ let internal inlineReadOnlyViewCtes (catalog: Catalog) schema (select: SelectStm
             Joins = select.Joins |> List.map (fun join -> { join with Table = expand join.Table })
             Ctes = [] }
 
+let private viewTableKey (schema: string) (reference: TableRef) =
+    (reference.Database |> Option.defaultValue schema).ToLowerInvariant(), reference.Table.ToLowerInvariant()
+
+let private viewPredicateExpressions (select: SelectStmt) =
+    Option.toList select.Where @ List.collect Join.conditions select.Joins @ List.map fst select.OrderBy
+
+/// Reads owned by a saved view's expressions. The metadata check sees all
+/// opened sources; write resolution can stop at materialization boundaries.
+let internal viewExpressionReadTables catalog schema canMerge includeProjection (select: SelectStmt) =
+    let views = lazy (viewCatalogEntries catalog |> List.map (fun view -> (view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()), view) |> Map.ofList)
+    let crosses body = canMerge |> Option.forall (fun decide -> decide body)
+    let rec extend seen schema scope (definitions: CommonTableExpr list) =
+        (scope, definitions)
+        ||> List.fold (fun previous cte ->
+            let name = cte.CteName.ToLowerInvariant()
+            let visible = if cte.Recursive then Map.add name (lazy Set.empty) previous else previous
+            let reads = lazy (if crosses cte.Body then query seen schema visible cte.Body else Set.empty)
+            Map.add name reads previous)
+    and query seen schema scope = function
+        | PlainSelect select -> block seen schema (extend seen schema scope select.Ctes) select
+        | UnionSelect(first, rest, orderBy, limit, offset) ->
+            let scope = extend seen schema scope first.Ctes
+            let reads =
+                [ yield block seen schema scope first
+                  for _, branch in rest do
+                      yield block seen schema (extend seen schema scope branch.Ctes) branch
+                  yield expressions seen schema scope (List.map fst orderBy @ Option.toList limit @ Option.toList offset) ]
+            Set.unionMany reads
+    and block seen schema scope (select: SelectStmt) =
+        let values =
+            viewPredicateExpressions select @ (select.Projections |> List.map _.Expression)
+            @ select.GroupBy @ Option.toList select.Having @ Option.toList select.Limit @ Option.toList select.Offset
+            @ (select.Windows |> List.collect (snd >> OverSpec >> Expression.overExpressions))
+        let sources = Option.toList select.From @ (select.Joins |> List.map _.Table)
+        Set.union (expressions seen schema scope values) (sources |> List.map (source seen schema scope) |> Set.unionMany)
+    and expressions seen schema scope values =
+        values
+        |> List.collect Expression.collectSubqueries
+        |> List.map (PlainSelect >> query seen schema scope)
+        |> Set.unionMany
+    and source seen schema scope = function
+        | FromTable table ->
+            let local = if table.Database.IsNone then Map.tryFind (table.Table.ToLowerInvariant()) scope else None
+            match local with
+            | Some reads -> reads.Value
+            | None when table.Database.IsNone && eqI "DUAL" table.Table -> Set.empty
+            | None ->
+                let key = viewTableKey schema table
+                match Map.tryFind key views.Value with
+                | None -> Set.singleton key
+                | Some _ when Set.contains key seen || Set.count seen >= Limits.maxViewMetadataNesting -> Set.empty
+                | Some entry when canMerge.IsSome && eqI entry.Algorithm "TEMPTABLE" -> Set.empty
+                | Some entry ->
+                    let reads = if canMerge.IsNone then Set.singleton key else Set.empty
+                    match Fsdb.Parser.parse entry.Definition with
+                    | Ok(Select definition) when crosses (PlainSelect definition) ->
+                        Set.union reads (query (Set.add key seen) entry.Schema Map.empty (PlainSelect definition))
+                    | Ok(Union(first, rest, orderBy, limit, offset)) when canMerge.IsNone ->
+                        Set.union reads (query (Set.add key seen) entry.Schema Map.empty (UnionSelect(first, rest, orderBy, limit, offset)))
+                    | _ -> reads
+        | FromJoinGroup(first, joins) ->
+            (first :: (joins |> List.map (fun (join: Join) -> join.Table)))
+            |> List.map (source seen schema scope)
+            |> Set.unionMany
+        | FromLateral(body, alias) when alias = SelectStmt.setExpressionAlias -> query seen schema scope body
+        | FromLateral(body, _) | FromSubquery(body, _) when crosses body -> query seen schema scope body
+        | FromJsonTable(value, _, _, _) -> expressions seen schema scope [ value ]
+        | _ -> Set.empty
+
+    let sources = Option.toList select.From @ (select.Joins |> List.map _.Table) |> List.collect FromItem.leaves
+    let tableFunctions = sources |> List.choose (function FromJsonTable(value, _, _, _) -> Some value | _ -> None)
+    let values = viewPredicateExpressions select @ tableFunctions
+    let values = if includeProjection then values @ (select.Projections |> List.map _.Expression) else values
+    let scope = extend Set.empty schema Map.empty select.Ctes
+    expressions Set.empty schema scope values
+
+let private viewDefinitionReadsOwnTable catalog schema (select: SelectStmt) =
+    match select.From, select.Joins with
+    | Some(FromTable source), [] ->
+        let database, table = viewTableKey schema source
+        let physical = catalog |> Map.tryFind database |> Option.exists (Map.containsKey table)
+        let shadowed = source.Database.IsNone && (select.Ctes |> List.exists (fun cte -> eqI cte.CteName source.Table))
+        physical && not shadowed && Set.contains (database, table) (viewExpressionReadTables catalog schema None true select)
+    | _ -> false
+
+let internal viewDefinitionInheritsSelfRead catalog schema select =
+    let views = lazy (viewCatalogEntries catalog)
+    let rec check seen schema (select: SelectStmt) =
+        viewDefinitionReadsOwnTable catalog schema select
+        || (match select.From, select.Joins with
+            | Some(FromTable source), [] when source.Database.IsSome || not (select.Ctes |> List.exists (fun cte -> eqI cte.CteName source.Table)) ->
+                let key = viewTableKey schema source
+                if Set.contains key seen || Set.count seen >= Limits.maxViewMetadataNesting then false
+                else
+                    views.Value
+                    |> List.tryFind (fun entry -> (entry.Schema.ToLowerInvariant(), entry.Name.ToLowerInvariant()) = key)
+                    |> Option.exists (fun entry ->
+                        match Fsdb.Parser.parse entry.Definition with
+                        | Ok(Select definition) -> check (Set.add key seen) entry.Schema definition
+                        | _ -> false)
+            | _ -> false)
+    check Set.empty schema select
+
 let private isUpdatableView (catalog: Catalog) (view: SystemCatalog.View.Entry) =
     let views = viewCatalogEntries catalog
 
@@ -2211,7 +2314,7 @@ let private isUpdatableView (catalog: Catalog) (view: SystemCatalog.View.Entry) 
                     (parsed.Ctes |> List.exists _.Recursive)
                     && (match source with FromSubquery _ -> true | _ -> false)
                     && joinsSupported
-                if not queryAllowsUpdates then
+                if not queryAllowsUpdates || viewDefinitionReadsOwnTable catalog schema parsed then
                     false
                 else
                     ordinaryShape || recursiveReadOnlyShape || directCteSource

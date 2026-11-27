@@ -1086,11 +1086,14 @@ persist and compose through nested views.
 now reject references that read the same physical table being written,
 including through a nested or joined view. Ordinary derived and materialized
 view reads remain available, as do reads of unwritten join components.
-Subqueries embedded in saved view definitions still have separate gaps.
+[Subqueries in saved view definitions](torture/findings/2026-11-27-saved-view-self-reads.md)
+now distinguish catalog updateability and CHECK OPTION eligibility from
+the individual UPDATE, DELETE, and INSERT decisions. Broader conflicts
+from a separate view used as a read-side join source remain open.
 
-Uncorrelated scalar projection subqueries preserve updateability but not
-insertability, dependent projection subqueries refuse writes, and subqueries
-inside view predicates lower with the base-table write.
+Uncorrelated scalar projection subqueries can leave direct columns writable
+while preventing insertion. Dependent projection subqueries refuse writes.
+Eligible subqueries inside view predicates lower with the base-table write.
 [Read-only derived and CTE sources](torture/findings/2026-10-17-derived-source-view-metadata.md)
 now follow MySQL's permissive outer-view `IS_UPDATABLE` metadata, including a
 recursive-only view that reports `YES` but still rejects UPDATE with 1288.

@@ -5628,6 +5628,46 @@ let tests =
                       [ TypeGeometry, BinaryFlag ] "prepared GEOMETRY result"
               | Error error -> failtestf "expected ST_Validate to prepare, got %A" error
 
+          testCase "saved view self-reads distinguish metadata from writable operations"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE saved_base(id INT PRIMARY KEY,n INT)"
+                        "CREATE TABLE saved_partner(id INT PRIMARY KEY,m INT)"
+                        "INSERT INTO saved_base VALUES(1,10),(2,20)"
+                        "INSERT INTO saved_partner VALUES(1,30),(2,40)"
+                        "CREATE VIEW saved_filter AS SELECT id,n FROM saved_base WHERE EXISTS (SELECT 1 FROM saved_base r WHERE r.id=saved_base.id)"
+                        "CREATE VIEW saved_outer AS SELECT id,n FROM saved_filter"
+                        "CREATE VIEW saved_false AS SELECT id,n FROM saved_base WHERE EXISTS (SELECT 1 FROM saved_partner WHERE 0)"
+                        "CREATE VIEW saved_empty_outer AS SELECT id,n FROM saved_false"
+                        "CREATE VIEW saved_copy AS SELECT id,n FROM saved_base WHERE EXISTS (SELECT 1 FROM (SELECT id FROM saved_base LIMIT 1) r WHERE r.id=saved_base.id)"
+                        "CREATE VIEW saved_join AS SELECT a.id,a.n,b.m FROM saved_base a JOIN saved_partner b USING(id) WHERE EXISTS (SELECT 1 FROM saved_base r WHERE r.id=a.id)" ]
+
+              let metadata =
+                  "SELECT TABLE_NAME,IS_UPDATABLE FROM information_schema.views WHERE TABLE_SCHEMA='fsdb' AND TABLE_NAME IN ('saved_copy','saved_filter','saved_join','saved_outer') ORDER BY TABLE_NAME"
+              let rows = [ [ "saved_copy"; "NO" ]; [ "saved_filter"; "NO" ]; [ "saved_join"; "YES" ]; [ "saved_outer"; "NO" ] ]
+              Expect.equal (run metadata) (ResultSet([ "TABLE_NAME"; "IS_UPDATABLE" ], rows |> List.map (List.map Some))) metadata
+
+              for sql, code in
+                  [ "CREATE VIEW saved_checked AS SELECT id,n FROM saved_filter WITH CHECK OPTION", 1368
+                    "UPDATE saved_filter AS f SET n=n+1 WHERE 0", 1288
+                    "DELETE FROM saved_filter WHERE 0", 1288
+                    "DELETE FROM saved_outer WHERE 0", 1395
+                    "INSERT INTO saved_outer VALUES(4,40)", 1394
+                    "REPLACE INTO saved_outer VALUES(1,20)", 1394
+                    "REPLACE INTO saved_outer(id,n) VALUES(1,20)", 1395
+                    "UPDATE saved_join j SET n=n+1 WHERE id=1", 1288 ] do
+                  TestSupport.Sql.expectError code (run sql) sql
+
+              for sql in
+                  [ "INSERT INTO saved_filter VALUES(3,30)"
+                    "UPDATE saved_outer SET n=n+1 WHERE id=1"
+                    "UPDATE saved_copy SET n=n+1 WHERE id=1"
+                    "UPDATE saved_join SET m=m+1 WHERE id=1" ] do
+                  Expect.equal (run sql) (Affected 1UL) sql
+              Expect.equal (run "DELETE FROM saved_empty_outer WHERE id=1") (Affected 0UL)
+                  "an empty unrelated subquery does not give the outer view a second delete source"
+
           testCase "view mutations reject subqueries that read the written base table"
           <| fun _ ->
               let run =
