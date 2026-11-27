@@ -141,11 +141,30 @@ insert. The autocommit schedules covered every isolation level.
 
 ### Ordered range limits
 
-An ordered range with a nondefault wait mode still uses the general
-locking path. With keys 10, 20, 30, 40, and 50, use
-`SELECT id FROM t WHERE id BETWEEN 15 AND 45 ORDER BY id LIMIT 1 FOR UPDATE`.
-If another session holds 30, appending `NOWAIT` returns 20 in MySQL.
-Fsdb reports 3572 because it also checks key 30. If another session
-holds 20, appending `SKIP LOCKED` returns 30 in both engines. Fsdb also
-locks 40, so a concurrent update of that row times out. The same
-divergences occur for descending order and at READ COMMITTED.
+`NOWAIT` on an integer primary-key range honors an ordered `LIMIT`
+when the chosen primary scan can stop in index order. With keys 10,
+20, 30, 40, and 50, hold a lock on 30 and run
+`SELECT id FROM t WHERE id BETWEEN 15 AND 45 ORDER BY id LIMIT 1 FOR UPDATE NOWAIT`.
+The query returns 20. Changing the limit to 2 reports 3572 and keeps
+the lock on 20. A pending insert in the visited prefix also causes 3572.
+
+At REPEATABLE READ and SERIALIZABLE the failed read keeps gaps it
+already visited. At READ COMMITTED and READ UNCOMMITTED it checks
+`OFFSET` rows without retaining their locks. An exhausted forward scan
+at lower isolation also checks the first rejected record, including a
+pending insert before the first committed record beyond the bound.
+
+All 200 schedules matched MySQL 8.4.11 in memory and with WAL enabled.
+They covered both scan directions and lock strengths, all four isolation
+levels, `OFFSET`, and a descending composite key with `FORCE INDEX`.
+
+Ordered `SKIP LOCKED` ranges still use the general locking path. With
+the same keys, hold 20 and replace `NOWAIT` with `SKIP LOCKED`. Both
+engines return 30. Fsdb also locks 40, so a concurrent update of 40
+times out. The divergence also occurs for descending order and at READ
+COMMITTED. Ranges that require a filesort or have competing access paths
+remain outside the audited `NOWAIT` coverage.
+
+At REPEATABLE READ, hold 30 and use `LIMIT 2 ... SKIP LOCKED` over the
+same range in ascending order. MySQL returns 20 and 40. An insert at 27
+can proceed while an insert at 33 waits.

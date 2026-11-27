@@ -4453,6 +4453,11 @@ let private awaitLock
 
         acquire ())
 
+let private stripeAvailable owner mode (stripe: RowLockStripe) =
+    (stripe.ExclusiveOwner |> Option.forall ((=) owner))
+    && (mode = SharedStripe || stripe.SharedOwners.Count = 0
+        || (stripe.SharedOwners.Count = 1 && stripe.SharedOwners.Contains owner))
+
 let private acquireStripeWithBlockers
     (deadline: DateTime)
     (waits: LockWaitGraph)
@@ -4464,10 +4469,7 @@ let private acquireStripeWithBlockers
     (additionalBlockers: unit -> int64 list)
     =
     let available () =
-        (stripe.ExclusiveOwner |> Option.forall ((=) context.Owner))
-        && (mode = SharedStripe || stripe.SharedOwners.Count = 0
-            || (stripe.SharedOwners.Count = 1 && stripe.SharedOwners.Contains context.Owner))
-        && (additionalBlockers ()).IsEmpty
+        stripeAvailable context.Owner mode stripe && (additionalBlockers ()).IsEmpty
 
     let claim () =
         let newlyHeld =
@@ -4890,6 +4892,22 @@ let internal waitForTransactionReadDependencies timeout (store: Store) dbName ta
         | _ -> ()
     | None -> ()
 
+let private transactionReadStripeIndex rowId =
+    int64 (RowId.value rowId) % int64 rowLockStripeCount |> int
+
+let private transactionReadMode = function ShareLock -> SharedStripe | UpdateLock -> ExclusiveStripe
+
+let private checkTransactionReadTarget (store: Store) dbName tableName strength rowId =
+    match store.TransactionLocks, store.RowLocks.TryGetValue(lockNamespaceKey dbName tableName) with
+    | Some context, (true, rows) ->
+        match rows.TryGetValue(transactionReadStripeIndex rowId) with
+        | true, stripe ->
+            lock stripe.SyncRoot (fun () ->
+                if not (stripeAvailable context.Owner (transactionReadMode strength) stripe) then
+                    raise (LockNowait dbName))
+        | _ -> ()
+    | _ -> ()
+
 let private acquireTransactionReadTargetsWith
     (timeout: TimeSpan)
     (store: Store)
@@ -4905,21 +4923,14 @@ let private acquireTransactionReadTargetsWith
         let tableKey = lockNamespaceKey dbName tableName
         let rowLocks = store.RowLocks.GetOrAdd(tableKey, (fun _ -> ConcurrentDictionary()))
 
-        let stripeIndex rowId =
-            int64 (RowId.value rowId) % int64 rowLockStripeCount |> int
-
-        let mode =
-            match strength with
-            | ShareLock -> SharedStripe
-            | UpdateLock -> ExclusiveStripe
-
+        let mode = transactionReadMode strength
         let deadline = DateTime.UtcNow + timeout
         let claimed = ResizeArray<RowLockStripe>()
 
         try
             let acquiredRows =
                 rowIds
-                |> List.groupBy stripeIndex
+                |> List.groupBy transactionReadStripeIndex
                 |> List.sortBy fst
                 |> List.collect (fun (index, rows) ->
                     let stripe =
@@ -6760,8 +6771,9 @@ type internal PrimaryReadPlan =
       ReadTableName: string
       ReadSchemaRevision: int64
       ReadAccess: PrimaryGapSearch
-      ReadPointGaps: bool
+      ReadGaps: bool
       ReadWait: LockingReadWait
+      ReadOffset: int
       ReadRangeLimit: (PrimaryScanDirection * int) option }
 
 type internal PrimaryReadOutcome =
@@ -6796,6 +6808,7 @@ type private PrimaryGapScan =
     | ReadPointGap of LockingReadWait
     | SkippedPointGap
     | LimitedGap of direction: PrimaryScanDirection * stoppedAtRecord: bool
+    | ProbeLimitedRange of PrimaryScanDirection
     | EmptyReversePrefixGap
     | RetainedRangeGap of PrimaryScanDirection
     | RetainedReverseSeekGap
@@ -6869,7 +6882,7 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
             let cache = keyLockCache live (lockNamespaceKey database tableKey)
             let reverse =
                 match scan with
-                | LimitedGap(ReverseScan, _) | EmptyReversePrefixGap
+                | LimitedGap(ReverseScan, _) | ProbeLimitedRange ReverseScan | EmptyReversePrefixGap
                 | RetainedRangeGap ReverseScan | RetainedReverseSeekGap -> true
                 | _ -> false
             let probe, lower, upper =
@@ -6954,9 +6967,10 @@ let private acquirePrimaryGap timeout (live: Store) (snapshot: Store) (database:
             let isVisibleInAnyReadView table key =
                 contains table key || (readTables () |> Seq.exists (fun version -> contains version key))
 
+            let installsGaps = match scan with ProbeLimitedRange _ -> false | _ -> true
             let install skippedPoint =
                 match current () with
-                | Some table when skippedPoint || (needsGap table && needsGap observed) ->
+                | Some table when installsGaps && (skippedPoint || (needsGap table && needsGap observed)) ->
                     let gapIdentity =
                         if skippedPoint then "skipped:" + probe
                         elif scan = WritePointGap then writePointGapPrefix + probe
@@ -7119,9 +7133,15 @@ let internal protectMissingPrimaryWriteKey timeout live snapshot database tableN
             tryPrimaryGapPoint (primaryKeyColumns table).Length key
             |> Option.iter (fun point -> acquirePrimaryGap timeout live snapshot database tableName WritePointGap false point |> ignore))
 
-let private primaryRangeRows (table: Table) lower upper limit =
+type private PrimaryRangeSelection =
+    { Rows: (RowId * Value list) list
+      Stop: Value list option
+      EndRecord: RowId option }
+
+let private primaryRangeRows (table: Table) lower upper limit probeForwardEnd =
+    let empty = { Rows = []; Stop = None; EndRecord = None }
     match Map.tryFind "PRIMARY" table.SecondaryOrder with
-    | None -> [], None
+    | None -> empty
     | Some entries ->
         let row index =
             let entry = entries.[index]
@@ -7138,18 +7158,26 @@ let private primaryRangeRows (table: Table) lower upper limit =
                 if inclusive then after else first)
             |> Option.defaultValue entries.Count
         match limit with
-        | Some(ReverseScan, _) when start = finish && isEqualityPrefix lower upper -> [], None
+        | Some(ReverseScan, _) when start = finish && isEqualityPrefix lower upper -> empty
         | Some(ReverseScan, count) ->
             // An exhausted reverse scan tests the first record below the range.
             // That record is locked even though it fails the predicate.
             let last = if count <= finish - start then finish - count else max 0 (start - 1)
-            [ for index in finish - 1 .. -1 .. last do row index ],
-            (if last < finish then Some entries.[last].Values else None)
+            { Rows = [ for index in finish - 1 .. -1 .. last do row index ]
+              Stop = if last < finish then Some entries.[last].Values else None
+              EndRecord = if last < start && last < finish then Some entries.[last].RowId else None }
         | _ ->
             let stop = limit |> Option.map snd |> Option.filter (fun count -> count <= finish - start)
             let after = stop |> Option.map ((+) start) |> Option.defaultValue finish
-            [ for index in start .. after - 1 do row index ],
-            (stop |> Option.map (fun _ -> entries.[after - 1].Values))
+            if probeForwardEnd && stop.IsNone && finish < entries.Count then
+                // At lower isolation, the forward cursor checks the first rejected record without keeping its lock.
+                { Rows = [ for index in start .. finish do row index ]
+                  Stop = Some entries.[finish].Values
+                  EndRecord = Some entries.[finish].RowId }
+            else
+                { Rows = [ for index in start .. after - 1 do row index ]
+                  Stop = stop |> Option.map (fun _ -> entries.[after - 1].Values)
+                  EndRecord = None }
 
 let private primaryReadTable (plan: PrimaryReadPlan) snapshot =
     tableAt snapshot plan.ReadDatabase plan.ReadTableName
@@ -7176,10 +7204,10 @@ let private lockPrimaryPoint timeout (live: Store) (refresh: unit -> Store) stre
             match selected with
             | Some id ->
                 let locked = acquireTransactionReadTargets budget snapshot database tableName strength plan.ReadWait [ id ]
-                if locked.IsEmpty && plan.ReadPointGaps then
+                if locked.IsEmpty && plan.ReadGaps then
                     acquirePrimaryGap budget live snapshot database tableName SkippedPointGap false plan.ReadAccess |> ignore
                 locked.IsEmpty
-            | None when plan.ReadPointGaps ->
+            | None when plan.ReadGaps ->
                 match acquirePrimaryGap budget live snapshot database tableName (ReadPointGap plan.ReadWait) false plan.ReadAccess with
                 | GapSkippedPoint -> true
                 | _ -> false
@@ -7207,16 +7235,18 @@ let private lockPrimaryRange timeout (live: Store) (refresh: unit -> Store) stre
     let deadline = DateTime.UtcNow + timeout
     let database, tableName = plan.ReadDatabase, plan.ReadTableName
     let remaining () =
-        let duration = deadline - DateTime.UtcNow
-        if duration <= TimeSpan.Zero then raise (LockWaitTimeout database)
-        duration
+        if plan.ReadWait = NoWait then TimeSpan.Zero
+        else
+            let duration = deadline - DateTime.UtcNow
+            if duration <= TimeSpan.Zero then raise (LockWaitTimeout database)
+            duration
     let lockRows wait snapshot rowIds =
         if not (List.isEmpty rowIds) then
             let budget = if wait = NoWait then TimeSpan.Zero else remaining ()
             acquireTransactionReadTargets budget snapshot database tableName strength wait rowIds |> ignore
     let rows snapshot =
         primaryReadTable plan snapshot
-        |> Option.map (fun table -> primaryRangeRows table lower upper plan.ReadRangeLimit)
+        |> Option.map (fun table -> primaryRangeRows table lower upper plan.ReadRangeLimit (not plan.ReadGaps))
 
     let narrowScanGap snapshot savedGaps gap =
         let provisional = transactionGapLocks snapshot
@@ -7236,48 +7266,69 @@ let private lockPrimaryRange timeout (live: Store) (refresh: unit -> Store) stre
         Some(RetainedRangeGap direction, range)
 
     let retainScanProgress snapshot savedGaps direction lower upper visited blocked =
-        let visitedGap =
-            if direction = ReverseScan && Option.isNone visited then
-                Some(RetainedReverseSeekGap, PrimaryRange(Some(blocked, true), upper))
-            else visited |> Option.bind (gapThrough direction lower upper)
-        narrowScanGap snapshot savedGaps visitedGap
+        if plan.ReadGaps then
+            let visitedGap =
+                if direction = ReverseScan && Option.isNone visited then
+                    Some(RetainedReverseSeekGap, PrimaryRange(Some(blocked, true), upper))
+                else visited |> Option.bind (gapThrough direction lower upper)
+            narrowScanGap snapshot savedGaps visitedGap
 
-    let lockRangeRows snapshot savedGaps direction lower upper canRetain selected isCurrent =
+    let finishConflict snapshot savedGaps direction lower upper visited blocked wait =
+        if plan.ReadWait = NoWait then
+            retainScanProgress snapshot savedGaps direction lower upper visited blocked
+            Error(LockNowait database)
+        else
+            try
+                wait ()
+                Ok ReopenRange
+            with LockWaitTimeout _ as error ->
+                retainScanProgress snapshot savedGaps direction lower upper visited blocked
+                Error error
+
+    let limitedGap direction stoppedAtRecord =
+        if plan.ReadGaps then LimitedGap(direction, stoppedAtRecord) else ProbeLimitedRange direction
+
+    let lockRangeRows snapshot savedGaps direction lower upper canRetain selected (endRecord: RowId option) isCurrent =
         let rowIds = List.map fst selected
-        if not canRetain then
+        if not canRetain && plan.ReadWait = WaitForLocks then
             lockRows WaitForLocks snapshot rowIds
             Ok RangeRowsLocked
         else
             Limits.checkQueryInterruption queryCancellation.Value
+            let probeOffset = if plan.ReadGaps then 0 else plan.ReadOffset
+            let probeEnd = not plan.ReadGaps && direction = ForwardScan && endRecord.IsSome
             // Use a batched claim when there is no contention. On a conflict,
             // visit rows in index order so a timeout keeps the visited locks.
             let contended =
-                try
-                    withTransactionLockCheckpoint snapshot (fun () -> lockRows NoWait snapshot rowIds)
-                    false
-                with LockNowait _ -> true
-            let rec visit visited = function
+                if probeOffset > 0 || probeEnd then true
+                else
+                    try
+                        withTransactionLockCheckpoint snapshot (fun () -> lockRows NoWait snapshot rowIds)
+                        false
+                    with LockNowait _ -> true
+            let rec visit offset visited = function
                 | [] -> Ok RangeRowsLocked
                 | (id, key) :: rest ->
                     Limits.checkQueryInterruption queryCancellation.Value
                     let acquired =
                         try
-                            lockRows NoWait snapshot [ id ]
+                            // Lower isolation releases OFFSET rows and the forward end record.
+                            // A rejected reverse end record never counts toward OFFSET.
+                            let probe = if endRecord = Some id then probeEnd else offset > 0
+                            if probe then checkTransactionReadTarget snapshot database tableName strength id
+                            else lockRows NoWait snapshot [ id ]
                             true
                         with LockNowait _ -> false
-                    if acquired then visit (Some key) rest
+                    if acquired then visit (offset - 1) (Some key) rest
                     else
                         // Keep the next-key gap at the blocked row. Writers
                         // farther along the index can proceed during the wait.
-                        narrowScanGap snapshot savedGaps (gapThrough direction lower upper key)
-                        try
-                            lockRows WaitForLocks snapshot [ id ]
-                            Ok ReopenRange
-                        with LockWaitTimeout _ as error ->
-                            retainScanProgress snapshot savedGaps direction lower upper visited key
-                            Error error
+                        if plan.ReadWait = WaitForLocks then
+                            narrowScanGap snapshot savedGaps (gapThrough direction lower upper key)
+                        finishConflict snapshot savedGaps direction lower upper visited key
+                            (fun () -> lockRows WaitForLocks snapshot [ id ])
             if not contended then Ok RangeRowsLocked
-            elif isCurrent (refresh ()) then visit None selected
+            elif isCurrent (refresh ()) then visit probeOffset None selected
             else
                 releaseLaterGapLocks snapshot savedGaps
                 Ok ReopenRange
@@ -7290,7 +7341,7 @@ let private lockPrimaryRange timeout (live: Store) (refresh: unit -> Store) stre
             match direction with
             | ForwardScan -> PrimaryRange(lower, edge)
             | ReverseScan -> PrimaryRange(edge, upper)
-        match acquirePrimaryGap (remaining ()) live snapshot database tableName (LimitedGap(direction, true)) true prefix with
+        match acquirePrimaryGap (remaining ()) live snapshot database tableName (limitedGap direction true) true prefix with
         | GapHasPendingKey earlier -> lockBeforePending snapshot savedGaps direction lower upper earlier
         | GapNeedsRefresh -> Ok ReopenRange
         | GapSkippedPoint -> invalidOp "A primary range cannot skip an exact key"
@@ -7302,23 +7353,19 @@ let private lockPrimaryRange timeout (live: Store) (refresh: unit -> Store) stre
                 | ReverseScan -> order > 0
             let prefixRows current =
                 rows current
-                |> Option.map (fun (selected, _) -> List.filter (snd >> precedes) selected)
+                |> Option.map (fun selection -> List.filter (snd >> precedes) selection.Rows)
             let current = refresh ()
             match prefixRows current with
             | None -> Ok ReopenRange
             | Some selected ->
-                lockRangeRows current savedGaps direction lower upper true selected
+                lockRangeRows current savedGaps direction lower upper true selected None
                     (fun snapshot -> prefixRows snapshot = Some selected)
                 |> Result.bind (function
                     | ReopenRange -> Ok ReopenRange
                     | RangeRowsLocked ->
-                        try
-                            pending.Wait(remaining ())
-                            Ok ReopenRange
-                        with LockWaitTimeout _ as error ->
-                            let visited = selected |> List.tryLast |> Option.map snd
-                            retainScanProgress current savedGaps direction lower upper visited pending.Values
-                            Error error)
+                        let visited = selected |> List.tryLast |> Option.map snd
+                        finishConflict current savedGaps direction lower upper visited pending.Values
+                            (fun () -> pending.Wait(remaining ())))
 
     let nextSelection outcome selection current =
         match rows current with
@@ -7328,7 +7375,7 @@ let private lockPrimaryRange timeout (live: Store) (refresh: unit -> Store) stre
         | Some next when next <> selection -> Some(false, next)
         | _ -> None
 
-    let rec acquire canRetain snapshot ((selected, _) as selection) =
+    let rec acquire canRetain snapshot selection =
         let savedGaps = transactionGapLocks snapshot
         let acquired =
             match acquirePrimaryGap (remaining ()) live snapshot database tableName OrdinaryGap canRetain plan.ReadAccess with
@@ -7336,7 +7383,7 @@ let private lockPrimaryRange timeout (live: Store) (refresh: unit -> Store) stre
             | GapNeedsRefresh -> Ok ReopenRange
             | GapSkippedPoint -> invalidOp "A primary range cannot skip an exact key"
             | GapProtected ->
-                lockRangeRows snapshot savedGaps ForwardScan lower upper canRetain selected
+                lockRangeRows snapshot savedGaps ForwardScan lower upper canRetain selection.Rows selection.EndRecord
                     (fun current -> rows current = Some selection)
         acquired |> Result.bind (fun outcome ->
             // A writer can publish a new row identity for the key while the read waits.
@@ -7345,15 +7392,17 @@ let private lockPrimaryRange timeout (live: Store) (refresh: unit -> Store) stre
             | Some(retain, next) -> acquire retain current next
             | None -> Ok current)
 
-    let rec acquireLimited direction lower upper canRetain snapshot ((selected, stop) as selection) =
+    let rec acquireLimited direction lower upper canRetain snapshot selection =
         let retained = transactionGapLocks snapshot
+        let stop = selection.Stop
         let stoppingEdge = stop |> Option.map (fun key -> key, true)
         let scan, read =
             match direction with
-            | ReverseScan when stop.IsNone && isEqualityPrefix lower upper -> EmptyReversePrefixGap, PrimaryRange(lower, upper)
-            | ReverseScan -> LimitedGap(ReverseScan, stop.IsSome), PrimaryRange(stoppingEdge, upper)
-            | ForwardScan -> LimitedGap(ForwardScan, stop.IsSome), PrimaryRange(lower, stoppingEdge |> Option.orElse upper)
-        let admission = acquirePrimaryGap (remaining ()) live snapshot database tableName scan canRetain read
+            | ReverseScan when plan.ReadGaps && stop.IsNone && isEqualityPrefix lower upper -> EmptyReversePrefixGap, PrimaryRange(lower, upper)
+            | ReverseScan -> limitedGap ReverseScan stop.IsSome, PrimaryRange(stoppingEdge, upper)
+            | ForwardScan when not plan.ReadGaps -> limitedGap ForwardScan stop.IsSome, PrimaryRange(lower, stoppingEdge)
+            | ForwardScan -> limitedGap ForwardScan stop.IsSome, PrimaryRange(lower, stoppingEdge |> Option.orElse upper)
+        let admission = acquirePrimaryGap (remaining ()) live snapshot database tableName scan (canRetain || plan.ReadWait = NoWait) read
         let finish outcome =
             let current = refresh ()
             match nextSelection outcome selection current with
@@ -7375,7 +7424,7 @@ let private lockPrimaryRange timeout (live: Store) (refresh: unit -> Store) stre
                 releaseLaterGapLocks snapshot retained
                 acquireLimited direction lower upper canRetain current next
             | _, Some _ ->
-                lockRangeRows current retained direction lower upper canRetain selected
+                lockRangeRows current retained direction lower upper canRetain selection.Rows selection.EndRecord
                     (fun snapshot -> rows snapshot = Some selection)
                 |> Result.bind finish
 

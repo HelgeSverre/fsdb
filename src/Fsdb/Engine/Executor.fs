@@ -36269,15 +36269,20 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
             else
                 exact ()
                 |> Option.map (fun access -> access, None)
-                |> Option.orElseWith (fun () -> if protectGaps && wait = WaitForLocks && integerKeys then range () else None)
+                |> Option.orElseWith (fun () ->
+                    match wait with
+                    | WaitForLocks when protectGaps && integerKeys -> range ()
+                    | NoWait when integerKeys && primaryIsOnlyChoice -> range () |> Option.filter (snd >> Option.isSome)
+                    | _ -> None)
                 |> Option.map (fun (access, limit) ->
                     let plan: Storage.PrimaryReadPlan =
                         { ReadDatabase = database
                           ReadTableName = source.Table
                           ReadSchemaRevision = table.SchemaRevision
                           ReadAccess = access
-                          ReadPointGaps = protectGaps
+                          ReadGaps = protectGaps
                           ReadWait = wait
+                          ReadOffset = select.Offset |> Option.map rowCount |> Option.defaultValue 0
                           ReadRangeLimit = limit }
                     let readSelect =
                         if select.OrderBy.IsEmpty && limit.IsSome then

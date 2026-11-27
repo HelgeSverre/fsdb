@@ -8477,4 +8477,70 @@ let tests =
                   if isolation = "REPEATABLE READ" && (not pending || mode = "SKIP LOCKED") then
                       TestSupport.Sql.expectError 1205 gap "the gap remains protected until the reader ends"
                       run writer insert (Affected 1UL) |> ignore
-                  else Expect.equal gap (Affected 1UL) "the neighboring insert can proceed" ]
+                  else Expect.equal gap (Affected 1UL) "the neighboring insert can proceed"
+
+          testCase "ordered primary NOWAIT stops at LIMIT and keeps the visited prefix on conflict"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+
+              for isolation, direction, first, write, gap in
+                  [ "REPEATABLE READ", "ASC", 20, "UPDATE gate SET n=9 WHERE id=30", 18
+                    "REPEATABLE READ", "DESC", 40, "INSERT INTO gate VALUES (35,9)", 43
+                    "READ COMMITTED", "ASC", 20, "INSERT INTO gate VALUES (25,9)", 18
+                    "READ COMMITTED", "DESC", 40, "UPDATE gate SET n=9 WHERE id=30", 43 ] do
+                  let store = Fsdb.Storage.create ()
+                  let observer = run (create 1 store) "SET innodb_lock_wait_timeout=1" (Affected 0UL)
+                  run observer "CREATE TABLE gate(id INT PRIMARY KEY,n INT)" (Affected 0UL) |> ignore
+                  run observer "INSERT INTO gate VALUES (10,1),(20,2),(30,3),(40,4),(50,5)" (Affected 5UL) |> ignore
+                  let holder = run (create 2 store) "BEGIN" (Affected 0UL)
+                  let holder = run holder write (Affected 1UL)
+                  let reader = run (create 3 store) $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                  let query limit = $"SELECT id FROM gate WHERE id BETWEEN 15 AND 45 ORDER BY id {direction} LIMIT {limit} FOR UPDATE NOWAIT"
+                  let transaction = run reader "BEGIN" (Affected 0UL)
+                  let transaction = run transaction (query 1) (ResultSet([ "id" ], [ [ Some(string first) ] ]))
+                  run transaction "ROLLBACK" (Affected 0UL) |> ignore
+                  let transaction = run reader "BEGIN" (Affected 0UL)
+                  let transaction, failed = handle transaction (query 2)
+                  TestSupport.Sql.expectError 3572 failed "the cursor encounters the conflict before filling the limit"
+                  run holder "ROLLBACK" (Affected 0UL) |> ignore
+                  let prefix = handle observer $"SELECT id FROM gate WHERE id={first} FOR UPDATE NOWAIT" |> snd
+                  let neighbor = handle observer $"INSERT INTO gate VALUES ({gap},0)" |> snd
+                  run transaction "ROLLBACK" (Affected 0UL) |> ignore
+                  TestSupport.Sql.expectError 3572 prefix "the failed statement retains its first record lock"
+                  if isolation = "REPEATABLE READ" then TestSupport.Sql.expectError 1205 neighbor "the visited gap is retained"
+                  else Expect.equal neighbor (Affected 1UL) "READ COMMITTED leaves the neighboring gap open"
+
+          testCase "ordered NOWAIT at READ COMMITTED checks OFFSET rows and releases them"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let writer = create 1 store
+              for sql in [ "CREATE TABLE gate(id INT PRIMARY KEY,n INT)"; "INSERT INTO gate VALUES (10,1),(20,2),(30,3)" ] do
+                  TestSupport.Sql.expectOk (handle writer sql |> snd) sql
+              let reader, _ = handle (create 2 store) "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED"
+              let reader, _ = handle reader "BEGIN"
+              let query = "SELECT id FROM gate WHERE id BETWEEN 5 AND 35 ORDER BY id LIMIT 1 OFFSET 1 FOR SHARE NOWAIT"
+              let reader, result = handle reader query
+              Expect.equal result (ResultSet([ "id" ], [ [ Some "20" ] ])) "the offset row is not returned"
+              let probe key = handle writer $"SELECT id FROM gate WHERE id={key} FOR UPDATE NOWAIT" |> snd
+              Expect.equal (probe 10) (ResultSet([ "id" ], [ [ Some "10" ] ])) "the offset row is released"
+              TestSupport.Sql.expectError 3572 (probe 20) "the returned row stays locked"
+              TestSupport.Sql.expectOk (handle reader "ROLLBACK" |> snd) "release the returned row"
+              let holder, _ = handle writer "BEGIN"
+              let holder, _ = handle holder "UPDATE gate SET n=10 WHERE id=10"
+              let reader, _ = handle reader "BEGIN"
+              let reader, failed = handle reader query
+              TestSupport.Sql.expectError 3572 failed "a conflict at the offset row is still visible"
+              TestSupport.Sql.expectOk (handle holder "ROLLBACK" |> snd) "release the offset row"
+              TestSupport.Sql.expectOk (handle reader "ROLLBACK" |> snd) "end the reader"
+              let holder, _ = handle writer "BEGIN"
+              let holder, _ = handle holder "UPDATE gate SET n=30 WHERE id=30"
+              let reader, _ = handle reader "BEGIN"
+              let reader, failed = handle reader "SELECT id FROM gate WHERE id BETWEEN 5 AND 25 ORDER BY id LIMIT 3 FOR UPDATE NOWAIT"
+              TestSupport.Sql.expectError 3572 failed "the exhausted forward scan checks the first rejected record"
+              TestSupport.Sql.expectOk (handle holder "ROLLBACK" |> snd) "release the first rejected record"
+              Expect.equal (probe 30) (ResultSet([ "id" ], [ [ Some "30" ] ])) "the failed read did not retain the rejected record"
+              TestSupport.Sql.expectError 3572 (probe 20) "the failed read keeps the matching records"
+              TestSupport.Sql.expectOk (handle reader "ROLLBACK" |> snd) "end the reader" ]
