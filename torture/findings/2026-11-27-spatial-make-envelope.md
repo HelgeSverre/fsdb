@@ -51,13 +51,18 @@ enabled.
 
 ## Materialized sources
 
-MySQL enforces the polygon subtype when materializing a derived source.
-For example, selecting a point envelope from a derived SELECT with a
-`LIMIT` returns error 1416. The same was observed for a limited CTE,
-a constant view, and an explicit `ALGORITHM=TEMPTABLE` view. Merged views
-and mergeable derived queries return the point. Fsdb currently returns
-the point in all of those cases. Explicit table creation from the same
-degenerate envelope already returns error 1416 in both engines.
-MySQL also reports 1416 if the outer query omits the invalid geometry
-column from a required materialization or filters out the affected row
-after a derived `LIMIT`.
+Fsdb and MySQL return error 1416 when a derived table with a `LIMIT`
+materializes a point into the declared polygon column. This also applies
+when the outer query omits the column or filters out the affected row
+after the derived `LIMIT`. The wire comparison matched 23 statements
+in memory and with WAL enabled. It covered `DISTINCT`, unions, CTEs,
+recursive CTE anchors, lateral sources, constant views, and explicit
+`ALGORITHM=TEMPTABLE` views. Mergeable sources still return the point.
+An empty source or an unused CTE can skip validation. A union of an
+envelope and bare NULL uses the general geometry type and accepts both
+values. [MySQL derived-table materialization](https://dev.mysql.com/doc/refman/8.4/en/derived-table-optimization.html)
+
+MySQL enforces the subtype when an eligible derived table or CTE is
+materialized through `NO_MERGE`. Fsdb currently returns the point in
+those cases. MySQL also supports disabling `derived_merge` through
+`optimizer_switch`. Support for that variable remains open in Fsdb.

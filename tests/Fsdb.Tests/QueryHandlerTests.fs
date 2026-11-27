@@ -5535,6 +5535,43 @@ let tests =
                   (run "CREATE TABLE point_envelope AS SELECT ST_MakeEnvelope(POINT(1,2),POINT(1,2)) AS shape")
                   "a point cannot be inserted into the inferred polygon column"
 
+          testCase "materialized relations enforce the declared ST_MakeEnvelope subtype"
+          <| fun _ ->
+              let shape = "ST_MakeEnvelope(POINT(id,0),POINT(id,0))"
+              let source = $"SELECT id,{shape} AS shape FROM envelope_ids"
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE envelope_ids(id INT PRIMARY KEY)"
+                        "INSERT INTO envelope_ids VALUES(1),(2)"
+                        $"CREATE ALGORITHM=MERGE VIEW merged_envelopes AS {source}"
+                        $"CREATE ALGORITHM=TEMPTABLE VIEW temp_envelopes AS {source}"
+                        "CREATE VIEW constant_envelope AS SELECT ST_MakeEnvelope(POINT(0,0),POINT(0,0)) AS shape" ]
+
+              for sql in
+                  [ "SELECT id FROM temp_envelopes"
+                    "SELECT ST_AsText(shape) FROM constant_envelope"
+                    $"SELECT id FROM ({source} LIMIT 1) AS d WHERE id=3"
+                    $"WITH e AS ({source} LIMIT 1) SELECT id FROM e"
+                    $"SELECT ST_AsText(shape) FROM (SELECT DISTINCT {shape} AS shape FROM envelope_ids) AS d"
+                    $"SELECT ST_AsText(shape) FROM ({source} WHERE id=1 UNION ALL {source} WHERE id=2) AS d"
+                    "SELECT ST_AsText(shape) FROM (SELECT ST_MakeEnvelope(POINT(0,0),POINT(0,0)) AS shape FROM DUAL) AS d"
+                    "SELECT id FROM envelope_ids a JOIN LATERAL (SELECT ST_MakeEnvelope(POINT(a.id,0),POINT(a.id,0)) AS shape) d ON TRUE"
+                    "WITH RECURSIVE e AS (SELECT 1 AS id,ST_MakeEnvelope(POINT(1,0),POINT(1,0)) AS shape UNION ALL SELECT id+1,shape FROM e WHERE id<2) SELECT id FROM e" ] do
+                  TestSupport.Sql.expectError 1416 (run sql) sql
+
+              for sql in
+                  [ "SELECT ST_AsText(shape) AS wkt FROM merged_envelopes ORDER BY id"
+                    $"SELECT ST_AsText(shape) AS wkt FROM ({source}) AS d ORDER BY id"
+                    $"WITH e AS ({source}) SELECT ST_AsText(shape) AS wkt FROM e ORDER BY id" ] do
+                  Expect.equal (run sql) (ResultSet([ "wkt" ], [ [ Some "POINT(1 0)" ]; [ Some "POINT(2 0)" ] ])) sql
+
+              let limited = $"SELECT ST_AsText(shape) AS wkt FROM ({source} LIMIT 0) AS d"
+              Expect.equal (run limited) (ResultSet([ "wkt" ], [])) limited
+              let union = $"SELECT ST_AsText(shape) AS wkt FROM (SELECT {shape} AS shape FROM envelope_ids WHERE id=1 UNION ALL SELECT NULL) AS d"
+              Expect.equal (run union) (ResultSet([ "wkt" ], [ [ Some "POINT(1 0)" ]; [ None ] ])) union
+              let valid = "SELECT ST_AsText(shape) AS wkt FROM (SELECT ST_MakeEnvelope(POINT(1,0),POINT(2,1)) AS shape UNION ALL SELECT ST_MakeEnvelope(NULL,POINT(1,0))) AS d"
+              Expect.equal (run valid) (ResultSet([ "wkt" ], [ [ Some "POLYGON((1 0,2 0,2 1,1 1,1 0))" ]; [ None ] ])) valid
+
           testCase "ST_Validate returns valid geometry and preserves polygon winding"
           <| fun _ ->
               let run = queryFixture [ "USE fsdb" ]

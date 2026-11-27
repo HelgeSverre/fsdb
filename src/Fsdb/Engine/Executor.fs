@@ -4657,6 +4657,29 @@ let private scalarSubqueryMaterializes registry (select: SelectStmt) =
     || (select.Projections |> List.exists (fun { Expression = expression } ->
         containsAggregate registry expression || not (collectWindowFuncs expression).IsEmpty))
 
+let private queryBodyCanMerge registry = function
+    | PlainSelect select ->
+        let preventsMerge expression =
+            containsAggregate registry expression
+            || not (collectWindowFuncs expression).IsEmpty
+            || Expression.exists (function AssignUserVariable _ -> true | _ -> false) expression
+            || (Expression.collectSubqueries expression |> List.exists (scalarSubqueryMaterializes registry))
+        let hasInput =
+            match select.From with
+            | Some(FromTable table) when table.Database.IsNone && equalsIgnoreCase table.Table "DUAL" -> not select.Joins.IsEmpty
+            | from -> from.IsSome
+        hasInput && not select.Distinct && select.GroupBy.IsEmpty
+        && select.Having.IsNone && select.Limit.IsNone && select.Windows.IsEmpty
+        && not (select.Projections |> List.exists (_.Expression >> preventsMerge))
+    | UnionSelect _ -> false
+
+type private RelationMaterialization = AllowMerge | ForceMaterialization
+
+let private withDeclaredGeometryType (column: ColumnDef) (definition: ColumnDef) =
+    match column.Type, definition.Type with
+    | TGeometry _, TGeometry kind -> { column with Type = TGeometry kind }
+    | _ -> column
+
 let private isIntegerType typeId =
     typeId = TypeTiny || typeId = TypeShort || typeId = TypeInt24
     || typeId = TypeLong || typeId = TypeLongLong || typeId = TypeYear
@@ -10896,8 +10919,11 @@ and private resolveTableRef
                     cteScope.Value <- Map.empty
 
                     let resolve viewRegistry body =
+                        let materialization =
+                            if equalsIgnoreCase view.Algorithm "TEMPTABLE" then ForceMaterialization
+                            else AllowMerge
                         withFunctionDatabase (Some view.Schema) (fun () ->
-                            resolveRelationBody viewStore viewRegistry view.Schema view.Columns body None)
+                            resolveRelationBody viewStore viewRegistry view.Schema view.Columns materialization body None)
                         |> Result.mapError (function
                             | Err(1054, _) | Err(1146, _) | Err(1305, _) | Err(1356, _) ->
                                 Err(invalidViewError view.Schema view.Name)
@@ -12206,11 +12232,11 @@ and private resolveFromSubquery
         |> Result.map (fun source -> source.Columns, List.ofSeq source.Rows)
     | FromTable _
     | FromJsonTable _ -> resolveFromItem store registry dbName item
-    | FromSubquery(body, _) -> resolveRelationBody store registry dbName [] body outer
+    | FromSubquery(body, _) -> resolveRelationBody store registry dbName [] AllowMerge body outer
     | FromLateral(body, _) ->
         let enclosing =
             outer |> Option.orElseWith (fun () -> Some(contextFactory store registry dbName Map.empty Map.empty None [||]))
-        resolveRelationBody store registry dbName [] body enclosing
+        resolveRelationBody store registry dbName [] AllowMerge body enclosing
 
 and private materializeRelationValue columnName rowNumber value =
     match value with
@@ -12225,7 +12251,7 @@ and private materializeRelationValue columnName rowNumber value =
             Value.encodedString charset bytes.[0 .. offset - 1]
     | _ -> Value.materialize value
 
-and private resolveRelationBody store registry dbName columnNames body outer : Result<ColumnDef list * Value[] list, QueryResult> =
+and private resolveRelationBody store registry dbName columnNames materialization body outer : Result<ColumnDef list * Value[] list, QueryResult> =
     let describedColumns = describeQueryColumnsInScope store registry dbName (QueryBody body) outer (fun _ -> Ok()) |> Result.toOption
     let columnNamesAreValid =
         match describedColumns with
@@ -12293,16 +12319,41 @@ and private resolveRelationBody store registry dbName columnNames body outer : R
                 match describedColumns with
                 | Some descriptions when sameLength descriptions columns ->
                     List.map2 (fun column description ->
-                        { column with ExpressionCollation = description.ExpressionCollation }) columns descriptions
+                        { withDeclaredGeometryType column description with
+                            ExpressionCollation = description.ExpressionCollation }) columns descriptions
                 | _ -> columns
             renameRelationColumns columnNames (fun (column: ColumnDef) -> column.Name) (fun name column -> { column with Name = name }) columns
-            |> Result.map (fun columns ->
-                let names = columns |> List.map _.Name |> List.toArray
-                let rows =
-                    typedRows
-                    |> List.mapi (fun rowIndex row ->
-                        row |> Array.mapi (fun index value -> materializeRelationValue names.[index] (rowIndex + 1) value))
-                columns, rows)
+            |> Result.bind (fun columns ->
+                let geometryColumns =
+                    columns
+                    |> List.indexed
+                    |> List.choose (fun (index, column) ->
+                        match column.Type with
+                        | TGeometry kind when kind <> Geometry -> Some(index, column)
+                        | _ -> None)
+                let geometryError =
+                    if typedRows.IsEmpty || geometryColumns.IsEmpty
+                       || (materialization = AllowMerge && queryBodyCanMerge registry body) then
+                        None
+                    else
+                        // A temporary table enforces the declared subtype before the outer query reads it.
+                        let checks =
+                            geometryColumns |> List.map (fun (index, column) ->
+                                index, Storage.prepareStoredValueCoercion store { column with Nullable = true; Srid = None })
+                        typedRows |> List.tryPick (fun row ->
+                            checks |> List.tryPick (fun (index, check) ->
+                                match check row.[index] with
+                                | Error error -> Some(storageErr error)
+                                | Ok _ -> None))
+                match geometryError with
+                | Some error -> Error error
+                | None ->
+                    let names = columns |> List.map _.Name |> List.toArray
+                    let rows =
+                        typedRows
+                        |> List.mapi (fun rowIndex row ->
+                            row |> Array.mapi (fun index value -> materializeRelationValue names.[index] (rowIndex + 1) value))
+                    Ok(columns, rows))
         | Err(code, message) -> Error(Err(code, message))
         | Affected _ -> Error(Err(1064, "derived table did not return a resultset"))
         | MultipleResults _ -> Error(nestedResultsError "a derived table")
@@ -15170,7 +15221,7 @@ and private materializeCte
     (outer: EvalContext option)
     : Result<ColumnDef list * Value[] list, QueryResult> =
     if not (cteSelfReferenced cte) then
-        resolveRelationBody store registry dbName cte.CteColumns cte.Body outer
+        resolveRelationBody store registry dbName cte.CteColumns AllowMerge cte.Body outer
     else
 
     match cte.Body with
@@ -15192,7 +15243,7 @@ and private materializeCte
                     expressions
                     columns
 
-        resolveRelationBody store registry dbName cte.CteColumns (PlainSelect anchor) outer
+        resolveRelationBody store registry dbName cte.CteColumns ForceMaterialization (PlainSelect anchor) outer
         |> Result.bind (fun (anchorColumns, anchorRows) ->
             anchorColumns
             |> normalizeLiteralColumns
@@ -26255,18 +26306,7 @@ let private queryJoinPlanning store registry schema originalWhere (select: Selec
     else RetainJoinPlanning
 
 let private sourceCanMerge registry (source: OptimizerHintScopes.SourceReference) =
-    match source.Body with
-    | PlainSelect select when not source.Recursive ->
-        let expressions = select.Projections |> List.map _.Expression
-        let preventsMerge expression =
-            containsAggregate registry expression
-            || not (collectWindowFuncs expression).IsEmpty
-            || Expression.exists (function AssignUserVariable _ -> true | _ -> false) expression
-            || (Expression.collectSubqueries expression |> List.exists (scalarSubqueryMaterializes registry))
-        select.From.IsSome && not select.Distinct && select.GroupBy.IsEmpty
-        && select.Having.IsNone && select.Limit.IsNone && select.Windows.IsEmpty
-        && not (expressions |> List.exists preventsMerge)
-    | _ -> false
+    not source.Recursive && queryBodyCanMerge registry source.Body
 
 let private blockSourceMaterializes registry (pending: OptimizerHintResolution.ExecutionDiagnostics) (block: OptimizerHintScopes.Block) =
     block.Source |> Option.exists (fun source ->
@@ -27164,7 +27204,7 @@ let private prepareDeleteViewSource store registry (stored: StoredView) (view: U
 
         DynamicScope.withValue cteScope (Map.ofList [ marker, binding ]) (fun () ->
             withFunctionDatabase (Some layer.Schema) (fun () ->
-                resolveRelationBody viewStore registry layer.Schema names (PlainSelect rewritten) None))
+                resolveRelationBody viewStore registry layer.Schema names AllowMerge (PlainSelect rewritten) None))
         |> Result.bind (fun (output, projected) ->
             projected
             |> traverse (fun row ->
@@ -33180,10 +33220,7 @@ let rec private executeAsWithViewSources
                                 | _ -> None
                             match body |> Option.bind (QueryBody >> describeQueryColumns store registry dbName) with
                             | Some declared when sameLength columns declared ->
-                                List.map2 (fun column definition ->
-                                    match column.Type, definition.Type with
-                                    | TGeometry _, TGeometry kind -> { column with Type = TGeometry kind }
-                                    | _ -> column) columns declared
+                                List.map2 withDeclaredGeometryType columns declared
                             | _ -> columns
                         else columns
                     let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
