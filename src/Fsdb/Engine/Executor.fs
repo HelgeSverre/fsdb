@@ -7711,6 +7711,8 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 | VEncodedString(_, bytes)
                 | VBinaryLiteral bytes
                 | VBytes bytes -> VBytes bytes
+                | VGeometry geometry when (Value.tryGeometrySqlEncoding geometry).IsSome ->
+                    VBytes(SpatialReferenceSystems.geometryToSqlBinary geometry)
                 | _ ->
                     let text = displayValueForText ctx e source |> Value.toText |> Option.defaultValue ""
                     VBytes(Charset.encode (sourceCharset ctx e) text)
@@ -12361,14 +12363,14 @@ and private resolveRelationBody store registry dbName columnNames materializatio
                     |> List.indexed
                     |> List.choose (fun (index, column) ->
                         match column.Type with
-                        | TGeometry kind when kind <> Geometry -> Some(index, column)
+                        | TGeometry _ -> Some(index, column)
                         | _ -> None)
                 let geometryError =
                     if typedRows.IsEmpty || geometryColumns.IsEmpty
                        || (materialization = AllowMerge && queryBodyCanMerge registry body) then
                         None
                     else
-                        // A temporary table enforces the declared subtype before the outer query reads it.
+                        // Materialized geometry uses the same encoding and subtype rules as stored columns.
                         let checks =
                             geometryColumns |> List.map (fun (index, column) ->
                                 index, Storage.prepareStoredValueCoercion store { column with Nullable = true; Srid = None })

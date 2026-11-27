@@ -5599,6 +5599,22 @@ let tests =
                   Expect.equal row [ Some(raw.Substring 2); Some "1" ] "geographic SQL bytes use longitude first"
               | other -> failtestf "expected validated binary geometry, got %A" other
 
+              let bigEndian = "E610000000000000014024000000000000404E000000000000"
+              let validated = $"ST_Validate(X'{bigEndian}')"
+              let mixedEndian = "0000000001070000000100000000000000013FF00000000000004000000000000000"
+              let mixed = $"ST_Validate(X'{mixedEndian}')"
+              match run $"SELECT HEX({validated}), HEX(ST_Validate({mixed})), ST_Longitude({validated}), ST_Latitude({validated})" with
+              | ResultSet(_, [ row ]) -> Expect.equal row [ Some bigEndian; Some mixedEndian; Some "10"; Some "60" ] "validation retains raw bytes and coordinates"
+              | other -> failtestf "expected validated geometry, got %A" other
+              for sql, code in
+                  [ $"SELECT ST_AsText({validated})", 3055
+                    $"SELECT ST_AsWKB({mixed})", 3037
+                    $"SELECT HEX(g) FROM (SELECT {validated} AS g LIMIT 1) d", 1416
+                    $"CREATE TABLE invalid_bytes AS SELECT {mixed} AS g", 1416 ] do
+                  TestSupport.Sql.expectError code (run sql) sql
+              TestSupport.Sql.expectOk (run "CREATE TABLE validated_geometry(g GEOMETRY)") "create geometry column"
+              TestSupport.Sql.expectError 1416 (run $"INSERT INTO validated_geometry VALUES ({validated})") "storage requires little endian"
+
               TestSupport.Sql.expectError 3037 (run "SELECT ST_Validate('bad')") "malformed GIS data"
               TestSupport.Sql.expectError 3731
                   (run "SELECT ST_Validate(0xE610000001010000000000000000A066400000000000000000)") "longitude validation"

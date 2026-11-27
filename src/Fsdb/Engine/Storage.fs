@@ -2321,7 +2321,8 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
         | TJson -> charsetChecked (v |> toText |> Option.defaultValue "") |> Result.map VJson
         | TGeometry requiredKind ->
             match v with
-            | VGeometry geometry when requiredKind <> Geometry && geometryKind geometry.Shape <> requiredKind ->
+            | VGeometry geometry when (tryGeometrySqlEncoding geometry).IsSome
+                                      || (requiredKind <> Geometry && geometryKind geometry.Shape <> requiredKind) ->
                 Error(ExpressionError(1416, "Cannot get geometry object from data you send to the GEOMETRY field"))
             | VGeometry geometry
                 when col.Srid |> Option.forall ((=) (uint32 geometry.Srid)) ->

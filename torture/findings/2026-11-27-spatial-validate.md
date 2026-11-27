@@ -26,7 +26,27 @@ geometry bytes in SRIDs 0, 3857, and 4326. The same bytes matched in the
 text protocol. A durable restart retained both tested geographic rows,
 including their WKT, SRID, validity, and longitude-first SQL bytes.
 
-MySQL also accepts a valid raw big-endian geometry and returns those
-exact bytes from `ST_Validate`. Fsdb emits its canonical little-endian
-encoding, so byte comparisons and later consumers that check the
-original endian tag can still differ.
+Both servers return the original bytes for valid raw big-endian and
+mixed-endian geometries, including nested collections.
+
+```sql
+SELECT HEX(ST_Validate(X'0000000000000000013FF00000000000004000000000000000'));
+```
+
+The audited coordinate and SRID accessors read the decoded geometry.
+`ST_AsText`, `ST_AsWKB`, and `ST_GeometryType` report 3055 for a
+big-endian outer header and 3037 for a little-endian header containing
+big-endian members. Both servers return 1416 when a geometry column or
+a materialized derived table attempts to store these results. An explicit
+binary cast preserves the original bytes for BLOB storage.
+[MySQL geometry column validation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/field.cc#L7050-L7069)
+
+Both fsdb storage modes matched 216 text-protocol cases and 27 additional
+big-endian or mixed-endian multi-geometry comparisons. A prepared
+statement matched result metadata and bytes for nine BLOB parameters
+tested individually in both modes.
+Six values cast to BLOB matched MySQL before and after a durable restart.
+Two differences remain. Direct equality against a binary literal still
+differs for canonical little-endian multi-geometries. MySQL returns 1210
+for an execute packet that declares a `MYSQL_TYPE_GEOMETRY` parameter,
+which fsdb accepts.

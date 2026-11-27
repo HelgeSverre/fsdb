@@ -681,7 +681,9 @@ remains open.
 valid geometry and shares topology checks with `ST_IsValid`. The
 planar checks distinguish single-point ring contacts from disconnected
 interiors. Geographic SQL results and `HEX(geometry)` emit longitude
-first. Raw big-endian validation results still differ.
+first. Successful validation preserves raw big-endian and mixed-endian
+WKB. Geometry storage rejects those encodings. Direct equality between
+canonical little-endian geometry and a binary literal still differs.
 
 [`ST_IsSimple`](torture/findings/2026-11-27-spatial-simplicity.md) checks
 repeated coordinates, line intersections, and collection member

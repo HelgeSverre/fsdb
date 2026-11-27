@@ -575,7 +575,11 @@ let internal swapMySqlGeographicAxes (geometry: Geometry) =
     | _ -> geometry
 
 let internal geometryToSqlBinary geometry =
-    swapMySqlGeographicAxes geometry |> geometryToMySqlBinary
+    match tryGeometrySqlEncoding geometry with
+    | Some encoding -> Array.copy encoding.Bytes
+    | None ->
+        let geographic = tryFind geometry.Srid |> Option.exists (fun referenceSystem -> referenceSystem.SemiMajorAxis.IsSome)
+        geometryToMySqlBinaryInAxisOrder geographic geometry
 
 let rec private tryPickCoordinate check = function
     | GEmpty -> None

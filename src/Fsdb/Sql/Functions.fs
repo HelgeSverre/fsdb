@@ -5763,6 +5763,15 @@ let private geometryArgument functionName = function
     | VGeometry geometry -> geometry
     | _ -> geometryError functionName "a geometry argument is required"
 
+let private legacyGeometryArgument functionName value =
+    let geometry = geometryArgument functionName value
+    match tryGeometrySqlEncoding geometry with
+    | Some encoding when encoding.Bytes.[4] = 0uy ->
+        raise (SqlError(3055, "Geometry byte string must be little endian."))
+    | Some _ ->
+        raise (SqlError(3037, $"Invalid GIS data provided to function {functionName.ToLowerInvariant()}."))
+    | None -> geometry
+
 let private validateGeometryParameter (functionName: string) geometry =
     match SpatialReferenceSystems.tryGeometryParameterDomainError geometry with
     | None -> geometry
@@ -5951,7 +5960,7 @@ let private geometryFromWkbFn requiredKind functionName: Scalar =
 
 let private geometryToTextFn functionName: Scalar =
     let serialize value axisOrder =
-        let geometry = geometryArgument functionName value
+        let geometry = legacyGeometryArgument functionName value
         if SpatialReferenceSystems.hasNonFiniteCoordinates geometry then VNull
         else geometry |> prepareSerializedGeometry functionName axisOrder |> geometryToText |> VString
 
@@ -5965,7 +5974,7 @@ let private geometryToTextFn functionName: Scalar =
 
 let private geometryToWkbFn functionName: Scalar =
     let serialize value axisOrder =
-        geometryArgument functionName value
+        legacyGeometryArgument functionName value
         |> prepareSerializedGeometry functionName axisOrder
         |> geometryToWkb
         |> VBytes
@@ -5982,7 +5991,7 @@ let private geometryTypeFn: Scalar =
     function
     | [ VNull ] -> VNull
     | [ value ] ->
-        match geometryArgument "ST_GEOMETRYTYPE" value |> _.Shape |> geometryKind with
+        match legacyGeometryArgument "ST_GEOMETRYTYPE" value |> _.Shape |> geometryKind with
         | GeometryCollection -> VString "GEOMCOLLECTION"
         | kind -> VString(geometryTypeName kind)
     | _ -> nativeParameterCountError "st_geometrytype"
@@ -6277,19 +6286,31 @@ let private geometryDistanceFn: Scalar =
     | [ first; second; unit ] -> distance first second (Some unit)
     | _ -> nativeParameterCountError "st_distance"
 
-let private gisGeometryArgument functionName value =
+let private gisGeometryArgumentWith decode functionName value =
     let geometry =
         match value with
         | VGeometry geometry -> Some geometry
         | VBytes bytes
-        | VBinaryLiteral bytes ->
-            tryGeometryFromMySqlBinary bytes
-            |> Option.map SpatialReferenceSystems.swapMySqlGeographicAxes
+        | VBinaryLiteral bytes -> decode bytes
         | _ -> None
 
     geometry
     |> Option.defaultWith (fun () -> raise (SqlError(3037, $"Invalid GIS data provided to function {functionName}.")))
     |> validateGeometryParameter functionName
+
+let private gisGeometryArgument functionName value =
+    let decode bytes = tryGeometryFromMySqlBinary bytes |> Option.map SpatialReferenceSystems.swapMySqlGeographicAxes
+    gisGeometryArgumentWith decode functionName value
+
+let private validatedGeometryArgument functionName value =
+    let decode bytes =
+        tryGeometryFromMySqlBinaryWithByteOrder bytes |> Option.map (fun struct (decoded, hasBigEndian) ->
+            let geometry = SpatialReferenceSystems.swapMySqlGeographicAxes decoded
+            if hasBigEndian then
+                let geographic = SpatialReferenceSystems.tryFind geometry.Srid |> Option.exists (fun srs -> srs.SemiMajorAxis.IsSome)
+                retainGeometrySqlEncoding geographic bytes geometry
+            else geometry)
+    gisGeometryArgumentWith decode functionName value
 
 let private gisStringGeometryArgument functionName value =
     match value with
@@ -6314,11 +6335,12 @@ let private requireWellFormedGisGeometry functionName (geometry: Geometry) =
 
 let private geometryValidityFn (name: string) project: Scalar =
     let functionName = name.ToLowerInvariant()
+    let argument = if name = "ST_Validate" then validatedGeometryArgument else gisGeometryArgument
 
     function
     | [ VNull ] -> VNull
     | [ value ] ->
-        let geometry = gisGeometryArgument functionName value
+        let geometry = argument functionName value
         let referenceSystem = spatialReferenceSystem functionName geometry.Srid
         requireWellFormedGisGeometry functionName geometry
         let valid =
