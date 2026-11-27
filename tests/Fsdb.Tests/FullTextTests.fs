@@ -417,6 +417,20 @@ let tests =
                   for id in expected do
                       closeTo relevance scores.[id] query
 
+          testCase "weighted case-sensitive ngram prefixes count only visited postings"
+          <| fun _ ->
+              let collation = tryFind "utf8mb4_0900_as_cs" |> Option.get
+              let build second =
+                  [ 1, [ "ff駅" ]; 2, [ second ] ]
+                  |> buildIndexWithStopwords StopwordPolicy.Disabled (Ngrams 2) collation
+                  |> flushPostings
+              let query = ">ff駅 <f*"
+              let scores = booleanScores (build "ﬃ駅") query
+              Expect.equal (Map.keys scores |> Seq.toList) [ 1 ] "the disk prefix stops at the ligature"
+              closeTo 0.2718571722507477 scores.[1] "one visited prefix posting cancels the boost without making it negative"
+              let control = booleanScores (build "駅前") query
+              closeTo -0.8187618255615234 control.[1] "two visited prefix postings make the adjustment negative"
+
           testCase "accent-sensitive ngram cache inserts grams in MySQL collation order"
           <| fun _ ->
               let collation = tryFind "utf8mb4_0900_as_ci" |> Option.get

@@ -37,3 +37,29 @@ remain open beyond the [audited CJK expansion cases](2026-11-27-ngram-accent-sen
 
 MySQL's [InnoDB wildcard cache search](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L844-L875)
 uses the [UCA prefix comparison](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/strings/ctype-uca.cc#L1667-L1717).
+
+## Weighted prefix posting visits
+
+For `utf8mb4_0900_as_cs`, index the two documents `ff駅` and `ﬃ駅` with
+bigrams and stopwords disabled, then run a full-text-only optimize.
+The query `>ff駅 <f*` matches document 1. A ligature key stops the
+flushed cursor before it reaches that document's second prefix gram.
+Only one posting cancels the boost. Fsdb now gets the adjustment
+count from the cursor, which changes the score from about −0.728143
+to MySQL's 0.271857. Replacing the ligature document with `駅前`
+lets the cursor visit both postings and produces about −0.818762.
+[MySQL posting rank adjustment](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L1232-L1264)
+
+Against pinned MySQL 8.4.11, 58,000 searches matched membership and
+scores within 0.00001. The corpus covered binary punctuation and
+expanded accent-sensitive, case-sensitive and case-insensitive
+bigrams. Each lane exercised fresh, flushed, mixed, and mixed
+postings after deletion. The fix resolved all nine case-sensitive
+relevance differences. The weighted score remained stable when
+the WAL-backed index reopened from a checkpoint.
+
+The wider baseline also isolated two separate gaps. Under
+`utf8mb4_0900_ai_ci`, `ア駅` should find the circled `㋐駅`
+document alongside its ordinary Kana forms. Under
+`utf8mb4_ja_0900_as_cs_ks`, MySQL's flushed cursor can return no
+rows for `ア*` even when the exact gram `ア駅` is indexed.

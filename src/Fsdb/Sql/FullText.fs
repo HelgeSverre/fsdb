@@ -178,6 +178,12 @@ type private PrefixPosting<'id when 'id: comparison> =
     { Rows: Map<'id, int>
       TermDocumentCount: int64 }
 
+type private OrderedPrefixPosting<'id when 'id: comparison> =
+    { Posting: PrefixPosting<'id>
+      RetainedFrequency: int64
+      DeletedDocumentCount: int64
+      RepeatedDocuments: Set<'id> }
+
 type private DeletedPostings =
     { Documents: Map<int64, string[]>
       Words: Map<string, Map<int64, int64>>
@@ -1678,7 +1684,7 @@ let private restrictScores (candidateIds: Set<'id> option) (scores: Map<'id, 'va
         |> Seq.choose (fun id -> Map.tryFind id scores |> Option.map (fun score -> id, score))
         |> Map.ofSeq
 
-let private orderedPrefixPosting diskOnly (term: Token) (view: ReadView<'id>) =
+let private orderedPrefixPosting trackRepeats diskOnly (term: Token) (view: ReadView<'id>) =
     let through = defaultArg view.FlushedThrough Int64.MaxValue
     let comparePrefix = compareOrderedPrefix view.Collation term.Key
     let readGram cache gram =
@@ -1721,13 +1727,20 @@ let private orderedPrefixPosting diskOnly (term: Token) (view: ReadView<'id>) =
     let mutable rows = Map.empty
     let mutable total = 0L
     let mutable deleted = Map.empty
+    let mutable repeated = Set.empty
     for live, history in Seq.append cached flushed do
         total <- total + int64 live.Count
         rows <- live |> Map.fold (fun found id frequency ->
-            if Map.containsKey id found then found else Map.add id frequency found) rows
+            if Map.containsKey id found then
+                if trackRepeats then repeated <- Set.add id repeated
+                found
+            else Map.add id frequency found) rows
         deleted <- history |> Map.fold (fun found order grams ->
             found |> Map.change order (fun count -> Some(grams + Option.defaultValue 0L count))) deleted
-    { Rows = rows; TermDocumentCount = total }, (deleted |> Map.values |> Seq.sum), int64 deleted.Count
+    { Posting = { Rows = rows; TermDocumentCount = total }
+      RetainedFrequency = deleted |> Map.values |> Seq.sum
+      DeletedDocumentCount = int64 deleted.Count
+      RepeatedDocuments = repeated }
 
 let private prefixRowsWithCacheOrder candidateIds key (view: ReadView<'id>) (rows: Map<'id, int>) =
     match view.FlushedThrough with
@@ -1762,9 +1775,9 @@ let private prefixRowsWithCacheOrder candidateIds key (view: ReadView<'id>) (row
 
 let private weightedPrefixRows candidateIds (term: Token) (view: ReadView<'id>) =
     if usesOrderedPrefixes view.Collation view.Rules.Tokenizer then
-        let posting, retained, deleted = orderedPrefixPosting false term view
-        let frequency = float (posting.TermDocumentCount + retained - deleted)
-        Some(posting.Rows, prefixIdf view.DocumentCount frequency)
+        let result = orderedPrefixPosting false false term view
+        let frequency = float (result.Posting.TermDocumentCount + result.RetainedFrequency - result.DeletedDocumentCount)
+        Some(result.Posting.Rows, prefixIdf view.DocumentCount frequency)
     else
         Map.tryFind term.Key view.PrefixPostings
         |> Option.map (fun posting -> prefixRowsWithCacheOrder candidateIds term.Key view posting.Rows, prefixWeight view term.Key posting)
@@ -2019,7 +2032,7 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
             let sharedRowFrequencies = Collections.Generic.Dictionary<string, Collections.Generic.Dictionary<'id, int>>()
             let exactSegments = Collections.Generic.Dictionary<string, Map<'id, int> * Map<'id, int>>()
             let diskPrefixes = Collections.Generic.Dictionary<string, PrefixPosting<'id> option>()
-            let orderedPostings = Collections.Generic.Dictionary<struct (bool * string), PrefixPosting<'id> * int64>()
+            let orderedPostings = Collections.Generic.Dictionary<struct (bool * string), OrderedPrefixPosting<'id>>()
             let scoringPrefixes = Collections.Generic.Dictionary<string, Map<'id, int>>()
             let contributionOrder = Collections.Generic.Dictionary<string, int>()
             let mutable postingBounds = None
@@ -2046,8 +2059,7 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
                 match orderedPostings.TryGetValue key with
                 | true, value -> value
                 | _ ->
-                    let posting, retained, _ = orderedPrefixPosting diskOnly term view
-                    let value = posting, retained
+                    let value = orderedPrefixPosting weighted diskOnly term view
                     orderedPostings.Add(key, value)
                     value
 
@@ -2175,14 +2187,12 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
 
             let adjustmentSteps term id =
                 match term with
+                | BWord(word, true) when orderedPrefixes ->
+                    let posting = orderedPrefix inPhraseMode word
+                    if Set.contains id posting.RepeatedDocuments then 2 else 1
                 | BWord(word, true) ->
-                    let matches =
-                        if orderedPrefixes then
-                            let compare = compareOrderedPrefix view.Collation word.Key
-                            fun token -> compare token.Key = 0
-                        else prefixKeys view.Collation >> Array.contains word.Key
                     indexedTokens view.Documents.[id].Content
-                    |> Seq.filter matches
+                    |> Seq.filter (prefixKeys view.Collation >> Array.contains word.Key)
                     |> Seq.distinctBy _.Key
                     |> Seq.truncate 2
                     |> Seq.length
@@ -2205,8 +2215,8 @@ let private tryPostingRanking candidateIds (view: ReadView<'id>) nodes =
                             let diskOnly = inPhraseMode && not isRequired
                             let posting, retained =
                                 if orderedPrefixes then
-                                    let posting, retained = orderedPrefix diskOnly word
-                                    Some posting, retained
+                                    let result = orderedPrefix diskOnly word
+                                    Some result.Posting, result.RetainedFrequency
                                 else
                                     prefixPosting diskOnly word.Key, retainedPrefixFrequency diskOnly word.Key
                             let frequency = posting |> Option.map _.TermDocumentCount |> Option.defaultValue 0L

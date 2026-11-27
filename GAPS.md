@@ -1982,8 +1982,8 @@ changes from the collation's lowercase table. Natural and query-expansion
 indexing continue to find later-assigned characters.
 [ASCII apostrophes in Boolean ngram queries](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#ascii-apostrophes-in-ngram-queries)
 now separate terms before ngram phrase conversion. The binary punctuation
-corpus matches after MySQL full-text optimization. The same corpus still
-shows cache-dependent wildcard differences on a fresh MySQL index.
+corpus matches after MySQL full-text optimization. A newer binary punctuation
+corpus also matches on fresh, flushed, mixed, and mixed-with-deletion indexes.
 [Short Boolean ngram wildcard ranking](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#short-boolean-ngram-wildcard-ranking)
 now uses the first matching gram's term frequency and counts each
 matching gram's postings toward document frequency on the audited
@@ -2015,6 +2015,10 @@ cursor use the pinned MySQL collation weights. The wider cached
 and mixed bigram matrices match MySQL, including `花*` and `é*`.
 MySQL's row-count estimates can still change full-text scores
 before statistics are refreshed.
+[Weighted case-sensitive wildcards](torture/findings/2026-11-27-ngram-collation-prefixes.md#weighted-prefix-posting-visits)
+apply their rank adjustments only to postings the cursor actually visits.
+The expanded corpus still exposes circled-Kana equivalence gaps under
+`utf8mb4_0900_ai_ci` and wildcard differences under the Japanese collation.
 [Boolean ngram rank cancellation](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#boolean-rank-cancellation)
 now treats a final score of zero as a nonmatch in the audited weighted
 term, phrase, group, and prefix cases. [Single-precision rank accumulation](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#single-precision-rank-accumulation)
