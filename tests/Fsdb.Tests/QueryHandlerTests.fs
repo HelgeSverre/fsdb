@@ -5419,6 +5419,56 @@ let tests =
                       [ TypeGeometry, BinaryFlag ] "prepared GEOMETRY result"
               | Error error -> failtestf "expected ST_Validate to prepare, got %A" error
 
+          testCase "ST_IsSimple distinguishes repeated coordinates and intersecting interiors from validity"
+          <| fun _ ->
+              let run = queryFixture [ "USE fsdb" ]
+              for wkt, srid, expected in
+                  [ "GEOMETRYCOLLECTION()", 0, "1"
+                    "MULTIPOINT((0 0),(0.0000000000000001 0))", 0, "0"
+                    "LINESTRING(0 0,1 1,1 1,2 2)", 3857, "0"
+                    "LINESTRING(0 0,2 2,0 2,2 0)", 0, "0"
+                    "LINESTRING(0 0,1 1,2 0,0 0)", 0, "1"
+                    "MULTILINESTRING((0 0,1 1),(1 1,2 2))", 0, "1"
+                    "MULTILINESTRING((0 0,1 1,2 0,0 0),(0 0,-1 -1))", 0, "0"
+                    "POLYGON((0 0,2 2,0 2,2 0,0 0))", 0, "1"
+                    "POLYGON((0 0,2 0,2 0,2 2,0 2,0 0))", 0, "0"
+                    "MULTIPOLYGON(((0 0,2 0,2 2,0 2,0 0)),((1 1,3 1,3 3,1 3,1 1)))", 0, "1"
+                    "GEOMETRYCOLLECTION(POLYGON((0 0,2 0,2 2,0 2,0 0)),POLYGON((1 1,3 1,3 3,1 3,1 1)))", 0, "0"
+                    "GEOMETRYCOLLECTION(POINT(0 0),LINESTRING(0 0,2 2))", 0, "1"
+                    "GEOMETRYCOLLECTION(POINT(1 1),LINESTRING(0 0,2 2))", 0, "0"
+                    "GEOMETRYCOLLECTION(POINT(0 0),GEOMETRYCOLLECTION(POINT(0.0000000000000001 0)))", 0, "0"
+                    "GEOMETRYCOLLECTION(POINT(4 3),GEOMETRYCOLLECTION(POLYGON((2 3,5 3,5 8,2 8,2 3)),POINT(7 -4)))", 3857, "0"
+                    "GEOMETRYCOLLECTION(POINT(4 3),GEOMETRYCOLLECTION(POLYGON((2 3,5 3,5 8,2 8,2 3)),POINT(2 7)))", 3857, "1"
+                    "GEOMETRYCOLLECTION(POINT(-2 -1),GEOMETRYCOLLECTION(POINT(-1 6),POLYGON((-2 -2,-1 -2,-1 2,-2 2,-2 -2))))", 4326, "0"
+                    "GEOMETRYCOLLECTION(GEOMETRYCOLLECTION(POINT(2 1),POLYGON((0 0,2 0,2 2,0 2,0 0))),GEOMETRYCOLLECTION(POINT(2 1),POLYGON((2 0,4 0,4 2,2 2,2 0))))", 4326, "1"
+                    "GEOMETRYCOLLECTION(POINT(1 1),GEOMETRYCOLLECTION(LINESTRING(0 0,1 1),LINESTRING(1 1,2 2)))", 4326, "0"
+                    "LINESTRING(179 0,-179 2,179 2,-179 0)", 4326, "0"
+                    "LINESTRING(0 90,90 90,30 89)", 4326, "1"
+                    "MULTIPOINT((0 90),(90 90))", 4326, "1" ] do
+                  let axis = if srid = 4326 then ",'axis-order=long-lat'" else ""
+                  let sql = $"SELECT ST_IsSimple(ST_GeomFromText('{wkt}',{srid}{axis}))"
+                  match run sql with
+                  | ResultSet(_, [ [ value ] ]) -> Expect.equal value (Some expected) sql
+                  | other -> failtestf "%s returned %A" sql other
+
+              for argument, code in
+                  [ "'bad'", 3037; "'POINT(1 2)'", 3548; "0xFFFFFFFF", 3548
+                    "0xE610000001010000000000000000A066400000000000000000", 3731 ] do
+                  TestSupport.Sql.expectError code (run $"SELECT ST_IsSimple({argument})") argument
+
+              match run "SELECT ST_IsSimple(NULL), ST_IsSimple(0x000000000101000000000000000000F03F0000000000000040)" with
+              | ResultSet(_, [ row ]) -> Expect.equal row [ None; Some "1" ] "NULL and raw geometry"
+              | other -> failtestf "expected simplicity results, got %A" other
+
+              let session = create 1 (Fsdb.Storage.create ())
+              match prepareStatementForSession session "SELECT ST_IsSimple(?) AS simple" with
+              | Ok(statement, count) ->
+                  let parameters, columns = preparedMetadata session statement count
+                  Expect.equal (parameters |> List.map _.TypeId) [ TypeGeometry ] "prepared geometry parameter"
+                  Expect.equal (columns |> List.map (fun column -> column.Metadata.TypeId, column.Metadata.ColumnLength, column.Metadata.Flags))
+                      [ TypeLongLong, 1u, BinaryFlag ] "prepared Boolean result"
+              | Error error -> failtestf "expected simplicity to prepare, got %A" error
+
           testCase "planar geometry functions retain result metadata without rows"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

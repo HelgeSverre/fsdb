@@ -6315,6 +6315,28 @@ let private geometryValidityFn (name: string) project: Scalar =
         project geometry valid
     | _ -> nativeParameterCountError name
 
+let private geometrySimplicityFn: Scalar =
+    function
+    | [ VNull ] -> VNull
+    | [ value ] ->
+        let name = "st_issimple"
+        let argument =
+            match value with
+            | VGeometry _ -> value
+            | _ ->
+                let bytes = stringBytes value
+                if bytes.Length >= sizeof<uint32> then
+                    let srid = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan())
+                    if srid > uint32 Int32.MaxValue then
+                        raise (SqlError(3548, $"There's no spatial reference system with SRID {srid}."))
+                    spatialReferenceSystem name (int srid) |> ignore
+                VBytes bytes
+        let geometry = gisGeometryArgument name argument
+        let referenceSystem = spatialReferenceSystem name geometry.Srid
+        requireWellFormedGisGeometry name geometry
+        VInt(if geometryIsSimple referenceSystem geometry then 1L else 0L)
+    | _ -> nativeParameterCountError "ST_IsSimple"
+
 let private geometryVertexDistanceFn (name: string) quantity measure : Scalar =
     let functionName = name.ToLowerInvariant()
 
@@ -7024,6 +7046,7 @@ let private registerSpatialBuiltins registry =
     |> registerScalar "ST_DIMENSION" geometryDimensionFn
     |> registerScalar "DIMENSION" geometryDimensionFn
     |> registerScalar "ST_ISEMPTY" geometryIsEmptyFn
+    |> registerScalarWithSignature "ST_ISSIMPLE" [ geometry ] validityResult geometrySimplicityFn
     |> registerScalarWithSignature "ST_ISVALID" [ geometry ] validityResult
         (geometryValidityFn "ST_IsValid" (fun _ valid -> VInt(if valid then 1L else 0L)))
     |> registerScalarWithSignature "ST_VALIDATE" [ geometry ] geometryResult

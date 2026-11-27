@@ -939,38 +939,40 @@ let private geographicRingWithoutRepeatedNeighbors ring =
         | _ -> point :: points) []
     |> List.rev
 
+let private geographicPathIsSimple referenceSystem closed points =
+    let segments = points |> List.pairwise |> List.toArray
+    let last = segments.Length - 1
+    let invalidPair firstIndex secondIndex =
+        let (a, b) as first = segments.[firstIndex]
+        let (c, d) as second = segments.[secondIndex]
+        let adjacent = secondIndex = firstIndex + 1 || (closed && firstIndex = 0 && secondIndex = last)
+        let invalidContact point (start, endpoint) =
+            match geographicPointLinePosition referenceSystem point [ [ start; endpoint ] ] with
+            | GeographicPointLinePosition.Outside -> false
+            | GeographicPointLinePosition.Interior -> true
+            | GeographicPointLinePosition.Boundary -> not adjacent
+        (a = d && b = c)
+        || geographicSegmentsProperlyCross referenceSystem first second
+        || invalidContact a second
+        || invalidContact b second
+        || invalidContact c first
+        || invalidContact d first
+    seq {
+        for first in 0 .. last do
+            for second in first + 1 .. last do
+                yield first, second
+    }
+    |> Seq.mapi (fun index (first, second) ->
+        Limits.checkQueryCancellation index
+        invalidPair first second)
+    |> Seq.exists id
+    |> not
+
 let private geographicSimpleRingIsValid referenceSystem ring =
-    let vertices = ring |> List.take (max 0 (List.length ring - 1))
-    if List.length ring < 4
-       || List.head ring <> List.last ring
-       || (vertices |> Seq.distinct |> Seq.truncate 3 |> Seq.length) < 3 then
-        false
-    else
-        let segments = ring |> List.pairwise |> List.toArray
-        let last = segments.Length - 1
-        let pointPosition point (start, endpoint) =
-            geographicPointLinePosition referenceSystem point [ [ start; endpoint ] ]
-        let invalidPair firstIndex secondIndex =
-            let (a, b) as first = segments.[firstIndex]
-            let (c, d) as second = segments.[secondIndex]
-            let adjacent = secondIndex = firstIndex + 1 || (firstIndex = 0 && secondIndex = last)
-            let invalidContact point segment =
-                match pointPosition point segment with
-                | GeographicPointLinePosition.Outside -> false
-                | GeographicPointLinePosition.Interior -> true
-                | GeographicPointLinePosition.Boundary -> not adjacent
-            geographicSegmentsProperlyCross referenceSystem first second
-            || invalidContact a second
-            || invalidContact b second
-            || invalidContact c first
-            || invalidContact d first
-        seq {
-            for first in 0 .. last do
-                for second in first + 1 .. last do
-                    yield first, second
-        }
-        |> Seq.exists (fun (first, second) -> invalidPair first second)
-        |> not
+    List.length ring >= 4
+    && List.head ring = List.last ring
+    && (ring |> Seq.distinct |> Seq.truncate 3 |> Seq.length) = 3
+    && geographicPathIsSimple referenceSystem true ring
 
 let private tryValidateGeographicRing referenceSystem ring =
     // Equal neighbors are allowed. Drop their zero-length edges before either
@@ -1978,7 +1980,7 @@ let internal geographicPointMembership = function
         points |> List.distinct |> List.iter add
         contains
 
-let private orderGeographicRelationPoints comparePoints (points: (float * float) array) =
+let private orderRelationPoints comparePoints (points: (float * float) array) =
     let insertionThreshold = 16
     let less first second = comparePoints first second < 0
     let swap first second =
@@ -2038,20 +2040,18 @@ let private orderGeographicRelationPoints comparePoints (points: (float * float)
 
             points[target] <- point
 
+let private compareRelationPoint (y, x) (otherY, otherX) =
+    let compareCoordinate first second = if boostGeoEqual first second then 0 else Operators.compare first second
+    match compareCoordinate x otherX with
+    | 0 -> compareCoordinate y otherY
+    | order -> order
+
 // MySQL's lower-bound search depends on the ordering of near-equal points
 // because the coordinate tolerance is not transitive. Match the oracle's
 // partition and insertion order, with bounds and an exact depth fallback.
 let internal geographicOrderedPointMembership points =
-    let compareCoordinate first second =
-        if boostGeoEqual first second then 0 else Operators.compare first second
-
-    let comparePoints (latitude, longitude) (otherLatitude, otherLongitude) =
-        match compareCoordinate longitude otherLongitude with
-        | 0 -> compareCoordinate latitude otherLatitude
-        | order -> order
-
     let ordered = points |> List.map geographicPointRadians |> List.toArray
-    orderGeographicRelationPoints comparePoints ordered
+    orderRelationPoints compareRelationPoint ordered
 
     fun point ->
         let target = geographicPointRadians point
@@ -2059,10 +2059,10 @@ let internal geographicOrderedPointMembership points =
         let mutable upper = ordered.Length
         while lower < upper do
             let middle = lower + (upper - lower) / 2
-            if comparePoints ordered[middle] target < 0 then lower <- middle + 1
+            if compareRelationPoint ordered[middle] target < 0 then lower <- middle + 1
             else upper <- middle
 
-        lower < ordered.Length && comparePoints target ordered[lower] >= 0
+        lower < ordered.Length && compareRelationPoint target ordered[lower] >= 0
 
 let private overlayGeographicPoints kind firstShape (first: (float * float) list) secondShape (second: (float * float) list) =
     // MySQL dispatches a Point before a MultiPoint for the commutative
@@ -3415,7 +3415,7 @@ let private cleanGeographicPointTree shape =
 
     shape |> removeDuplicates |> narrow
 
-let private geographicCollectionParts shape =
+let private collectionParts shape =
     let prependAll retained values = List.fold (fun rest value -> value :: rest) retained values
     let rec split (points, lines, polygons) = function
         | GEmpty -> points, lines, polygons
@@ -3430,6 +3430,131 @@ let private geographicCollectionParts shape =
     let points, lines, polygons = split ([], [], []) shape
     List.rev points, List.rev lines, List.rev polygons
 
+let internal geometryIsSimple referenceSystem (geometry: Geometry) =
+    let geographic = referenceSystem.SemiMajorAxis.IsSome
+    let coordinates = if geographic then geographicPointRadians else fun (x, y) -> y, x
+    let same first second = sameCartesianPosition (coordinates first) (coordinates second)
+    let hasDistinctNeighbors points =
+        points |> List.pairwise |> List.forall (fun (first, second) -> not (same first second))
+
+    let distinctPoints points =
+        let ordered = points |> List.map coordinates |> List.toArray
+        orderRelationPoints compareRelationPoint ordered
+        ordered |> Array.pairwise |> Array.forall (fun (first, second) -> not (sameCartesianPosition first second))
+
+    let allPairs predicate members =
+        let rec check index = function
+            | [] -> true
+            | first :: rest ->
+                Limits.checkQueryCancellation index
+                List.forall (predicate first) rest && check (index + 1) rest
+        check 0 members
+
+    let isClosed points = same (List.head points) (List.last points)
+    let geographicLinesMeetOnlyAtEndpoints first second =
+        let endpointOf line point =
+            not (isClosed line) && (same point (List.head line) || same point (List.last line))
+        let firstEndpoint = endpointOf first
+        let secondEndpoint = endpointOf second
+        let secondSegments = List.pairwise second
+        first |> List.pairwise |> List.forall (fun firstSegment ->
+            secondSegments |> List.forall (fun secondSegment ->
+                let contacts = geographicSharedSegmentEndpoints referenceSystem firstSegment secondSegment
+                not (geographicSegmentsProperlyCross referenceSystem firstSegment secondSegment)
+                && (match contacts with
+                    | [] -> true
+                    | [ point ] -> firstEndpoint point && secondEndpoint point
+                    | _ -> false)))
+
+    let simpleLines shape lines =
+        lines |> List.forall hasDistinctNeighbors
+        && if geographic then
+               (lines |> List.forall (fun line -> geographicPathIsSimple referenceSystem (isClosed line) line))
+               && allPairs geographicLinesMeetOnlyAtEndpoints lines
+           else (geometryToNts { geometry with Shape = shape }).IsSimple
+
+    let covers lines polygons =
+        if geographic then
+            let onLine = geographicLineworkCoversPoint referenceSystem lines
+            let inArea = geographicAreaCoversPoint referenceSystem polygons
+            fun point -> onLine point || inArea point
+        else
+            let linework = { geometry with Shape = GMultiLineString lines }
+            let areas = { geometry with Shape = GMultiPolygon polygons }
+            fun point -> geometryPointPositionPlanar point linework <> Exterior || geometryPointPositionPlanar point areas <> Exterior
+
+    let partsForRelation shape =
+        let points, lines, polygons = collectionParts shape
+        let covered = covers lines polygons
+        List.filter (covered >> not) points, lines, polygons
+
+    let geographicInteriorsIntersect first second =
+        let points, lines, polygons = partsForRelation first
+        let otherPoints, otherLines, otherPolygons = partsForRelation second
+        let pointsInLines points lines =
+            not (List.isEmpty lines) && points |> List.exists (fun point ->
+                geographicPointLinePosition referenceSystem point lines = GeographicPointLinePosition.Interior)
+        let pointsInPolygons points polygons =
+            not (List.isEmpty polygons) && points |> List.exists (fun point ->
+                match geographicPointPolygonPosition referenceSystem point polygons with
+                | GeographicPointPolygonPosition.Interior | GeographicPointPolygonPosition.HoleBoundary -> true
+                | _ -> false)
+        let linesInPolygons lines polygons =
+            if List.isEmpty lines || List.isEmpty polygons then false
+            else
+                let topology = geographicLinePolygonTopology referenceSystem lines polygons
+                topology.Intersects && not topology.Touches
+        List.exists (geographicPointMembership points) otherPoints
+        || pointsInLines points otherLines || pointsInLines otherPoints lines
+        || pointsInPolygons points otherPolygons || pointsInPolygons otherPoints polygons
+        || linesInPolygons lines otherPolygons || linesInPolygons otherLines polygons
+        || (not lines.IsEmpty && not otherLines.IsEmpty
+            && (let topology = geographicLineLineTopology referenceSystem lines otherLines
+                topology.Crosses || topology.Overlaps || topology.FirstContainsSecond || topology.SecondContainsFirst))
+        || (not polygons.IsEmpty && not otherPolygons.IsEmpty
+            && (let topology = geographicPolygonPolygonTopology referenceSystem polygons otherPolygons
+                topology.Overlaps || topology.FirstContainsSecond || topology.SecondContainsFirst))
+
+    let pointTouchesMixedCollection points collection =
+        match geographicPointMembers points, collection with
+        | Some points, GGeometryCollection _ ->
+            let members, lines, polygons = partsForRelation collection
+            let covered = covers lines polygons
+            // MySQL's touches check encounters the retained point set first.
+            // A point-set comparison is undefined even if another member touches.
+            not members.IsEmpty && List.exists covered points
+        | _ -> false
+
+    let simpleMemberPair first second =
+        not (pointTouchesMixedCollection first second || pointTouchesMixedCollection second first)
+
+    let planarPointSetsIntersect first second =
+        let points, _, _ = partsForRelation first
+        let otherPoints, _, _ = partsForRelation second
+        points |> List.exists (fun point -> List.exists (same point) otherPoints)
+
+    let rec simple = function
+        | GEmpty | GPoint _ -> true
+        | GMultiPoint points -> distinctPoints points
+        | GLineString line as shape -> simpleLines shape [ line ]
+        | GMultiLineString lines as shape -> simpleLines shape lines
+        // Areal simplicity checks repeated neighbors independently of polygon validity.
+        | GPolygon rings -> List.forall hasDistinctNeighbors rings
+        | GMultiPolygon polygons -> polygons |> List.forall (List.forall hasDistinctNeighbors)
+        | GGeometryCollection members ->
+            members |> List.forall (fun memberGeometry -> simple memberGeometry.Shape)
+            && if geographic then
+                   members |> List.map _.Shape |> allPairs (fun first second ->
+                       simpleMemberPair first second && not (geographicInteriorsIntersect first second))
+               else
+                   members |> List.map (fun memberGeometry -> memberGeometry.Shape, geometryToNts memberGeometry)
+                   |> allPairs (fun (firstShape, first) (secondShape, second) ->
+                       simpleMemberPair firstShape secondShape
+                       && not (planarPointSetsIntersect firstShape secondShape)
+                       && not (RelateNG.Relate(first, second, "T********")))
+
+    simple geometry.Shape
+
 let private subtractGeographicPolygonsFromLines referenceSystem srid lines polygons =
     match lines, polygons with
     | [], _
@@ -3443,7 +3568,7 @@ let private subtractGeographicPolygonsFromLines referenceSystem srid lines polyg
             | _ -> None)
 
 let private intersectGeographicCollectionWithPoints referenceSystem srid collection pointShape points =
-    let memberPoints, lines, polygons = geographicCollectionParts collection
+    let memberPoints, lines, polygons = collectionParts collection
     subtractGeographicPolygonsFromLines referenceSystem srid lines polygons
     |> Option.map (fun exterior ->
         let onLine = geographicLineworkCoversPoint referenceSystem exterior
@@ -3523,8 +3648,8 @@ let internal tryGeographicOverlay referenceSystem kind (first: Geometry) (second
 
         let unionAreas () =
             let collection, other = if leftCollection then left, right else right, left
-            let points, lines, polygons = geographicCollectionParts collection
-            let otherPoints, otherLines, otherPolygons = geographicCollectionParts other
+            let points, lines, polygons = collectionParts collection
+            let otherPoints, otherLines, otherPolygons = collectionParts other
             match polygons @ otherPolygons with
             | [] -> None
             | areas ->

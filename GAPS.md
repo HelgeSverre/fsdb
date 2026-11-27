@@ -668,6 +668,12 @@ planar checks distinguish single-point ring contacts from disconnected
 interiors. Geographic SQL results and `HEX(geometry)` emit longitude
 first. Raw big-endian validation results still differ.
 
+[`ST_IsSimple`](torture/findings/2026-11-27-spatial-simplicity.md) checks
+repeated coordinates, line intersections, and collection member
+interiors in audited Cartesian and geographic reference systems.
+Polygon simplicity follows MySQL's ring coordinate rules separately
+from validity.
+
 `CONVERT_TZ` and the session `time_zone` resolve numeric offsets, `SYSTEM`,
 and named zones populated in `mysql.time_zone*`. Leap-second-aware named zones
 (`Use_leap_seconds = Y`) remain unsupported.
