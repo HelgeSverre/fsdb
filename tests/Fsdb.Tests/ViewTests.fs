@@ -471,6 +471,52 @@ let tests =
               Expect.equal (run store "UPDATE writable_control SET n=11 WHERE id=1") (Affected 1UL)
                   "a direct writable projection still reaches the base"
 
+          testCase "materialized view targets are rejected during execution explanation and preparation"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE base(id INT PRIMARY KEY,n INT)"
+                    "INSERT INTO base VALUES(1,10),(2,20)"
+                    "CREATE TABLE aux(id INT PRIMARY KEY,tag INT)"
+                    "INSERT INTO aux VALUES(1,4),(2,5)"
+                    "CREATE ALGORITHM=TEMPTABLE VIEW middle AS SELECT id,n FROM base"
+                    "CREATE VIEW outer_v AS SELECT id AS k,n AS value FROM middle"
+                    "CREATE VIEW top_v AS SELECT k AS kid,value AS amount FROM outer_v"
+                    "CREATE VIEW mixed_v AS SELECT v.k,v.value,v.value*2 AS score,a.tag FROM outer_v v JOIN aux a ON a.id=v.k" ] do
+                  expectOk (run store sql) sql
+              let rejected operation target = 1288, $"The target table {target} of the {operation} is not updatable"
+              let insert = 1471, "The target table top_v of the INSERT is not insertable-into"
+              let root = Fsdb.Session.create 1 store
+              for sql, (code, message) in
+                  [ "UPDATE top_v AS v SET v.amount=40 WHERE v.kid=1", rejected "UPDATE" "v"
+                    "UPDATE top_v AS v SET v.missing=40 WHERE v.kid=1", rejected "UPDATE" "v"
+                    "UPDATE top_v AS v SET v.amount=40 WHERE v.missing=1", rejected "UPDATE" "v"
+                    "UPDATE top_v v JOIN aux a ON a.id=v.kid SET v.amount=40 WHERE a.id=1", rejected "UPDATE" "v"
+                    "UPDATE aux a JOIN top_v v ON a.id=v.kid SET amount=40,a.tag=10 WHERE a.id=1", rejected "UPDATE" "v"
+                    "UPDATE top_v v JOIN aux a ON a.id=v.kid SET v.missing=40 WHERE a.id=1",
+                    (1054, "Unknown column 'v.missing' in 'field list'")
+                    "UPDATE top_v v JOIN aux a ON a.id=v.kid SET v.amount=40 WHERE v.missing=1",
+                    (1054, "Unknown column 'v.missing' in 'where clause'")
+                    "UPDATE top_v v JOIN aux a ON a.id=v.kid SET v.missing=40 WHERE v.bad=1",
+                    (1054, "Unknown column 'v.bad' in 'where clause'")
+                    "UPDATE mixed_v SET value=40 WHERE k=1", rejected "UPDATE" "mixed_v"
+                    "UPDATE mixed_v m SET m.value=40 WHERE m.bad=1", (1054, "Unknown column 'm.bad' in 'where clause'")
+                    "UPDATE mixed_v m SET wrong.value=40 WHERE m.k=1", (1054, "Unknown column 'wrong.value' in 'field list'")
+                    "UPDATE mixed_v SET score=40 WHERE k=1", (1348, "Column 'score' is not updatable")
+                    "DELETE FROM top_v v WHERE v.kid=1", rejected "DELETE" "v"
+                    "INSERT INTO top_v VALUES(3,30)", insert
+                    "REPLACE INTO top_v VALUES(3,30)", insert ] do
+                  let expected = Err(code, message)
+                  Expect.equal (run store sql) expected sql
+                  Expect.equal (run store ("EXPLAIN " + sql)) expected ("EXPLAIN " + sql)
+                  Expect.equal (Fsdb.QueryHandler.prepareStatementForSession root sql) (Error(code, message)) ("prepare " + sql)
+              Expect.equal (run store "UPDATE top_v v JOIN aux a ON a.id=v.kid SET a.tag=v.amount WHERE a.id=1") (Affected 1UL)
+                  "a materialized view can still supply read-side values"
+              Expect.equal (run store "UPDATE mixed_v SET tag=40 WHERE k=2") (Affected 1UL)
+                  "the other component of the mixed view stays writable"
+              Expect.equal (rows store "SELECT id,n FROM base ORDER BY id") [ [ Some "1"; Some "10" ]; [ Some "2"; Some "20" ] ]
+                  "the materialized component never changes"
+
           testCase "joined DELETE maps nested view projections to distinct base rows"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

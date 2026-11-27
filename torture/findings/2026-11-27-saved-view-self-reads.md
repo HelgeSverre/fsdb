@@ -102,10 +102,29 @@ The pinned MySQL comparison confirmed matching execution error codes for
 those three statements in memory and with WAL. The checkpoint retained the
 original rows.
 
-Some diagnostic wording still differs for these writes. In the three-layer
-fixture, joined UPDATE reports 1146 instead of 1288. PREPARE can defer the
-rejection until EXECUTE, and PREPARE and EXPLAIN can report an outer binding
-error before the non-updatable error that MySQL returns.
+### Target errors before execution
+
+Execution, EXPLAIN, and PREPARE now reject the same audited targets. An
+UPDATE or DELETE through a materialized layer reports 1288 with the
+statement's target alias. INSERT and REPLACE both report the 1471
+insertability diagnostic. Joined UPDATE binds its join and WHERE before
+the assignment target. A single-table UPDATE of a materialized view
+rejects the target before checking its outer expressions.
+[MySQL UPDATE preparation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_update.cc#L1415-L1486).
+
+A mixed view can expose both materialized and writable columns.
+Assignments to a direct materialized column return 1288, and assignments
+to a computed projection return 1348. The physical component can still
+be updated using that same view.
+
+The replay against pinned MySQL improved from 29 to 120 matches across
+execution, EXPLAIN, and text preparation in both Fsdb storage modes.
+It covered nested aliases, both join directions, bare and qualified
+assignments, CTEs, INSERT SELECT, and binding errors. Another 15 checks
+matched after a view dependency was dropped. Six binary PREPARE
+diagnostics and the contended UPDATE matched, including after reopening
+the WAL-backed store. The rejected UPDATE returned before the held
+base-row lock timed out, and both base tables retained their rows.
 
 ## DELETE through computed projections
 

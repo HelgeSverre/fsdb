@@ -27728,16 +27728,140 @@ let private validateJoinedDeleteTargets store registry dbName (delete: DeleteStm
         | None -> Ok()
         | Some error -> probeMutationSources store registry dbName (Some delete.From) delete.Joins delete.Ctes |> Result.bind (fun () -> Error(Err error)))
 
+let private materializedViewWriteError store dbName statement =
+    let permanent = lazy (storeForStoredView store)
+    let rec materialized seen (view: StoredView) =
+        let key = view.Schema.ToLowerInvariant(), normalizeTableName view.Name
+        if Set.contains key seen || Set.count seen >= Limits.maxViewMetadataNesting then false
+        elif equalsIgnoreCase view.Algorithm "TEMPTABLE" then true
+        else
+            match parseStoredViewStatement view with
+            | Ok(Select { From = Some(FromTable source); Joins = []; Ctes = [] }) ->
+                let schema = source.Database |> Option.defaultValue view.Schema
+                tryStoredView permanent.Value schema source.Table
+                |> Option.exists (materialized (Set.add key seen))
+            | _ -> false
+
+    let findView fromStore defaultSchema (table: TableRef) =
+        let schema = table.Database |> Option.defaultValue defaultSchema
+        match Storage.tableSnapshot fromStore schema table.Table with
+        | Ok _ -> None
+        | Error _ -> tryStoredView fromStore schema table.Table
+
+    let materializedColumnError (view: StoredView) qualifier name =
+        tryUpdatableView store view.Schema view.Name
+        |> Option.bind (fun plan ->
+            let key = normalizeTableName name
+            if Map.containsKey key plan.Targets then None
+            else
+                let hasMaterializedInput owner =
+                    FromTable plan.UpdateFrom :: (plan.UpdateJoins |> List.map _.Table)
+                    |> List.collect FromItem.leaves
+                    |> List.exists (function
+                        | FromTable source when owner |> Option.forall (equalsIgnoreCase (source.Alias |> Option.defaultValue source.Table)) ->
+                            findView permanent.Value view.Schema source |> Option.exists (materialized Set.empty)
+                        | _ -> false)
+                match Map.tryFind key plan.Expressions with
+                | Some(QualifiedCol(owner, _)) when hasMaterializedInput (Some owner) ->
+                    Some(nonUpdatableTarget "UPDATE" qualifier)
+                | Some(Col _ | QualifiedCol _) | None -> None
+                | Some _ when hasMaterializedInput None -> Some(1348, $"Column '{name}' is not updatable")
+                | _ -> None)
+
+    let rec check = function
+        | Explain(_, inner) -> check inner
+        | Update update ->
+            let sources = FromTable update.From :: (update.Joins |> List.map _.Table) |> List.collect FromItem.leaves
+            let isCte (table: TableRef) =
+                table.Database.IsNone
+                && ((update.Ctes |> List.exists (fun cte -> equalsIgnoreCase cte.CteName table.Table))
+                    || Map.containsKey (normalizeTableName table.Table) (currentCteScope ()))
+            let views =
+                sources |> List.choose (function
+                    | FromTable source when not (isCte source) ->
+                        findView store dbName source |> Option.map (fun stored -> FromTable source, stored)
+                    | _ -> None)
+            let matchingViews source =
+                views |> List.tryPick (fun (item, view) -> if item = source then Some view else None)
+            let bindAssignment (assignment: Assignment) =
+                match assignment.Table, sources with
+                | _, [ source ] when update.Joins.IsEmpty -> Some source
+                | Some owner, _ ->
+                    sources |> List.filter (FromItem.tryQualifier >> Option.exists (equalsIgnoreCase owner)) |> List.tryExactlyOne
+                | None, _ ->
+                    sources
+                    |> List.filter (fun source ->
+                        selectSourceColumns store dbName source
+                        |> List.exists (Option.exists (fun column -> equalsIgnoreCase column.Name assignment.Column)))
+                    |> List.tryExactlyOne
+            if views.IsEmpty then None
+            else
+                update.Assignments
+                |> List.tryPick (fun assignment ->
+                    bindAssignment assignment
+                    |> Option.bind (fun source ->
+                        matchingViews source
+                        |> Option.bind (fun view ->
+                            FromItem.tryQualifier source
+                            |> Option.bind (fun qualifier ->
+                                let error = nonUpdatableTarget "UPDATE" qualifier
+                                if materialized Set.empty view then Some(error, not update.Joins.IsEmpty)
+                                else materializedColumnError view qualifier assignment.Column |> Option.map (fun error -> error, true)))))
+        | Delete { Source = SingleDeleteTable table } ->
+            findView store dbName table
+            |> Option.filter (materialized Set.empty)
+            |> Option.map (fun _ -> nonUpdatableTarget "DELETE" (table.Alias |> Option.defaultValue table.Table), false)
+        | Insert(target, _, _, _, _) | InsertSelect(target, _, _, _, _)
+        | Replace(target, _, _) | ReplaceSelect(target, _, _) | ReplaceSet(target, _) ->
+            let schema, name = splitQualified dbName target
+            tryStoredView store schema name
+            |> Option.filter (materialized Set.empty)
+            |> Option.map (fun _ -> (1471, $"The target table {name} of the INSERT is not insertable-into"), false)
+        | _ -> None
+    check statement
+
 let private rejectedViewWrite store registry dbName statement =
+    let rec bindJoinedAssignments = function
+        | Explain(_, inner) -> bindJoinedAssignments inner
+        | Update update ->
+            let fields =
+                update.Assignments |> List.map (fun assignment ->
+                    assignment.Table
+                    |> Option.map (fun owner -> QualifiedCol(owner, assignment.Column))
+                    |> Option.defaultValue (Col assignment.Column))
+            let query = mutationSourceQuery (Some(FromTable update.From)) update.Joins update.Ctes
+            let describe select =
+                match describeQueryColumnsCheckingFunctions dbName store registry dbName (QueryBody(PlainSelect select)) with
+                | Error(InvalidDescription error) -> Error error
+                | _ -> Ok()
+            // Multi-table UPDATE resolves its join and WHERE before targets.
+            describe { query [ Lit(VInt 1L) ] with Where = update.Where }
+            |> Result.bind (fun () -> describe (query fields))
+        | _ -> Ok()
+
+    let materialized = materializedViewWriteError store dbName statement
+    let probeInsertTarget target =
+        if materialized.IsNone then Ok()
+        else
+            let schema, name = splitQualified dbName target
+            let source = { Database = Some schema; Table = name; Alias = None; Partitions = []; IndexHints = [] }
+            probeMutationSources store registry dbName (Some(FromTable source)) [] []
+
     let rec probe = function
         | Explain(_, inner) -> probe inner
         | Update update -> probeMutationSources store registry dbName (Some(FromTable update.From)) update.Joins update.Ctes
-        | InsertSelect(_, _, select, _, _) | ReplaceSelect(_, _, select) ->
-            probeMutationSources store registry dbName select.From select.Joins select.Ctes
+        | Delete delete -> probeMutationSources store registry dbName (Some delete.From) delete.Joins delete.Ctes
+        | InsertSelect(target, _, select, _, _) | ReplaceSelect(target, _, select) ->
+            probeInsertTarget target
+            |> Result.bind (fun () -> probeMutationSources store registry dbName select.From select.Joins select.Ctes)
+        | Insert(target, _, _, _, _) | Replace(target, _, _) | ReplaceSet(target, _) -> probeInsertTarget target
         | _ -> Ok()
-    viewWriteMergeError store dbName statement
-    |> Option.map (fun error ->
-        match probe statement with
+    materialized |> Option.orElseWith (fun () -> viewWriteMergeError store dbName statement |> Option.map (fun error -> error, false))
+    |> Option.map (fun (error, bindAssignments) ->
+        let validated =
+            probe statement
+            |> Result.bind (fun () -> if bindAssignments then bindJoinedAssignments statement else Ok())
+        match validated with
         | Ok() -> Err error
         | Error sourceError -> sourceError)
 
@@ -31276,7 +31400,8 @@ let rec private standaloneSavedViewWriteError store registry dbName = function
 
 let internal skipsViewWriteLocks store registry dbName statement =
     withStatementViewMerge store dbName statement (fun () ->
-        (mutationSubqueryTargetError store registry dbName statement).IsSome
+        (materializedViewWriteError store dbName statement).IsSome
+        || (mutationSubqueryTargetError store registry dbName statement).IsSome
         || (standaloneSavedViewWriteError store registry dbName statement).IsSome
         || (disableHeuristicViewMerge.Value
             && (match statement with
