@@ -4845,6 +4845,40 @@ let tests =
                     [ Some "4"; Some "8" ]; [ Some "6"; Some "9" ] ]
                   "ignored writes leave the original rows intact"
 
+          testCase "ignored view checks run before generated IDs are allocated"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE ai(id INT AUTO_INCREMENT PRIMARY KEY,k INT UNIQUE,qty INT)"
+                    "CREATE VIEW checked_ai AS SELECT id,k,qty FROM ai WHERE qty>0 WITH CHECK OPTION"
+                    "CREATE TABLE zero_id(id INT AUTO_INCREMENT PRIMARY KEY,k INT UNIQUE)"
+                    "CREATE VIEW zero_before_insert AS SELECT id,k FROM zero_id WHERE id=0 WITH CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+              let rejected = "INSERT IGNORE INTO checked_ai(k,qty) VALUES(1,0),(2,0) ON DUPLICATE KEY UPDATE qty=9"
+              Expect.equal (run store rejected) (Affected 0UL) "all candidates fail before reserving IDs"
+              expectOk (run store "INSERT INTO checked_ai(k,qty) VALUES(3,7)") "insert after errors"
+              Expect.equal
+                  (run store "INSERT IGNORE INTO checked_ai(k,qty) VALUES(4,0),(5,6),(6,0),(7,7) ON DUPLICATE KEY UPDATE qty=9")
+                  (Affected 2UL) "mixed batch keeps two rows"
+              expectOk (run store "INSERT INTO checked_ai(k,qty) VALUES(8,7)") "insert after the batch reservation"
+              Expect.equal (rows store "SELECT id,k FROM ai ORDER BY id")
+                  [ [ Some "1"; Some "3" ]; [ Some "2"; Some "5" ]; [ Some "3"; Some "7" ]; [ Some "6"; Some "8" ] ]
+                  "generated IDs follow MySQL's first successful reservation"
+              expectOk (run store "TRUNCATE ai") "reset the auto-increment counter"
+              expectOk
+                  (run store "INSERT IGNORE INTO checked_ai VALUES(10,1,5),(NULL,2,5),(100,3,0),(NULL,4,5) ON DUPLICATE KEY UPDATE qty=9")
+                  "explicit IDs before the first generated row"
+              expectOk (run store "INSERT INTO checked_ai(k,qty) VALUES(5,5)") "insert after the mixed batch"
+              Expect.equal (rows store "SELECT id FROM ai ORDER BY id")
+                  [ [ Some "10" ]; [ Some "11" ]; [ Some "12" ]; [ Some "15" ] ]
+                  "the reservation starts after the accepted explicit ID and includes all VALUES tuples"
+              Expect.equal
+                  (run store "INSERT IGNORE INTO zero_before_insert(k) VALUES(1),(2) ON DUPLICATE KEY UPDATE k=9")
+                  (Affected 2UL) "both candidates have a zero ID when checked"
+              Expect.equal (rows store "SELECT id,k FROM zero_id ORDER BY id")
+                  [ [ Some "1"; Some "1" ]; [ Some "2"; Some "2" ] ]
+                  "stored rows receive generated IDs after the check"
+
           testCase "writable views do not expose unprojected base columns"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

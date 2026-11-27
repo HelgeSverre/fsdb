@@ -32184,6 +32184,7 @@ let rec private executeAsWithViewSources
         (sourceBindings: (Expr * ColumnDef option * Value) list array)
         (onDuplicateUpdate: (string * Expr) list)
         ignoreDuplicates
+        valuesCount
         =
         match scan store db table with
         | Error e -> ids, storageErr e
@@ -32205,6 +32206,10 @@ let rec private executeAsWithViewSources
 
                 let checkScope = viewCheckForTarget s db table
                 let ignoreViewCheck = ignoreDuplicates && checkScope.IsSome
+                let checkedAllocation =
+                    valuesCount
+                    |> Option.filter (fun _ -> ignoreViewCheck && (tableColumns |> List.exists _.AutoIncrement))
+                    |> Option.map (fun count -> count, computeGeneratedRow s registry db table tableColumns)
                 let applyUpdate ordinal existing candidate =
                     match checkScope with
                     | Some scope when scope.JoinCheck.IsSome ->
@@ -32219,26 +32224,36 @@ let rec private executeAsWithViewSources
                     |> Option.map (fun _ -> fun existing -> validateViewCandidate s db table tableColumns (Some existing))
 
                 if not (Storage.dynamicWriteRebaseActive s) then
+                    let allocation =
+                        checkedAllocation
+                        |> Option.map AllocateAfterViewCheck
+                        |> Option.defaultValue StandardAllocation
                     upsertRowsWithOrdinalChecked
-                        s db table cols (List.map Ok rowsValues) prepare applyUpdate checkChangedRow (Some coercedAssignments) foundRows ignoreViewCheck
+                        s db table cols (List.map Ok rowsValues) prepare applyUpdate checkChangedRow (Some coercedAssignments) foundRows ignoreViewCheck allocation
                 else
-                    rowsValues
-                    |> List.indexed
-                    |> traverse (fun (ordinal, values) ->
-                        Diagnostics.withRowNumber (ordinal + 1) (fun () ->
-                            Storage.prepareInsertCandidate
-                                s
-                                db
-                                table
-                                cols
-                                values
-                                prepare
-                            |> function
-                                | Error error when ignoreViewCheck && Storage.isViewCheckError error -> Ok(ordinal, Error error)
-                                | result -> result |> Result.map (fun candidate -> ordinal, Ok candidate)))
-                    |> Result.bind (fun preparedRows ->
-                        let prepared = Array.ofList preparedRows
-                        let candidates = prepared |> Array.toList |> List.map (snd >> Result.map _.Values)
+                    let preparation =
+                        match checkedAllocation with
+                        | Some(count, finish) -> Storage.checkedUpsertPreparation s db table cols count prepare finish
+                        | None -> Ok(fun values -> Storage.prepareInsertCandidate s db table cols values prepare)
+                    preparation
+                    |> Result.bind (fun prepareCandidate ->
+                        rowsValues
+                        |> List.indexed
+                        |> traverse (fun (ordinal, values) ->
+                            Diagnostics.withRowNumber (ordinal + 1) (fun () ->
+                                match prepareCandidate values with
+                                | Error error when ignoreViewCheck && Storage.isViewCheckError error -> Ok(Error error)
+                                | result -> Result.map Ok result)))
+                    |> Result.bind (fun prepared ->
+                        let candidates = prepared |> List.map (Result.map _.Values)
+                        let allocation =
+                            match checkedAllocation with
+                            | None -> StandardAllocation
+                            | Some _ ->
+                                prepared
+                                |> List.choose (Result.toOption >> Option.map _.NextAutoId)
+                                |> List.fold max 0L
+                                |> PreparedAllocation
 
                         Storage.acquirePreparedInsertWriteTargets s db table (candidates |> List.choose Result.toOption)
 
@@ -32249,15 +32264,16 @@ let rec private executeAsWithViewSources
                             None
                             (candidates |> List.map (Result.map Array.toList))
                             (fun _ row -> Ok row)
-                            (fun ordinal existing row -> applyUpdate (fst prepared.[ordinal]) existing row)
+                            applyUpdate
                             checkChangedRow
                             (Some coercedAssignments)
                             foundRows
                             ignoreViewCheck
+                            allocation
                         |> Result.map (fun outcome ->
                             let generatedId =
                                 prepared
-                                |> Array.tryPick (fun (_, result) ->
+                                |> List.tryPick (fun result ->
                                     result |> Result.toOption
                                     |> Option.bind (fun candidate ->
                                         if outcome.InsertedRows |> List.exists ((=) candidate.Values) then candidate.GeneratedId
@@ -34319,7 +34335,7 @@ let rec private executeAsWithViewSources
                                 ignoreDuplicates)
                 else
                     Storage.withPermissiveIndexExpressions ignoreDuplicates (fun () ->
-                        upsertEvaluated db table cols rowsValues (Array.create rowsValues.Length []) onDuplicateUpdate ignoreDuplicates)
+                        upsertEvaluated db table cols rowsValues (Array.create rowsValues.Length []) onDuplicateUpdate ignoreDuplicates (Some(int64 rowsValues.Length)))
 
     | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) when isStoredView store dbName table ->
         let viewDb, viewName = splitQualified dbName table
@@ -34396,7 +34412,7 @@ let rec private executeAsWithViewSources
                                     ignoreDuplicates)
                     else
                         Storage.withPermissiveIndexExpressions ignoreDuplicates (fun () ->
-                            upsertEvaluated db table cols rowsValues sourceBindings onDuplicateUpdate ignoreDuplicates)
+                            upsertEvaluated db table cols rowsValues sourceBindings onDuplicateUpdate ignoreDuplicates None)
 
     | Replace(table, columns, rowsExprs) when isStoredView store dbName table ->
         let viewDb, viewName = splitQualified dbName table

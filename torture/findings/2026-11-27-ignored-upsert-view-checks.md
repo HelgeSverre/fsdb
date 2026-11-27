@@ -18,8 +18,7 @@ rows, warnings, table contents, and transaction rollback. Each
 eight-row batch varied the input keys and quantities and used
 either LOCAL or CASCADED CHECK OPTION.
 
-After a two-row batch with generated keys was entirely rejected,
-the next successful insert received ID 1 in MySQL and ID 3 in both
-Fsdb modes. The fixture uses explicit primary keys. Deprecation
-warnings for `VALUES(column)` can also be reported twice when
-Fsdb rewrites a view insert.
+The fixture uses explicit primary keys. A [follow-up audit](2026-11-27-checked-upsert-auto-ids.md)
+covers generated IDs and fixes the reservation made by an entirely
+rejected VALUES batch. Deprecation warnings for `VALUES(column)`
+can still appear twice when Fsdb rewrites a view insert.

@@ -1522,6 +1522,36 @@ let tests =
                   | other -> failtestf "expected the burned id to remain unavailable, got %A" other
               | _, other -> failtestf "expected the post-recovery insert, got %A" other
 
+          testCase "WAL recovery retains the reserved IDs of checked view upserts"
+          <| fun _ ->
+              for transactionEnd, expectedRows in
+                  [ None, [ [ Some "1"; Some "2" ]; [ Some "3"; Some "3" ] ]
+                    Some "COMMIT", [ [ Some "1"; Some "2" ]; [ Some "3"; Some "3" ] ]
+                    Some "ROLLBACK", [ [ Some "3"; Some "3" ] ] ] do
+                  let dir = tempDataDir ()
+                  let store = load dir
+                  attach dir store
+                  let execute session sql =
+                      let next, result = handle session sql
+                      match result with
+                      | Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                      | _ -> next
+
+                  let setup =
+                      Fsdb.Session.create 1 store
+                      |> fun s -> execute s "CREATE TABLE slots(id INT AUTO_INCREMENT PRIMARY KEY,k INT UNIQUE,qty INT)"
+                      |> fun s -> execute s "CREATE VIEW checked_slots AS SELECT id,k,qty FROM slots WHERE qty>0 WITH CHECK OPTION"
+                  let session = if transactionEnd.IsSome then execute setup "BEGIN" else setup
+                  let written =
+                      execute session "INSERT IGNORE INTO checked_slots(k,qty) VALUES(1,0),(2,6) ON DUPLICATE KEY UPDATE qty=9"
+                  transactionEnd |> Option.iter (fun command -> execute written command |> ignore)
+
+                  let recovered = Fsdb.Session.create 2 (load dir)
+                  let recovered = execute recovered "INSERT INTO checked_slots(k,qty) VALUES(3,7)"
+                  match handle recovered "SELECT id,k FROM slots ORDER BY id" |> snd with
+                  | ResultSet(_, actualRows) -> Expect.equal actualRows expectedRows (sprintf "recovery after %A" transactionEnd)
+                  | other -> failtestf "expected the recovered rows, got %A" other
+
           testCase "a torn WAL record doesn't poison future appends: writes after a kill -9 restart still survive a second restart"
           <| fun _ ->
               let dir = tempDataDir ()

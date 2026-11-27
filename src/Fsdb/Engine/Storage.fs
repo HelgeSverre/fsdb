@@ -10564,7 +10564,8 @@ let private generatedAutoValueCount
                 if generatesAutoValue mode generateAutoOnZero column values.[index] then 1L else 0L
             | Some _ -> 1L)
 
-let private processRow
+let private processRowWithAutoPolicy
+    (deferGeneratedId: bool)
     (mode: TemporalCoercionMode)
     (generateAutoOnZero: bool)
     (nextAutoId: int64)
@@ -10576,7 +10577,10 @@ let private processRow
         if value = Int64.MaxValue then Int64.MaxValue else max current (value + 1L)
 
     let generate valuesRev =
-        Ok(VInt nextAutoId :: valuesRev, nextAutoId + 1L, Some(true, nextAutoId))
+        if deferGeneratedId then
+            Ok(VInt 0L :: valuesRev, nextAutoId, Some(true, 0L))
+        else
+            Ok(VInt nextAutoId :: valuesRev, nextAutoId + 1L, Some(true, nextAutoId))
 
     let step acc (index: int, col: ColumnDef, provided: Value option) =
         match acc with
@@ -10628,6 +10632,39 @@ let private processRow
     |> Result.map (fun (valuesRev, nextAutoId, assignedId) ->
         let omitted = rawRow |> List.indexed |> List.choose (fun (index, value) -> if value.IsNone then Some index else None) |> Set.ofList
         List.rev valuesRev, nextAutoId, assignedId, omitted)
+
+let private processRow = processRowWithAutoPolicy false
+
+let private upsertBatchReservation store database (table: Table) count =
+    let reserve = reserveAutoIncrementRange store database table.OriginalName
+    let mutable range = None
+    let reserveBatch minimum =
+        match range with
+        | Some reserved -> reserved
+        | None ->
+            let reserved = reserve minimum count
+            range <- Some reserved
+            reserved
+    let allocate minimum =
+        let first, upper = reserveBatch minimum
+        let next = max first minimum
+        if next < upper then next else reserve next 1L |> fst
+    let reservedUpper () = range |> Option.map snd |> Option.defaultValue table.NextAutoId
+    reserveBatch, allocate, reservedUpper
+
+/// CHECK OPTION sees the row before the engine generates its auto-increment ID.
+let private prepareCheckedUpsertRow mode generateAutoOnZero next raw (table: Table) autoIndex allocate prepare finish =
+    processRowWithAutoPolicy true mode generateAutoOnZero next raw table.Columns Set.empty
+    |> Result.bind (fun (values, nextId, assigned, omitted) ->
+        prepare omitted (Array.ofList values)
+        |> Result.bind (fun (candidate: Value[]) ->
+            match assigned with
+            | Some(true, _) ->
+                let id = allocate nextId
+                candidate.[autoIndex] <- VInt id
+                let next = if id = Int64.MaxValue then id else id + 1L
+                finish candidate |> Result.map (fun row -> row, next, Some(true, id))
+            | _ -> Ok(candidate, nextId, assigned)))
 
 let private finalizePreparedAutoValue
     (mode: TemporalCoercionMode)
@@ -10760,6 +10797,29 @@ let internal prepareInsertCandidate store dbName tableName columns values prepar
 
 let internal prepareInsertCandidateWithDeferred store dbName tableName columns values deferred prepare finish =
     prepareInsertCandidateCore store dbName tableName columns values deferred prepare finish
+
+/// The transaction path evaluates each candidate once before taking write locks.
+let internal checkedUpsertPreparation store dbName tableName columns valuesCount prepare finish =
+    match tableAt store dbName tableName with
+    | None -> Error(NoSuchTable(dbName, tableName))
+    | Some table ->
+        resolveInsertColumns table columns
+        |> Result.map (fun indices ->
+            match table.Columns |> List.tryFindIndex _.AutoIncrement with
+            | None -> fun values -> prepareInsertCandidate store dbName tableName columns values prepare
+            | Some autoIndex ->
+                let mode = temporalCoercionMode store
+                let generateAutoOnZero = not store.ExecutionSettings.SqlMode.NoAutoValueOnZero
+                let _, allocate, reservedUpper = upsertBatchReservation store dbName table valuesCount
+                let mutable next = table.NextAutoId
+                fun values ->
+                    alignInsertValues table.Columns indices values
+                    |> Result.bind (fun raw -> prepareCheckedUpsertRow mode generateAutoOnZero next raw table autoIndex allocate prepare finish)
+                    |> Result.map (fun (candidate, nextId, assigned) ->
+                        next <- nextId
+                        let nextAutoId = max nextId (reservedUpper ())
+                        advanceAutoIncrementCounter store dbName tableName nextAutoId
+                        { Values = candidate; NextAutoId = nextAutoId; AssignedAutoId = assigned }))
 
 /// Finds every live row a prepared REPLACE candidate displaces.
 let internal replaceConflictRows
@@ -11499,12 +11559,18 @@ and private cascadeUpdateVisitedFrom
 
         referencingForeignKeys catalog parent |> List.fold checkOne (Ok(catalog, visited, changes))
 
+type internal UpsertAllocation =
+    | StandardAllocation
+    | AllocateAfterViewCheck of valuesCount: int64 * finish: (Value[] -> Result<Value[], StorageError>)
+    | PreparedAllocation of nextId: int64
+
 type private UpsertSummary =
     { LastInsertId: int64
       GeneratedId: int64 option
       Affected: int
       InsertedRows: Value[] list
-      UpdatedRows: RowUpdate list }
+      UpdatedRows: RowUpdate list
+      AutoIncrementAdvance: int64 option }
 
 type private UpsertBatchState =
     { NextAutoId: int64
@@ -11559,7 +11625,7 @@ and upsertRowsWithOrdinal
     (assignedColumns: Set<int> option)
     (foundRows: bool)
     : Result<InsertOutcome, StorageError> =
-    upsertRowsWithOrdinalChecked store dbName tableName columns (List.map Ok rowsIn) prepare applyUpdate None assignedColumns foundRows false
+    upsertRowsWithOrdinalChecked store dbName tableName columns (List.map Ok rowsIn) prepare applyUpdate None assignedColumns foundRows false StandardAllocation
 
 and internal upsertRowsWithOrdinalChecked
     (store: Store)
@@ -11573,6 +11639,7 @@ and internal upsertRowsWithOrdinalChecked
     (assignedColumns: Set<int> option)
     (foundRows: bool)
     (ignoreViewCheck: bool)
+    (allocation: UpsertAllocation)
     : Result<InsertOutcome, StorageError> =
         let key = normalizeTableName tableName
 
@@ -11587,6 +11654,9 @@ and internal upsertRowsWithOrdinalChecked
               if not summary.UpdatedRows.IsEmpty then
                   RowsUpdatedById(dbName, tableName, summary.UpdatedRows)
 
+              for nextId in Option.toList summary.AutoIncrementAdvance do
+                  AutoIncrementAdvanced(dbName, tableName, nextId)
+
               for KeyValue(address, changes) in cascaded do
                   if not changes.IsEmpty then
                       let database, table = catalogTableIdentity catalog address
@@ -11597,7 +11667,7 @@ and internal upsertRowsWithOrdinalChecked
                 virtualWriteGuard store dbName tableName
                 |> Result.bind (fun () -> tryGetTable dbName db tableName)
                 |> Result.bind (fun table ->
-                    upsertRowsInTable store dbName catalog key table columns rowsIn prepare applyUpdate checkChangedRow assignedColumns foundRows ignoreViewCheck)
+                    upsertRowsInTable store dbName catalog key table columns rowsIn prepare applyUpdate checkChangedRow assignedColumns foundRows ignoreViewCheck allocation)
                 |> Result.map (fun (catalog', cascaded, summary) -> catalog', (summary, cascaded, catalog)))
 
         let result =
@@ -11635,6 +11705,7 @@ and private upsertRowsInTable
     (assignedColumns: Set<int> option)
     (foundRows: bool)
     (ignoreViewCheck: bool)
+    (allocation: UpsertAllocation)
     : Result<Catalog * Map<TableAddress, RowUpdate list> * UpsertSummary, StorageError> =
                 let checkFks = store.ForeignKeyChecks
 
@@ -11647,9 +11718,27 @@ and private upsertRowsInTable
                 |> Result.bind (fun idxs ->
                     let mode = temporalCoercionMode store
                     let generateAutoOnZero = not store.ExecutionSettings.SqlMode.NoAutoValueOnZero
-                    let reservationCount = generatedAutoValueCount mode generateAutoOnZero table idxs Set.empty (rowsIn |> List.choose Result.toOption)
-                    let firstReserved, reservedAutoNext =
-                        reserveAutoIncrementRange store dbName table.OriginalName table.NextAutoId reservationCount
+                    let reservationCount =
+                        match allocation with
+                        | AllocateAfterViewCheck(valuesCount, _) -> valuesCount
+                        | _ -> generatedAutoValueCount mode generateAutoOnZero table idxs Set.empty (rowsIn |> List.choose Result.toOption)
+                    let reserveBatch, allocate, reservedUpper = upsertBatchReservation store dbName table reservationCount
+                    let deferredAuto =
+                        match allocation with
+                        | AllocateAfterViewCheck(_, finish) ->
+                            table.Columns |> List.tryFindIndex _.AutoIncrement |> Option.map (fun index -> index, finish)
+                        | _ -> None
+                    let firstAutoId = if deferredAuto.IsSome then table.NextAutoId else reserveBatch table.NextAutoId |> fst
+
+                    let prepareRow next raw =
+                        match deferredAuto with
+                        | Some(index, finish) ->
+                            prepareCheckedUpsertRow mode generateAutoOnZero next raw table index allocate prepare finish
+                        | None ->
+                            processRow mode generateAutoOnZero next raw table.Columns Set.empty
+                            |> Result.bind (fun (values, nextId, assigned, omitted) ->
+                                prepare omitted (Array.ofList values)
+                                |> Result.map (fun candidate -> candidate, nextId, assigned))
                     let uniqueGroups = uniqueKeyGroups table
                     let secondaryGroups = secondaryKeyGroups table
 
@@ -11669,21 +11758,11 @@ and private upsertRowsInTable
                         |> Result.bind (fun state ->
                             rowValues
                             |> Result.bind (alignInsertValues table.Columns idxs)
-                            |> Result.bind (fun rawRow ->
-                                    processRow
-                                        mode
-                                        generateAutoOnZero
-                                        state.NextAutoId
-                                        rawRow
-                                        table.Columns
-                                        Set.empty
-                                    |> Result.bind (fun (finalValues, nextAutoId', assigned, omitted) ->
-                                        // Generated unique keys must be computed before
-                                        // duplicate lookup.
-                                        prepare omitted (Array.ofList finalValues)
-                                        |> Result.map (fun candidate -> candidate, findMatch state.UniqueIndex candidate)
-                                        |> Result.bind (function
-                                            | candidate, Some(pos, existing) ->
+                            |> Result.bind (prepareRow state.NextAutoId)
+                            |> Result.bind (fun (candidate, nextAutoId', assigned) ->
+                                        // The candidate's generated keys are ready for duplicate lookup.
+                                        match findMatch state.UniqueIndex candidate with
+                                            | Some(pos, existing) ->
                                                 applyUpdate ordinal existing candidate
                                                 |> Result.bind (coerceMutationRow (temporalCoercionMode store) table.Columns assignedColumns existing)
                                                 |> Result.bind (fun applied ->
@@ -11750,7 +11829,7 @@ and private upsertRowsInTable
                                                             Catalog = cascadeCatalog'
                                                             Visited = visited'
                                                             Cascaded = cascaded' }))
-                                            | candidate, None ->
+                                            | None ->
                                                 (if checkFks then
                                                      let currentDatabase = tryCatalogDatabase dbName state.Catalog |> Option.get
                                                      checkFkParents state.Catalog dbName currentDatabase table None candidate
@@ -11784,7 +11863,7 @@ and private upsertRowsInTable
                                                         InsertedRev = candidate :: state.InsertedRev
                                                         UniqueIndex = uniqueIndex
                                                         SecondaryIndex = secondaryIndex
-                                                        SecondaryOrder = secondaryOrder }))))
+                                                        SecondaryOrder = secondaryOrder }))
                             |> function
                                 | Error error when ignoreViewCheck && isViewCheckError error ->
                                     let code, message = toMySqlError error
@@ -11797,7 +11876,7 @@ and private upsertRowsInTable
                     |> foldWithCancellation
                         step
                         (Ok
-                            { NextAutoId = firstReserved
+                            { NextAutoId = firstAutoId
                               FirstGeneratedId = None
                               LastExplicitId = None
                               Affected = 0
@@ -11811,8 +11890,17 @@ and private upsertRowsInTable
                               Cascaded = Map.empty })
                     |> Result.map (fun state ->
                         let finalRows = rows.DrainToImmutable()
-                        let nextAutoId = max state.NextAutoId reservedAutoNext
+                        let preparedAutoNext =
+                            match allocation with
+                            | PreparedAllocation nextId -> nextId
+                            | _ -> table.NextAutoId
+                        let nextAutoId = max state.NextAutoId (max (reservedUpper ()) preparedAutoNext)
                         advanceAutoIncrementCounter store dbName table.OriginalName nextAutoId
+                        let autoIncrementAdvance =
+                            match allocation with
+                            | StandardAllocation -> None
+                            | _ when nextAutoId > table.NextAutoId -> Some nextAutoId
+                            | _ -> None
 
                         let updatedTable =
                             publishRows table
@@ -11832,7 +11920,8 @@ and private upsertRowsInTable
                           GeneratedId = state.FirstGeneratedId
                           Affected = state.Affected
                           InsertedRows = List.rev state.InsertedRev
-                          UpdatedRows = List.rev state.UpdatedRev }))
+                          UpdatedRows = List.rev state.UpdatedRev
+                          AutoIncrementAdvance = autoIncrementAdvance }))
 
 /// Deletes `toDelete` (rows already known to belong to `tableKey`, e.g. from
 /// `deleteRows`'s WHERE match) from `db`, applying every other table's
