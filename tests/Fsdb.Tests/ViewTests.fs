@@ -4910,6 +4910,111 @@ let tests =
                   ([ 1; 2; 3; 4; 5; 100; 101; 102 ] |> List.map (fun id -> [ Some(string id) ]))
                   "the new interval uses the previous interval's remaining attempt budget"
 
+          testCase "checked upserts reuse the generated ID after a secondary-key duplicate"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let mutable session = Fsdb.Session.create 1 store
+              let runSql sql =
+                  let current, result = Fsdb.QueryHandler.handle session sql
+                  session <- current
+                  result
+
+              for sql in
+                  [ "CREATE TABLE ai(id INT AUTO_INCREMENT PRIMARY KEY,k INT UNIQUE,qty INT)"
+                    "CREATE VIEW checked_ai AS SELECT id,k,qty FROM ai WHERE qty>0 WITH CHECK OPTION"
+                    "CREATE TABLE incoming(k INT PRIMARY KEY,qty INT)"
+                    "INSERT INTO incoming VALUES(1,5),(2,5),(3,0),(4,5)" ] do
+                  expectOk (runSql sql) sql
+
+              let checkIds expected =
+                  match runSql "SELECT id,k FROM ai ORDER BY id" with
+                  | ResultSet(_, actual) ->
+                      let wanted = expected |> List.map (fun (id, k) -> [ Some(string id); Some(string k) ])
+                      Expect.equal actual wanted "generated and explicit IDs"
+                  | other -> failtestf "expected rows, got %A" other
+
+              for input, inTransaction in
+                  [ "VALUES(1,5),(2,5),(3,0),(4,5)", false
+                    "SELECT k,qty FROM incoming ORDER BY k", true ] do
+                  expectOk (runSql "TRUNCATE ai") "reset the target"
+                  expectOk (runSql "INSERT INTO ai VALUES(1,1,5)") "seed duplicate"
+                  if inTransaction then expectOk (runSql "BEGIN") "begin transaction"
+                  let sql = sprintf "INSERT IGNORE INTO checked_ai(k,qty) %s ON DUPLICATE KEY UPDATE qty=9" input
+                  Expect.equal (runSql sql) (Affected 4UL) "one duplicate update and two inserts"
+                  checkIds [ 1, 1; 2, 2; 3, 4 ]
+                  if inTransaction then expectOk (runSql "COMMIT") "commit transaction"
+                  expectOk (runSql "INSERT INTO ai(k,qty) VALUES(9,5)") "insert after the reserved range"
+                  checkIds [ 1, 1; 2, 2; 3, 4; (if inTransaction then 5 else 6), 9 ]
+
+              for assignment, expected in
+                  [ "qty=0", [ 1, 1; 2, 2; 3, 3 ]
+                    "id=id+1", [ 2, 1; 3, 2; 4, 3 ]
+                    "id=20", [ 2, 2; 3, 3; 20, 1 ] ] do
+                  expectOk (runSql "TRUNCATE ai") "reset the target"
+                  expectOk (runSql "INSERT INTO ai VALUES(1,1,5)") "seed duplicate"
+                  expectOk (runSql "BEGIN") "begin transaction"
+                  let sql = sprintf "INSERT IGNORE INTO checked_ai(k,qty) VALUES(1,5),(2,5),(3,5) ON DUPLICATE KEY UPDATE %s" assignment
+                  expectOk (runSql sql) assignment
+                  checkIds expected
+                  expectOk (runSql "COMMIT") "publish the update"
+                  if assignment = "id=20" then
+                      expectOk (runSql "INSERT INTO ai(k,qty) VALUES(9,5)") "insert above the explicit update"
+                      checkIds (expected @ [ 21, 9 ])
+
+              expectOk (runSql "TRUNCATE ai") "reset the target"
+              expectOk (runSql "INSERT INTO ai VALUES(1,1,5)") "seed duplicate"
+              Expect.equal
+                  (runSql "INSERT IGNORE INTO checked_ai(k,qty) VALUES(1,5),(2,5),(3,5) ON DUPLICATE KEY UPDATE id=3")
+                  (Err(1869, "Auto-increment value in UPDATE conflicts with internally generated values"))
+                  "a different reserved ID aborts even under IGNORE"
+              checkIds [ 1, 1 ]
+              expectOk (runSql "TRUNCATE ai") "reset the target"
+              expectOk (runSql "INSERT INTO ai VALUES(1,1,5)") "seed duplicate"
+              expectOk (runSql "BEGIN") "begin transaction"
+              Expect.equal
+                  (runSql "INSERT IGNORE INTO checked_ai(k,qty) VALUES(2,5),(1,5),(3,5) ON DUPLICATE KEY UPDATE id=4")
+                  (Err(1869, "Auto-increment value in UPDATE conflicts with internally generated values"))
+                  "a conflict rolls back earlier writes in the same statement"
+              checkIds [ 1, 1 ]
+              expectOk (runSql "COMMIT") "the transaction can still commit"
+              checkIds [ 1, 1 ]
+              expectOk (runSql "INSERT INTO ai(k,qty) VALUES(90,5)") "reserve past the failed statement"
+              checkIds [ 1, 1; 5, 90 ]
+
+          testCase "checked upsert reuses an ID after a concurrent secondary-key insert"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              for sql in
+                  [ "CREATE TABLE ai(id INT AUTO_INCREMENT PRIMARY KEY,k INT UNIQUE,qty INT)"
+                    "CREATE VIEW checked_ai AS SELECT id,k,qty FROM ai WHERE qty>0 WITH CHECK OPTION" ] do
+                  expectOk (run store sql) sql
+
+              let handle = Fsdb.QueryHandler.handle
+              let waiter, began = handle (Fsdb.Session.create 1 store) "START TRANSACTION"
+              expectOk began "begin waiter transaction"
+              let waiter, _ = handle waiter "SELECT k FROM ai"
+              let owner, began = handle (Fsdb.Session.create 2 store) "START TRANSACTION"
+              expectOk began "begin owner transaction"
+              let owner, inserted = handle owner "INSERT INTO ai VALUES(1,2,7)"
+              Expect.equal inserted (Affected 1UL) "the owner holds the incoming duplicate key"
+
+              use started = new ManualResetEventSlim()
+              let waiting =
+                  Task.Run(fun () ->
+                      started.Set()
+                      handle waiter "INSERT IGNORE INTO checked_ai(k,qty) VALUES(2,5),(3,5) ON DUPLICATE KEY UPDATE qty=qty+1")
+              Expect.isTrue (started.Wait 5000) "the upsert starts"
+              let blocked = not (waiting.Wait 100)
+              expectOk (handle owner "COMMIT" |> snd) "publish the new duplicate key"
+              Expect.isTrue blocked "the candidate waits for the pending key"
+              Expect.isTrue (waiting.Wait 5000) "the upsert resumes"
+              let waiter, result = waiting.GetAwaiter().GetResult()
+              Expect.equal result (Affected 3UL) "the rebased candidate updates a duplicate"
+              expectOk (handle waiter "COMMIT" |> snd) "publish the reused ID"
+              Expect.equal (rows store "SELECT id,k,qty FROM ai ORDER BY id")
+                  [ [ Some "1"; Some "2"; Some "8" ]; [ Some "2"; Some "3"; Some "5" ] ]
+                  "the next candidate gets the released ID"
+
           testCase "writable views do not expose unprojected base columns"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

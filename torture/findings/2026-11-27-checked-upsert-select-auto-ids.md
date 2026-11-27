@@ -24,5 +24,5 @@ reopens the database without a checkpoint after autocommit, explicit
 commit, and rollback.
 [SQL fixture](2026-11-27-checked-upsert-select-auto-ids.sql)
 
-Reuse of the generated candidate ID following a secondary-key duplicate
-remains open. [Duplicate-key example](2026-11-27-checked-upsert-auto-ids.md)
+The [candidate ID reuse follow-up](2026-11-27-checked-upsert-reused-auto-ids.md)
+covers secondary-key duplicates in both input forms.

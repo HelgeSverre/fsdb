@@ -32224,37 +32224,34 @@ let rec private executeAsWithViewSources
                     |> Option.filter (fun scope -> scope.CheckPredicate.IsSome)
                     |> Option.map (fun _ -> fun existing -> validateViewCandidate s db table tableColumns (Some existing))
 
-                if not (Storage.dynamicWriteRebaseActive s) then
+                let assignsAuto =
+                    tableColumns
+                    |> List.exists (fun column ->
+                        column.AutoIncrement
+                        && (onDuplicateUpdate |> List.exists (fun (name, _) -> equalsIgnoreCase name column.Name)))
+
+                match Storage.dynamicWriteRebaseActive s, finishGenerated with
+                | true, Some finish ->
+                    Storage.upsertCheckedRowsDynamically
+                        s db table cols rowsValues input prepare finish applyUpdate checkChangedRow
+                        (Some coercedAssignments) assignsAuto foundRows
+                | false, _ ->
                     let allocation =
                         finishGenerated
-                        |> Option.map (fun finish -> AllocateAfterViewCheck(input, finish))
+                        |> Option.map (fun finish -> AllocateAfterViewCheck(input, finish, assignsAuto))
                         |> Option.defaultValue StandardAllocation
                     upsertRowsWithOrdinalChecked
                         s db table cols (List.map Ok rowsValues) prepare applyUpdate checkChangedRow (Some coercedAssignments) foundRows ignoreViewCheck allocation
-                else
-                    let preparation =
-                        match finishGenerated with
-                        | Some finish -> Storage.checkedUpsertPreparation s db table cols input prepare finish
-                        | None -> Ok(fun values -> Storage.prepareInsertCandidate s db table cols values prepare)
-                    preparation
-                    |> Result.bind (fun prepareCandidate ->
-                        rowsValues
-                        |> List.indexed
-                        |> traverse (fun (ordinal, values) ->
-                            Diagnostics.withRowNumber (ordinal + 1) (fun () ->
-                                match prepareCandidate values with
-                                | Error error when ignoreViewCheck && Storage.isViewCheckError error -> Ok(Error error)
-                                | result -> Result.map Ok result)))
+                | true, None ->
+                    rowsValues
+                    |> List.indexed
+                    |> traverse (fun (ordinal, values) ->
+                        Diagnostics.withRowNumber (ordinal + 1) (fun () ->
+                            match Storage.prepareInsertCandidate s db table cols values prepare with
+                            | Error error when ignoreViewCheck && Storage.isViewCheckError error -> Ok(Error error)
+                            | result -> Result.map Ok result))
                     |> Result.bind (fun prepared ->
                         let candidates = prepared |> List.map (Result.map _.Values)
-                        let allocation =
-                            match finishGenerated with
-                            | None -> StandardAllocation
-                            | Some _ ->
-                                prepared
-                                |> List.choose (Result.toOption >> Option.map _.NextAutoId)
-                                |> List.fold max 0L
-                                |> PreparedAllocation
 
                         Storage.acquirePreparedInsertWriteTargets s db table (candidates |> List.choose Result.toOption)
 
@@ -32270,7 +32267,7 @@ let rec private executeAsWithViewSources
                             (Some coercedAssignments)
                             foundRows
                             ignoreViewCheck
-                            allocation
+                            StandardAllocation
                         |> Result.map (fun outcome ->
                             let generatedId =
                                 prepared

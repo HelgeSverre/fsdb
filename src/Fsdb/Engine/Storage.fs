@@ -10639,9 +10639,10 @@ type internal UpsertInput =
     | ValuesBatch of count: int64
     | SelectedRows
 
-type private CheckedUpsertReservation =
+type internal CheckedUpsertReservation =
     { Allocate: int64 -> int64
       CountCandidate: unit -> unit
+      Contains: int64 -> bool
       Upper: unit -> int64 }
 
 let private checkedUpsertReservation store database (table: Table) input =
@@ -10671,6 +10672,7 @@ let private checkedUpsertReservation store database (table: Table) input =
 
     { Allocate = allocate
       CountCandidate = fun () -> remainingAttempts <- max 0L (remainingAttempts - 1L)
+      Contains = fun id -> range |> Option.exists (fun (first, upper) -> id >= first && id < upper)
       Upper = fun () -> range |> Option.map snd |> Option.defaultValue table.NextAutoId }
 
 /// CHECK OPTION sees the row before the engine generates its auto-increment ID.
@@ -10822,20 +10824,27 @@ let internal prepareInsertCandidate store dbName tableName columns values prepar
 let internal prepareInsertCandidateWithDeferred store dbName tableName columns values deferred prepare finish =
     prepareInsertCandidateCore store dbName tableName columns values deferred prepare finish
 
-/// The transaction path evaluates each candidate once before taking write locks.
-let internal checkedUpsertPreparation store dbName tableName columns input prepare finish =
+type internal PreparedCheckedUpsert =
+    { Candidate: PreparedInsertCandidate
+      NextId: int64
+      Reservation: CheckedUpsertReservation
+      SetCursor: int64 -> unit }
+
+/// A transaction prepares one checked candidate before locking its exact write targets.
+let private checkedUpsertPreparation store dbName tableName columns input prepare finish =
     match tableAt store dbName tableName with
     | None -> Error(NoSuchTable(dbName, tableName))
     | Some table ->
-        resolveInsertColumns table columns
-        |> Result.map (fun indices ->
-            match table.Columns |> List.tryFindIndex _.AutoIncrement with
-            | None -> fun values -> prepareInsertCandidate store dbName tableName columns values prepare
-            | Some autoIndex ->
+        match table.Columns |> List.tryFindIndex _.AutoIncrement with
+        | None -> Error(ExpressionError(1105, "Checked upsert requires an AUTO_INCREMENT column"))
+        | Some autoIndex ->
+            resolveInsertColumns table columns
+            |> Result.map (fun indices ->
                 let mode = temporalCoercionMode store
                 let generateAutoOnZero = not store.ExecutionSettings.SqlMode.NoAutoValueOnZero
                 let reservation = checkedUpsertReservation store dbName table input
                 let mutable next = table.NextAutoId
+                let setCursor id = next <- id
                 fun values ->
                     alignInsertValues table.Columns indices values
                     |> Result.bind (fun raw -> prepareCheckedUpsertRow mode generateAutoOnZero next raw table autoIndex reservation prepare finish)
@@ -10843,7 +10852,10 @@ let internal checkedUpsertPreparation store dbName tableName columns input prepa
                         next <- nextId
                         let nextAutoId = max nextId (reservation.Upper())
                         advanceAutoIncrementCounter store dbName tableName nextAutoId
-                        { Values = candidate; NextAutoId = nextAutoId; AssignedAutoId = assigned }))
+                        { Candidate = { Values = candidate; NextAutoId = nextAutoId; AssignedAutoId = assigned }
+                          NextId = nextId
+                          Reservation = reservation
+                          SetCursor = setCursor }))
 
 /// Finds every live row a prepared REPLACE candidate displaces.
 let internal replaceConflictRows
@@ -11585,8 +11597,22 @@ and private cascadeUpdateVisitedFrom
 
 type internal UpsertAllocation =
     | StandardAllocation
-    | AllocateAfterViewCheck of input: UpsertInput * finish: (Value[] -> Result<Value[], StorageError>)
-    | PreparedAllocation of nextId: int64
+    | AllocateAfterViewCheck of input: UpsertInput * finish: (Value[] -> Result<Value[], StorageError>) * assignsAuto: bool
+    | PreparedAllocation of row: PreparedCheckedUpsert * assignsAuto: bool
+
+let private checkedAutoValue = function
+    | VInt value -> Some value
+    | VUInt value when value <= uint64 Int64.MaxValue -> Some(int64 value)
+    | _ -> None
+
+let private duplicateAutoCursor assignsAuto reservation generatedId nextId appliedValue =
+    if not assignsAuto then Ok generatedId
+    else
+        match checkedAutoValue appliedValue with
+        | Some applied when applied = generatedId -> Ok nextId
+        | Some applied when reservation.Contains applied ->
+            Error(ExpressionError(1869, "Auto-increment value in UPDATE conflicts with internally generated values"))
+        | _ -> Ok generatedId
 
 type private UpsertSummary =
     { LastInsertId: int64
@@ -11750,21 +11776,25 @@ and private upsertRowsInTable
 
                     let deferredAuto =
                         match allocation with
-                        | AllocateAfterViewCheck(input, finish) ->
-                            table.Columns |> List.tryFindIndex _.AutoIncrement |> Option.map (fun index -> index, input, finish)
-                        | _ -> None
+                        | StandardAllocation -> None
+                        | _ -> table.Columns |> List.tryFindIndex _.AutoIncrement
 
-                    let initialAutoId, prepareRow, reservedUpper =
-                        match deferredAuto with
-                        | Some(index, input, finish) ->
+                    let initialAutoId, prepareRow, reservedUpper, checkedAuto =
+                        match deferredAuto, allocation with
+                        | Some index, AllocateAfterViewCheck(input, finish, assignsAuto) ->
                             let reservation = checkedUpsertReservation store dbName table input
                             let prepareRow next raw =
                                 prepareCheckedUpsertRow mode generateAutoOnZero next raw table index reservation prepare finish
-                            table.NextAutoId, prepareRow, reservation.Upper
-                        | None ->
+                            table.NextAutoId, prepareRow, reservation.Upper, Some(index, reservation, assignsAuto, ignore)
+                        | Some index, PreparedAllocation(prepared, assignsAuto) ->
+                            let resolve _ _ = Ok(prepared.Candidate.Values, prepared.NextId, prepared.Candidate.AssignedAutoId)
+                            let upper () = max prepared.Candidate.NextAutoId table.NextAutoId
+                            table.NextAutoId, resolve, upper, Some(index, prepared.Reservation, assignsAuto, prepared.SetCursor)
+                        | _ ->
                             let count = generatedAutoValueCount mode generateAutoOnZero table idxs Set.empty (rowsIn |> List.choose Result.toOption)
                             let first, upper = reserveAutoIncrementRange store dbName table.OriginalName table.NextAutoId count
-                            first, prepareStandardRow, (fun () -> upper)
+                            first, prepareStandardRow, (fun () -> upper), None
+                    let mutable updatedAutoFloor = table.NextAutoId
                     let uniqueGroups = uniqueKeyGroups table
                     let secondaryGroups = secondaryKeyGroups table
 
@@ -11782,6 +11812,7 @@ and private upsertRowsInTable
                     let step stateResult (ordinal, rowValues) =
                         stateResult
                         |> Result.bind (fun state ->
+                            let mutable skippedCursor = state.NextAutoId
                             rowValues
                             |> Result.bind (alignInsertValues table.Columns idxs)
                             |> Result.bind (prepareRow state.NextAutoId)
@@ -11789,8 +11820,19 @@ and private upsertRowsInTable
                                         // The candidate's generated keys are ready for duplicate lookup.
                                         match findMatch state.UniqueIndex candidate with
                                             | Some(pos, existing) ->
+                                                let mutable nextAfterDuplicate = nextAutoId'
                                                 applyUpdate ordinal existing candidate
                                                 |> Result.bind (coerceMutationRow (temporalCoercionMode store) table.Columns assignedColumns existing)
+                                                |> Result.bind (fun applied ->
+                                                    match checkedAuto, assigned with
+                                                    | Some(index, reservation, assignsAuto, setCursor), Some(true, generatedId) ->
+                                                        duplicateAutoCursor assignsAuto reservation generatedId nextAutoId' applied.[index]
+                                                        |> Result.map (fun next ->
+                                                            nextAfterDuplicate <- next
+                                                            skippedCursor <- next
+                                                            setCursor next
+                                                            applied)
+                                                    | _ -> Ok applied)
                                                 |> Result.bind (fun applied ->
                                                     match checkChangedRow with
                                                     | Some check when applied <> existing -> check existing applied
@@ -11816,6 +11858,14 @@ and private upsertRowsInTable
                                                      else
                                                          Ok(state.Catalog, state.Visited, state.Cascaded))
                                                     |> Result.map (fun (cascadeCatalog', visited', cascaded') ->
+                                                        match checkedAuto with
+                                                        | Some(index, _, true, _) when applied.[index] <> existing.[index] ->
+                                                            match checkedAutoValue applied.[index] with
+                                                            | Some id when id >= updatedAutoFloor ->
+                                                                updatedAutoFloor <- if id = Int64.MaxValue then id else id + 1L
+                                                                advanceAutoIncrementCounter store dbName table.OriginalName updatedAutoFloor
+                                                            | _ -> ()
+                                                        | _ -> ()
                                                         rows.[pos] <- applied
 
                                                         let changed = applied <> existing
@@ -11839,7 +11889,7 @@ and private upsertRowsInTable
                                                                 state.SecondaryOrder
 
                                                         { state with
-                                                            NextAutoId = nextAutoId'
+                                                            NextAutoId = nextAfterDuplicate
                                                             Affected = state.Affected + weight
                                                             UpdatedRev =
                                                                 if changed then
@@ -11894,7 +11944,7 @@ and private upsertRowsInTable
                                 | Error error when ignoreViewCheck && isViewCheckError error ->
                                     let code, message = toMySqlError error
                                     Diagnostics.warning code message
-                                    Ok state
+                                    Ok { state with NextAutoId = skippedCursor }
                                 | result -> result)
 
                     rowsIn
@@ -11916,11 +11966,7 @@ and private upsertRowsInTable
                               Cascaded = Map.empty })
                     |> Result.map (fun state ->
                         let finalRows = rows.DrainToImmutable()
-                        let preparedAutoNext =
-                            match allocation with
-                            | PreparedAllocation nextId -> nextId
-                            | _ -> table.NextAutoId
-                        let nextAutoId = max state.NextAutoId (max (reservedUpper ()) preparedAutoNext)
+                        let nextAutoId = max state.NextAutoId (max (reservedUpper ()) updatedAutoFloor)
                         advanceAutoIncrementCounter store dbName table.OriginalName nextAutoId
                         let autoIncrementAdvance =
                             match allocation with
@@ -11948,6 +11994,46 @@ and private upsertRowsInTable
                           InsertedRows = List.rev state.InsertedRev
                           UpdatedRows = List.rev state.UpdatedRev
                           AutoIncrementAdvance = autoIncrementAdvance }))
+
+/// The duplicate outcome determines the next candidate's ID, so claim each row's
+/// actual keys before applying it. All writes stay in the caller's statement snapshot.
+let internal upsertCheckedRowsDynamically store dbName tableName columns rows input prepare finish applyUpdate checkChangedRow
+    assignedColumns assignsAuto foundRows =
+    checkedUpsertPreparation store dbName tableName columns input prepare finish
+    |> Result.bind (fun prepareCandidate ->
+        let step result (ordinal, values) =
+            result
+            |> Result.bind (fun (firstGenerated, lastExplicit, affected, inserted) ->
+                Diagnostics.withRowNumber (ordinal + 1) (fun () ->
+                    match prepareCandidate values with
+                    | Error error when isViewCheckError error ->
+                        let code, message = toMySqlError error
+                        Diagnostics.warning code message
+                        Ok(firstGenerated, lastExplicit, affected, inserted)
+                    | Error error -> Error error
+                    | Ok prepared ->
+                        let candidate = prepared.Candidate
+                        acquirePreparedInsertWriteTargets store dbName tableName [ candidate.Values ]
+                        upsertRowsWithOrdinalChecked
+                            store dbName tableName None [ Ok(Array.toList candidate.Values) ] (fun _ row -> Ok row)
+                            (fun _ -> applyUpdate ordinal) checkChangedRow assignedColumns foundRows true
+                            (PreparedAllocation(prepared, assignsAuto))
+                        |> Result.map (fun outcome ->
+                            let assigned = if outcome.InsertedRows.IsEmpty then None else candidate.AssignedAutoId
+                            let firstGenerated, lastExplicit =
+                                trackAutoIncrementAssignment assigned firstGenerated lastExplicit
+                            let inserted = outcome.InsertedRows |> List.fold (fun acc row -> row :: acc) inserted
+                            firstGenerated, lastExplicit, affected + outcome.Affected, inserted)))
+
+        rows
+        |> List.indexed
+        |> foldWithCancellation step (Ok(None, None, 0, []))
+        |> Result.map (fun (firstGenerated, lastExplicit, affected, inserted) ->
+            { LastInsertId = Option.defaultValue 0L (Option.orElse lastExplicit firstGenerated)
+              GeneratedId = firstGenerated
+              Affected = affected
+              InsertedRows = List.rev inserted
+              IgnoredErrors = [] }))
 
 /// Deletes `toDelete` (rows already known to belong to `tableKey`, e.g. from
 /// `deleteRows`'s WHERE match) from `db`, applying every other table's

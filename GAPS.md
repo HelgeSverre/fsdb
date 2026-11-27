@@ -927,6 +927,10 @@ now protect missing keys and the visited range under REPEATABLE READ
 and SERIALIZABLE. READ COMMITTED retains row-only locking for the
 audited reads.
 
+A [unique secondary-key move](torture/findings/2026-11-27-checked-upsert-reused-auto-ids.md#concurrent-secondary-key-moves)
+can let a competing upsert commit first in Fsdb. MySQL makes that upsert
+wait for the UPDATE and then match the newly committed key.
+
 A [current write-path control](benchmarks/results/2026-10-14-write-path-control.md)
 measures keyless inserts at one, four, and eight writers with WAL-backed and
 in-memory fsdb on the same host. Durability lowers throughput, but both modes
@@ -1352,8 +1356,9 @@ in audited batches. Checked upserts defer allocation until a candidate
 passes CHECK OPTION and retain reserved IDs across WAL recovery.
 [VALUES batches](torture/findings/2026-11-27-checked-upsert-auto-ids.md)
 use the row count for the first reservation. [INSERT SELECT batches](torture/findings/2026-11-27-checked-upsert-select-auto-ids.md)
-reserve IDs in growing intervals. Reuse of the candidate ID after a
-secondary-key duplicate update still differs.
+reserve IDs in growing intervals. [Generated candidate ID reuse](torture/findings/2026-11-27-checked-upsert-reused-auto-ids.md)
+matches the audited secondary-key duplicate updates and checks whether
+an explicit assignment uses the generated ID or another reserved ID.
 [Windowed `NATURAL JOIN` read sources](torture/findings/2026-11-06-window-natural-joined-view.md)
 also leave the physical target writable with either source order or a CTE
 input; duplicate joined rows still update that target once.

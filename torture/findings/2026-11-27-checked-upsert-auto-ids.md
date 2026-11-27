@@ -19,8 +19,7 @@ covers autocommit, explicit commit, and rollback without a checkpoint.
 The [INSERT SELECT follow-up](2026-11-27-checked-upsert-select-auto-ids.md)
 covers the separate reservation rules for selected rows.
 
-Candidate ID reuse remains open. When an eligible candidate with a
-generated ID finds a secondary-key duplicate, MySQL can reuse the ID
-for the next row. In the audited mixed batch, MySQL assigns the fresh
-rows IDs 2 and 3, while Fsdb assigns IDs 3 and 4. Both assign ID 6
-to the next statement.
+The [candidate ID reuse follow-up](2026-11-27-checked-upsert-reused-auto-ids.md)
+covers secondary-key duplicate updates. In the original mixed batch,
+MySQL assigned the fresh rows IDs 2 and 3, while Fsdb assigned IDs 3
+and 4. Both now assign IDs 2 and 3, then ID 6 to the next statement.
