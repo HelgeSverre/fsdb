@@ -563,6 +563,9 @@ let tryLiteralNodeDiagnostic = function
     | FuncCall(name, arguments)
         when name.Equals("ST_SIMPLIFY", System.StringComparison.OrdinalIgnoreCase) && arguments.Length <> 2 ->
         Some(1582, "Incorrect parameter count in the call to native function 'ST_Simplify'")
+    | FuncCall(name, arguments)
+        when name.Equals("ST_MAKEENVELOPE", System.StringComparison.OrdinalIgnoreCase) && arguments.Length <> 2 ->
+        Some(1582, "Incorrect parameter count in the call to native function 'ST_MakeEnvelope'")
     | FuncCall(name, arguments) when arguments.Length <> 1
         && (name.Equals("ST_VALIDATE", System.StringComparison.OrdinalIgnoreCase)
             || name.Equals("ST_ISVALID", System.StringComparison.OrdinalIgnoreCase)) ->

@@ -5427,6 +5427,75 @@ let tests =
               | Error(1582, _) -> ()
               | other -> failtestf "expected invalid arity at prepare time, got %A" other
 
+          testCase "ST_MakeEnvelope constructs a Cartesian point, segment, or rectangle"
+          <| fun _ ->
+              let run = queryFixture [ "USE fsdb" ]
+              for arguments, expected in
+                  [ "POINT(3,5),POINT(1,2)", Some "POLYGON((1 2,3 2,3 5,1 5,1 2))"
+                    "POINT(1,5),POINT(3,2)", Some "POLYGON((1 2,3 2,3 5,1 5,1 2))"
+                    "POINT(1,5),POINT(1,2)", Some "LINESTRING(1 2,1 5)"
+                    "POINT(3,5),POINT(1,5)", Some "LINESTRING(1 5,3 5)"
+                    "POINT(1,2),POINT(1,2)", Some "POINT(1 2)"
+                    "X'000000000101000000000000000000F03F0000000000000040',POINT(3,4)", Some "POLYGON((1 2,3 2,3 4,1 4,1 2))"
+                    "'bad',NULL", None
+                    "NULL,1", None ] do
+                  let sql = $"SELECT ST_AsText(ST_MakeEnvelope({arguments}))"
+                  match run sql with
+                  | ResultSet(_, [ [ value ] ]) -> Expect.equal value expected sql
+                  | other -> failtestf "expected an envelope result, got %A" other
+
+              let projected = "ST_MakeEnvelope(ST_GeomFromText('POINT(3 5)',3857),ST_GeomFromText('POINT(1 2)',3857))"
+              match run $"SELECT ST_AsText({projected}), ST_SRID({projected})" with
+              | ResultSet(_, [ row ]) ->
+                  Expect.equal row [ Some "POLYGON((1 2,3 2,3 5,1 5,1 2))"; Some "0" ] "projected inputs produce SRID 0"
+              | other -> failtestf "expected a projected envelope result, got %A" other
+
+              for arguments, code in
+                  [ "POINT(1,2),ST_GeomFromText('POINT(1 2)',4326)", 3033
+                    "ST_GeomFromText('LINESTRING(1 2,3 4)',4326),ST_GeomFromText('POINT(1 2)',4326)", 3618
+                    "ST_GeomFromText('GEOMETRYCOLLECTION EMPTY'),POINT(1,2)", 1210
+                    "'bad',POINT(1,2)", 3037
+                    "X'0000000000000000013FF00000000000004000000000000000',POINT(3,4)", 3055
+                    "X'E61000000101000000000000000000F87F0000000000000000',POINT(1,2)", 3033
+                    "X'000000000101000000000000000000F87F0000000000000000',POINT(1,2)", 3037 ] do
+                  TestSupport.Sql.expectError code (run $"SELECT ST_MakeEnvelope({arguments})") arguments
+
+              match run "SELECT HEX(ST_MakeEnvelope(POINT(0,0),ST_GeomFromText('POINT(-0 -0)')))" with
+              | ResultSet(_, [ [ value ] ]) ->
+                  Expect.equal value (Some "00000000010100000000000000000000800000000000000080") "equal bounds preserve the second point's zero sign"
+              | other -> failtestf "expected signed-zero geometry bytes, got %A" other
+
+              let session, _ = handle (create 1 (Fsdb.Storage.create ())) "USE fsdb"
+              match prepareStatementForSession session "SELECT ST_MakeEnvelope(?, ?) AS shape" with
+              | Ok(statement, count) ->
+                  let parameters, columns = preparedMetadata session statement count
+                  let wire (metadata: ColumnMetadata) =
+                      metadata.TypeId, metadata.ColumnLength, metadata.Decimals, metadata.Flags, metadata.CollationId
+                  let geometry length decimals = TypeGeometry, length, decimals, BinaryFlag, Some Fsdb.Collation.binaryId
+                  Expect.equal (List.map wire parameters) (List.replicate 2 (geometry 16777216u 31uy)) "prepared geometry parameters"
+                  Expect.equal (columns |> List.map (_.Metadata >> wire)) [ geometry System.UInt32.MaxValue 0uy ] "prepared geometry result"
+              | Error error -> failtestf "expected envelope to prepare, got %A" error
+
+              match prepareStatementForSession session "SELECT ST_MakeEnvelope(?)" with
+              | Error(1582, _) -> ()
+              | other -> failtestf "expected invalid arity at prepare time, got %A" other
+
+          testCase "ST_MakeEnvelope declares a nullable polygon for schema materialization"
+          <| fun _ ->
+              let run = queryFixture [ "USE fsdb" ]
+              Expect.equal (run "CREATE TABLE envelopes AS SELECT ST_MakeEnvelope(POINT(1,2),POINT(3,4)) AS shape")
+                  (Affected 1UL) "rectangle materializes as a polygon"
+              Expect.equal (run "CREATE VIEW envelope_view AS SELECT ST_MakeEnvelope(NULL,POINT(3,4)) AS shape")
+                  (Affected 0UL) "view declaration"
+              match run "SELECT TABLE_NAME, DATA_TYPE, IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fsdb' AND TABLE_NAME IN ('envelopes','envelope_view') ORDER BY TABLE_NAME" with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "envelope_view"; Some "polygon"; Some "YES" ]; [ Some "envelopes"; Some "polygon"; Some "YES" ] ]
+                      "view and table declarations describe the envelope as a nullable polygon"
+              | other -> failtestf "expected declared column types, got %A" other
+              TestSupport.Sql.expectError 1416
+                  (run "CREATE TABLE point_envelope AS SELECT ST_MakeEnvelope(POINT(1,2),POINT(1,2)) AS shape")
+                  "a point cannot be inserted into the inferred polygon column"
+
           testCase "ST_Validate returns valid geometry and preserves polygon winding"
           <| fun _ ->
               let run = queryFixture [ "USE fsdb" ]

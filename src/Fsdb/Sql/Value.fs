@@ -274,7 +274,7 @@ let geometryToMySqlBinary (geometry: Geometry) : byte[] =
     writer.WriteBytes(geometryToWkb geometry)
     writer.ToArray()
 
-let tryGeometryFromWkb (srid: int) (bytes: byte[]) : Geometry option =
+let private decodeGeometryWkb allowNonFinitePoint (srid: int) (bytes: byte[]) : Geometry option =
     let mutable position = 0
     let mutable remainingElements = 1_000_000
 
@@ -339,7 +339,7 @@ let tryGeometryFromWkb (srid: int) (bytes: byte[]) : Geometry option =
                     | 1 ->
                         readPair ()
                         |> Option.bind (fun (x, y) ->
-                            if finitePair (x, y) then Some(GPoint(x, y))
+                            if finitePair (x, y) || (depth = 0 && allowNonFinitePoint) then Some(GPoint(x, y))
                             else None)
                     | 2 ->
                         readMany 16 readPair
@@ -405,12 +405,18 @@ let tryGeometryFromWkb (srid: int) (bytes: byte[]) : Geometry option =
     readGeometry 0
     |> Option.bind (fun shape -> if position = bytes.Length then Some { Srid = srid; Shape = shape } else None)
 
-let tryGeometryFromMySqlBinary (bytes: byte[]) : Geometry option =
+let tryGeometryFromWkb srid bytes = decodeGeometryWkb false srid bytes
+
+let private decodeMySqlGeometry allowNonFinitePoint (bytes: byte[]) : Geometry option =
     if bytes.Length < 5 then
         None
     else
         let srid = BinaryPrimitives.ReadInt32LittleEndian(ReadOnlySpan(bytes, 0, 4))
-        tryGeometryFromWkb srid bytes.[4..]
+        decodeGeometryWkb allowNonFinitePoint srid bytes.[4..]
+
+let tryGeometryFromMySqlBinary bytes = decodeMySqlGeometry false bytes
+
+let internal tryGeometryFromMySqlBinaryBeforePointValidation bytes = decodeMySqlGeometry true bytes
 
 type GeometryBounds =
     { MinX: float
@@ -472,21 +478,15 @@ let geometryBounds (geometry: Geometry) : GeometryBounds option =
 
         Some { MinX = minX; MinY = minY; MaxX = maxX; MaxY = maxY }
 
-let geometryEnvelope (geometry: Geometry) : Geometry =
-    let shape =
-        match geometryBounds geometry with
-        | None -> GEmpty
-        | Some bounds when bounds.MinX = bounds.MaxX && bounds.MinY = bounds.MaxY -> GPoint(bounds.MinX, bounds.MinY)
-        | Some bounds when bounds.MinX = bounds.MaxX || bounds.MinY = bounds.MaxY ->
-            GLineString [ (bounds.MinX, bounds.MinY); (bounds.MaxX, bounds.MaxY) ]
-        | Some bounds ->
-            GPolygon
-                [ [ (bounds.MinX, bounds.MinY)
-                    (bounds.MaxX, bounds.MinY)
-                    (bounds.MaxX, bounds.MaxY)
-                    (bounds.MinX, bounds.MaxY)
-                    (bounds.MinX, bounds.MinY) ] ]
+let internal geometryShapeFromBounds bounds =
+    let lower = bounds.MinX, bounds.MinY
+    let upper = bounds.MaxX, bounds.MaxY
+    if lower = upper then GPoint lower
+    elif bounds.MinX = bounds.MaxX || bounds.MinY = bounds.MaxY then GLineString [ lower; upper ]
+    else GPolygon [ [ lower; (bounds.MaxX, bounds.MinY); upper; (bounds.MinX, bounds.MaxY); lower ] ]
 
+let geometryEnvelope (geometry: Geometry) : Geometry =
+    let shape = geometryBounds geometry |> Option.map geometryShapeFromBounds |> Option.defaultValue GEmpty
     { geometry with Shape = shape }
 
 let geometryPointBufferWithSegmentsPlanar segments (distance: float) (geometry: Geometry) : Geometry option =

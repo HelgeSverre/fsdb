@@ -5792,7 +5792,7 @@ let private geometrySrid functionName = function
 let private spatialReferenceSystem (functionName: string) srid =
     SpatialReferenceSystems.tryFind srid
     |> Option.defaultWith (fun () ->
-        raise (SqlError(3548, sprintf "There's no spatial reference system with SRID %d." srid)))
+        raise (SqlError(3548, $"There's no spatial reference system with SRID {uint32 srid}.")))
 
 let private axisOrderOption =
     Regex(
@@ -6690,6 +6690,47 @@ let private geometryEnvelopeFn: Scalar =
     | [ value ] -> geometryArgument "ST_ENVELOPE" value |> requirePlanar "ST_ENVELOPE" |> geometryEnvelope |> VGeometry
     | _ -> nativeParameterCountError "st_envelope"
 
+let private geometryMakeEnvelopeFn: Scalar =
+    let name = "st_makeenvelope"
+    let invalidData () = raise (SqlError(3037, $"Invalid GIS data provided to function {name}."))
+    let readGeometry = function
+        | VGeometry geometry -> geometry
+        | value ->
+            let bytes = stringBytes value
+            let sridLength = sizeof<uint32>
+            let minimumLength = sridLength + sizeof<byte> + sizeof<uint32> + sizeof<uint32>
+            if bytes.Length >= minimumLength && bytes.[sridLength] <> 1uy then
+                raise (SqlError(3055, "Geometry byte string must be little endian."))
+            tryGeometryFromMySqlBinaryBeforePointValidation bytes |> Option.defaultWith invalidData
+
+    // Equal coordinates take the second point's lower bound, including signed zero.
+    let bounds first second = if first < second then first, second else second, first
+
+    function
+    | [ VNull; _ ]
+    | [ _; VNull ] -> VNull
+    | [ first; second ] ->
+        let first, second = readGeometry first, readGeometry second
+        let firstSrid, secondSrid = uint32 first.Srid, uint32 second.Srid
+        if firstSrid <> secondSrid then
+            raise (SqlError(3033, $"Binary geometry function {name} given two geometries of different srids: {firstSrid} and {secondSrid}, which should have been identical."))
+
+        let referenceSystem = spatialReferenceSystem name first.Srid
+        if referenceSystem.SemiMajorAxis.IsSome then
+            let firstType, secondType = gisGeometryTypeName first.Shape, gisGeometryTypeName second.Shape
+            raise (SqlError(3618, $"{name}({firstType}, {secondType}) has not been implemented for geographic spatial reference systems."))
+
+        match first.Shape, second.Shape with
+        | GPoint(x1, y1), GPoint(x2, y2) ->
+            if not (Double.IsFinite x1 && Double.IsFinite y1 && Double.IsFinite x2 && Double.IsFinite y2) then
+                invalidData ()
+            let minX, maxX = bounds x1 x2
+            let minY, maxY = bounds y1 y2
+            let shape = geometryShapeFromBounds { MinX = minX; MinY = minY; MaxX = maxX; MaxY = maxY }
+            VGeometry { Srid = 0; Shape = shape }
+        | _ -> raise (SqlError(1210, $"Incorrect arguments to {name}"))
+    | _ -> nativeParameterCountError "ST_MakeEnvelope"
+
 let private geometryConvexHullFn: Scalar =
     function
     | [ VNull ] -> VNull
@@ -7176,6 +7217,7 @@ let private registerSpatialBuiltins registry =
     let geometry = ColumnWire.parameterMetadataOfType(TGeometry Geometry)
     let geometryResult = { geometry with ColumnLength = UInt32.MaxValue; Decimals = 0uy }
     let pointResult = { geometryResult with Flags = BinaryFlag; CollationId = Some Collation.binaryId }
+    let geometryParameter = { geometry with CollationId = Some Collation.binaryId }
     let spatialDouble =
         { ColumnWire.parameterMetadataOfType(TDouble false) with CollationId = Some Collation.binaryId }
     let validityResult =
@@ -7254,6 +7296,8 @@ let private registerSpatialBuiltins registry =
     |> registerScalarResult "ST_SYMDIFFERENCE" binaryResult (geometryOverlayFn "ST_SYMDIFFERENCE" OverlayKind.SymmetricDifference)
     |> registerScalarResult "ST_CONVEXHULL" binaryResult geometryConvexHullFn
     |> registerScalarResult "ST_ENVELOPE" binaryResult geometryEnvelopeFn
+    |> registerScalarWithSignature "ST_MAKEENVELOPE" [ geometryParameter; geometryParameter ] pointResult geometryMakeEnvelopeFn
+    |> registerByteArguments "ST_MAKEENVELOPE" (fun _ -> true)
     |> registerMbrPredicates
 
 let private everyArgument _ = true

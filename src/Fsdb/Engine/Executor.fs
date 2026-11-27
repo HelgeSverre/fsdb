@@ -11513,9 +11513,13 @@ and private describeQueryColumnDescriptorsInScope
                     |> withMergedColumns (mergedColumnExpressions scope.LogicalColumns)
 
                 let columnForExpression name expression =
-                    match tryColumnDefForExpr context expression with
-                    | Some column -> directProjection name column |> describeColumn
-                    | None ->
+                    match expression, tryColumnDefForExpr context expression with
+                    | _, Some column -> directProjection name column |> describeColumn
+                    | FuncCall(functionName, _), None when equalsIgnoreCase functionName "ST_MAKEENVELOPE"
+                                                          && Functions.isUnmodifiedBuiltinScalar functionName registry ->
+                        { describeColumn (computedColumn name (TGeometry Polygon) true None None) with
+                            WireMetadata = metadataOfExpr context expression }
+                    | _, None ->
                         let concatColumn =
                             match expression with
                             | FuncCall(functionName, arguments) when functionName.Equals("CONCAT", System.StringComparison.OrdinalIgnoreCase) ->
@@ -33164,6 +33168,21 @@ let rec private executeAsWithViewSources
                 | Err(code, message), _, _, _ -> ids, Err(code, message)
                 | ResultSet(names, _), metadata, rows, collations ->
                     let columns = deriveColumns names collations metadata
+                    let columns =
+                        if metadata |> List.exists (fun column -> column.TypeId = TypeGeometry) then
+                            let body =
+                                match query with
+                                | Select select -> Some(PlainSelect select)
+                                | Union(first, rest, orderBy, limit, offset) -> Some(UnionSelect(first, rest, orderBy, limit, offset))
+                                | _ -> None
+                            match body |> Option.bind (QueryBody >> describeQueryColumns store registry dbName) with
+                            | Some declared when sameLength columns declared ->
+                                List.map2 (fun column definition ->
+                                    match column.Type, definition.Type with
+                                    | TGeometry _, TGeometry kind -> { column with Type = TGeometry kind }
+                                    | _ -> column) columns declared
+                            | _ -> columns
+                        else columns
                     let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
                     Storage.setStrictMode snapshot store.ExecutionSettings.SqlMode.Strict
                     let charset, collation, columns = Storage.resolveTableCharacterDefaults snapshot destinationDb None None columns
