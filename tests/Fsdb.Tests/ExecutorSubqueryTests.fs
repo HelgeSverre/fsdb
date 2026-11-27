@@ -151,6 +151,46 @@ let tests =
                   Expect.stringContains plan "loops=5" "all outer keys open the ordered lookup"
               | other -> failtestf "expected an analyzed plan, got %A" other
 
+          testCase "correlated top-N seeks collation-equivalent constant text prefixes"
+          <| fun _ ->
+              let store = newStore ()
+              for setup in
+                  [ "CREATE TABLE digit(d INT PRIMARY KEY)"
+                    "INSERT INTO digit VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)"
+                    "CREATE TABLE owners(id INT PRIMARY KEY, tenant INT, cutoff INT NOT NULL)"
+                    "INSERT INTO owners VALUES (1,1,98),(2,2,91),(3,NULL,100),(4,9,100)"
+                    "CREATE TABLE events(id INT PRIMARY KEY, tenant INT, state VARCHAR(12) COLLATE utf8mb4_0900_ai_ci, stamp INT, visible INT, KEY recent(tenant,state,stamp DESC,id))"
+                    "INSERT INTO events SELECT t.d*100+n.d*10+x.d, IF(t.d<4,1,2), ELT(t.d+1,'Active','ÁCTIVE','active','archived','active','archived'), n.d*10+x.d, MOD(x.d,3) FROM digit t CROSS JOIN digit n CROSS JOIN digit x WHERE t.d<6" ] do
+                  match runDefault store setup with
+                  | Affected _ -> ()
+                  | other -> failtestf "%s: %A" setup other
+
+              let query hint state =
+                  "SELECT o.id,q.id,q.stamp FROM owners o LEFT JOIN LATERAL (SELECT e.id,e.stamp FROM events e " + hint
+                  + " WHERE e.tenant=o.tenant AND " + state + " AND e.stamp<=o.cutoff AND e.visible=1 "
+                  + "ORDER BY e.stamp DESC,e.id LIMIT 2 OFFSET 1) q ON TRUE ORDER BY o.id,q.stamp DESC,q.id"
+              let expected =
+                  [ [ 1; 197; 97 ]; [ 1; 297; 97 ]; [ 2; 487; 87 ]; [ 2; 484; 84 ] ]
+                  |> List.map (List.map (string >> Some))
+                  |> fun rows -> rows @ [ [ Some "3"; None; None ]; [ Some "4"; None; None ] ]
+
+              for predicate in [ "e.state='ACTIVE'"; "'ACTIVE' <=> e.state" ] do
+                  let indexed, examined = withExaminedRows (fun () -> runDefault store (query "" predicate))
+                  let scanned, scanExamined = withExaminedRows (fun () -> runDefault store (query "IGNORE INDEX (recent)" predicate))
+                  Expect.equal indexed (ResultSet([ "id"; "id"; "stamp" ], expected)) "MySQL merges equivalent spellings before OFFSET"
+                  Expect.equal scanned indexed "the hinted scan returns the same rows"
+                  Expect.isLessThan examined 100L "the pinned prefix reads only the ordered candidates"
+                  Expect.isGreaterThan scanExamined (10L * examined) "ignoring the index prevents the seek"
+
+              let differentCollation = "e.state='active' COLLATE utf8mb4_0900_as_cs"
+              let fallback = runDefault store (query "" differentCollation)
+              Expect.equal fallback (runDefault store (query "IGNORE INDEX (recent)" differentCollation)) "a different comparison collation uses the same predicate as the scan"
+              let caseSensitiveRows =
+                  [ [ 1; 294; 94 ]; [ 1; 291; 91 ]; [ 2; 487; 87 ]; [ 2; 484; 84 ] ]
+                  |> List.map (List.map (string >> Some))
+                  |> fun rows -> rows @ [ [ Some "3"; None; None ]; [ Some "4"; None; None ] ]
+              Expect.equal fallback (ResultSet([ "id"; "id"; "stamp" ], caseSensitiveRows)) "the explicit collation distinguishes spellings"
+
           testList
               "joined correlated COUNT and EXISTS"
               [ let joinedStore () =

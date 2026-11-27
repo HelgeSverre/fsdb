@@ -3104,6 +3104,9 @@ implementation effort:
    [Text equality prefixes](torture/findings/2026-11-27-correlated-text-index-top-n.md)
    now merge collation-equal spelling runs in suffix order before applying
    the offset and limit.
+   [Constant text prefixes](torture/findings/2026-11-26-correlated-index-top-n.md#constant-text-prefixes)
+   use the same merge when the literal comparison uses the stored
+   collation. The filtered fixture examines 22 rows, down from 608.
    [NULL-safe equality prefixes](torture/findings/2026-11-27-correlated-null-safe-top-n.md)
    include nullable integer and text keys and direct `IS NULL` key parts.
    The lateral fixture examines 46 rows, down from 1,159.

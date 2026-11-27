@@ -44,3 +44,46 @@ direct text equalities that use the index collation. The ordered suffix
 still requires a supported physical index order. Coercive filters,
 warning-producing expressions, and incompatible index hints use the
 existing execution path.
+
+### Constant text prefixes
+
+An index on `(tenant,state,stamp DESC,id)` now supplies the ordered
+suffix when the outer row fixes `tenant` and an equality literal
+fixes the text state. For example, `e.tenant=o.tenant AND
+e.state='ACTIVE'` opens the same merged lookup used for correlated
+text columns. The engine checks that the comparison uses the stored
+collation and applies the original predicate before OFFSET and LIMIT.
+[MySQL index ordering](https://dev.mysql.com/doc/refman/8.4/en/order-by-optimization.html)
+
+The fixture includes `Active`, `ÁCTIVE`, and `active` in the same
+tenant under `utf8mb4_0900_ai_ci`. The lateral query with a cutoff,
+filter, and offset examined 608 rows before the change and 22 after.
+`EXPLAIN ANALYZE` reports the ordered lookup for the lateral and scalar
+shapes. An explicitly different collation and `IGNORE INDEX` retain
+the scan path in the fixture.
+
+Seven wire variants and eight prepared executions matched MySQL 8.4.11.
+A separate comparison covered 192 combinations of `CHAR` and
+`VARCHAR`, three collations, trailing spaces, introduced literals,
+ordinary and NULL-safe equality, both index directions, and index
+hints. Those 192 combinations matched in both Fsdb storage modes.
+
+On 40,000 events and 100 outer rows, the native in-memory Debug builds
+were timed on loopback after the test suite finished. The client
+alternated baseline `99f00146` and the updated build, taking the median
+of six measured runs after one warm-up per build. Every timed result
+matched MySQL.
+
+| Query | Before | After | Speedup |
+| --- | ---: | ---: | ---: |
+| Lateral top-N | 3,314 ms | 41 ms | 81× |
+| Scalar top-N | 3,275 ms | 46 ms | 71× |
+
+### Collation-equal sort keys
+
+A separate text-suffix probe uses `ORDER BY state,id LIMIT 3` with
+`state` under `utf8mb4_0900_ai_ci`. With IDs 1–4 holding `active`,
+`ACTIVE`, `áctive`, and `Active` respectively, MySQL's lateral query
+returns IDs 1, 2, and 3. Fsdb returns 1, 4, and 2. The current Fsdb sort
+breaks the tie by spelling before reaching `id`. A scalar lookup at
+`LIMIT 1 OFFSET 1` likewise returns ID 2 in MySQL and ID 4 in Fsdb.

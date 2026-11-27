@@ -21323,19 +21323,23 @@ and private tryCorrelatedTopOrder store registry dbName (tref: TableRef) (select
             let tryBoundPin comparison indexed bound =
                 indexedColumn indexed
                 |> Option.bind (fun column ->
+                    let usesStoredTextCollation boundColumn =
+                        isTextColumn (Some column)
+                        && (comparisonCollation context (comparisonName comparison) indexed (Some column) bound boundColumn
+                            |> Result.toOption
+                            |> Option.exists (fun effective ->
+                                equalsIgnoreCase effective.Name (Collation.findOrDefault column.Collation).Name))
+
                     match bound with
                     | LiteralValue VNull when comparison = NullSafeEq -> Some(key column VNull, false)
+                    | LiteralValue(VString _ as value) when usesStoredTextCollation None -> Some(key column value, false)
                     | Col _ | QualifiedCol _ ->
                         let boundColumn = tryColumnDefForExpr context bound
                         let integerKey =
                             isExactIntegerIndexType column.Type
                             && (boundColumn |> Option.exists (_.Type >> isExactIntegerIndexType))
                         let textKey () =
-                            isTextColumn (Some column) && isTextColumn boundColumn
-                            && (comparisonCollation context (comparisonName comparison) indexed (Some column) bound boundColumn
-                                |> Result.toOption
-                                |> Option.exists (fun effective ->
-                                    equalsIgnoreCase effective.Name (Collation.findOrDefault column.Collation).Name))
+                            isTextColumn boundColumn && usesStoredTextCollation boundColumn
 
                         match tryCorrelatedOuterValue source context bound with
                         | Some(VInt _ | VUInt _ as value) when integerKey -> Some(key column value, true)
