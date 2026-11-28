@@ -9122,6 +9122,119 @@ let tests =
                       let keyOwner = if ending = "COMMIT" then "60" else "30"
                       run (create 3 store) "SELECT id FROM jobs WHERE u=3" (ResultSet([ "id" ], [ [ Some keyOwner ] ])) |> ignore
 
+          testCase "updates recheck occupied destinations in row order without repeating assignments"
+          <| fun _ ->
+              for ignored in [ false; true ] do
+                  for firstEnding, secondEnding in [ "COMMIT", "COMMIT"; "COMMIT", "ROLLBACK"; "ROLLBACK", "COMMIT"; "ROLLBACK", "ROLLBACK" ] do
+                      let store = Fsdb.Storage.create ()
+                      let run session sql expected =
+                          let next, result = handle session sql
+                          Expect.equal result expected sql
+                          next
+                      let setup = create 1 store
+                      let setup = run setup "CREATE TABLE jobs(id INT PRIMARY KEY,u INT NOT NULL,p INT,UNIQUE KEY ux(u))" (Affected 0UL)
+                      let setup = run setup "INSERT INTO jobs VALUES(20,2,0),(30,3,0),(40,4,0),(50,5,0),(60,6,0)" (Affected 5UL)
+                      let first = run (create 2 store) "BEGIN" (Affected 0UL)
+                      let first = run first "UPDATE jobs SET u=1 WHERE id=30" (Affected 1UL)
+                      let second = run (create 3 store) "BEGIN" (Affected 0UL)
+                      let second = run second "UPDATE jobs SET u=9 WHERE id=40" (Affected 1UL)
+                      let writer = run (create 4 store) "SET innodb_lock_wait_timeout=3" (Affected 0UL)
+                      let writer = run writer "SET @calls=0" (Affected 0UL)
+                      let update = if ignored then "UPDATE IGNORE" else "UPDATE"
+                      let waiting = Threading.Tasks.Task.Run(fun () ->
+                          handle writer ($"{update} jobs SET p=(@calls:=@calls+1),u=CASE id WHEN 50 THEN 3 ELSE 4 END WHERE id>=50 ORDER BY id"))
+                      let pendingOwners () =
+                          lock store.LockWaits.SyncRoot (fun () ->
+                              store.LockWaits.Edges.Values |> Seq.collect _.Blockers |> Set.ofSeq)
+                      let awaitWait predicate =
+                          Threading.SpinWait.SpinUntil((fun () -> predicate (pendingOwners ()) || waiting.IsCompleted), TimeSpan.FromSeconds 2.0)
+                      let firstObserved = awaitWait (not << Set.isEmpty)
+                      let firstOwners = pendingOwners ()
+                      run first firstEnding (Affected 0UL) |> ignore
+                      let secondWait owners = not (Set.isEmpty owners) && owners <> firstOwners
+                      let secondObserved = awaitWait secondWait
+                      let secondOwners = pendingOwners ()
+                      let _, independent = handle setup "UPDATE jobs SET p=6 WHERE id=20"
+                      run second secondEnding (Affected 0UL) |> ignore
+                      Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 4.0)) "the update finishes after both holders resolve"
+                      Expect.isTrue (firstObserved && not (Set.isEmpty firstOwners)) "the first assignment waits on the first key"
+                      let firstReleased = firstEnding = "COMMIT"
+                      let secondReleased = secondEnding = "COMMIT"
+                      let reachesSecond = firstReleased || ignored
+                      Expect.equal (secondObserved && secondWait secondOwners) reachesSecond "only a continuing statement visits the second key"
+                      Expect.equal independent (Affected 1UL) "a disjoint writer can finish during the wait"
+                      let writer, actual = waiting.Result
+                      let accepted = if firstReleased then 1UL else 0UL
+                      let accepted = accepted + (if secondReleased then 1UL else 0UL)
+                      let expected =
+                          if ignored || firstReleased && secondReleased then Affected accepted
+                          elif not firstReleased then Err(1062, "Duplicate entry '3' for key 'jobs.ux'")
+                          else Err(1062, "Duplicate entry '4' for key 'jobs.ux'")
+                      Expect.equal actual expected "affected rows and duplicate selection match MySQL"
+                      let calls = if reachesSecond then "2" else "1"
+                      run writer "SELECT @calls AS calls" (ResultSet([ "calls" ], [ [ Some calls ] ])) |> ignore
+                      let keep = ignored || firstReleased && secondReleased
+                      let firstValues = if keep && firstReleased then [ Some "3"; Some "1" ] else [ Some "5"; Some "0" ]
+                      let secondValues = if keep && secondReleased then [ Some "4"; Some "2" ] else [ Some "6"; Some "0" ]
+                      run setup "SELECT u,p FROM jobs WHERE id>=50 ORDER BY id" (ResultSet([ "u"; "p" ], [ firstValues; secondValues ])) |> ignore
+
+          testCase "an update rechecks a key released while evaluating its assignment"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let setup = create 1 store
+              let setup = run setup "CREATE TABLE jobs(id INT PRIMARY KEY,u INT NOT NULL,p INT,UNIQUE KEY ux(u))" (Affected 0UL)
+              let setup = run setup "INSERT INTO jobs VALUES(30,3,0),(40,4,0)" (Affected 2UL)
+              let gate = run setup "SELECT GET_LOCK('finish_assignment', 0) AS locked" (ResultSet([ "locked" ], [ [ Some "1" ] ]))
+              let holder = run (create 2 store) "BEGIN" (Affected 0UL)
+              let holder = run holder "DELETE FROM jobs WHERE id=30" (Affected 1UL)
+              let waiting = Threading.Tasks.Task.Run(fun () ->
+                  handle (create 3 store) "UPDATE jobs SET p=GET_LOCK('assignment_started', 0)+GET_LOCK('finish_assignment', 4),u=3 WHERE id=40")
+              let observed () =
+                  let result = handle gate "SELECT IS_USED_LOCK('assignment_started') AS owner" |> snd
+                  result = ResultSet([ "owner" ], [ [ Some "3" ] ])
+              let entered = Threading.SpinWait.SpinUntil((fun () -> observed () || waiting.IsCompleted), TimeSpan.FromSeconds 2.0)
+              let assignmentRunning = entered && observed () && not waiting.IsCompleted
+              run holder "COMMIT" (Affected 0UL) |> ignore
+              run gate "SELECT RELEASE_LOCK('finish_assignment') AS released" (ResultSet([ "released" ], [ [ Some "1" ] ])) |> ignore
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the update finishes after the assignment resumes"
+              Expect.isTrue assignmentRunning "the holder commits after evaluation starts and before the key check"
+              Expect.equal (snd waiting.Result) (Affected 1UL) "the secondary key is available after the delete"
+              run setup "SELECT u,p FROM jobs WHERE id=40" (ResultSet([ "u"; "p" ], [ [ Some "3"; Some "2" ] ])) |> ignore
+
+          testCase "an ignored update preserves a refreshed snapshot with cross-database foreign keys"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let setup = create 1 store
+              let setup = run setup "CREATE DATABASE linked" (Affected 1UL)
+              let setup = run setup "CREATE TABLE jobs(id INT PRIMARY KEY,u INT NOT NULL,p INT,UNIQUE KEY ux(u))" (Affected 0UL)
+              let setup = run setup "CREATE TABLE linked.children(id INT PRIMARY KEY,FOREIGN KEY(id) REFERENCES fsdb.jobs(id))" (Affected 0UL)
+              let setup = run setup "INSERT INTO jobs VALUES(30,3,0),(50,5,0),(60,6,0)" (Affected 3UL)
+              let holder = run (create 2 store) "BEGIN" (Affected 0UL)
+              let holder = run holder "UPDATE jobs SET u=1 WHERE id=30" (Affected 1UL)
+              let writer = run (create 3 store) "SET innodb_lock_wait_timeout=3" (Affected 0UL)
+              let writer = run writer "SET @calls=0" (Affected 0UL)
+              let waiting = Threading.Tasks.Task.Run(fun () ->
+                  handle writer "UPDATE IGNORE jobs SET p=(@calls:=@calls+1),u=CASE id WHEN 50 THEN 3 ELSE u END WHERE id>=50 ORDER BY id")
+              let blocked () = lock store.LockWaits.SyncRoot (fun () -> store.LockWaits.Edges.Count > 0)
+              let entered = Threading.SpinWait.SpinUntil((fun () -> blocked () || waiting.IsCompleted), TimeSpan.FromSeconds 2.0)
+              let wasWaiting = blocked ()
+              run holder "COMMIT" (Affected 0UL) |> ignore
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 4.0)) "the update finishes after the holder commits"
+              Expect.isTrue (entered && wasWaiting) "the first candidate waits for its secondary key"
+              let writer, result = waiting.Result
+              Expect.equal result (Affected 2UL) "the inner statement and transaction share the refreshed write view"
+              run writer "SELECT @calls AS calls" (ResultSet([ "calls" ], [ [ Some "2" ] ])) |> ignore
+              let rows = [ [ Some "1"; Some "0" ]; [ Some "3"; Some "1" ]; [ Some "6"; Some "2" ] ]
+              run setup "SELECT u,p FROM jobs ORDER BY id" (ResultSet([ "u"; "p" ], rows)) |> ignore
+
           testCase "ordered secondary offset releases a record rewritten by a rolled-back update"
           <| fun _ ->
               for isolation, changes, retainsOffset in

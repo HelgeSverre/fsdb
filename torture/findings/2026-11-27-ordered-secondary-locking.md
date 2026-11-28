@@ -335,13 +335,30 @@ and REPEATABLE READ. It succeeds after the delete commits and returns
 with the child in a separate database and with an XA-prepared delete.
 The Fsdb WAL also preserved the prepared key claim across restart.
 
-In the original 96-schedule matrix, UPDATE, ON DUPLICATE KEY UPDATE,
-and INSERT IGNORE with ON DUPLICATE KEY UPDATE can still reject a
-duplicate during staging while its owner holds the key. An assignment
-probe requires the waiting statement to evaluate its assignments once
-while a disjoint writer proceeds. The plain INSERT path still takes a
-row lock on a duplicate secondary value. It can wait unnecessarily
-behind a payload-only update or an exact primary-key locking read.
+UPDATE now waits if a committed secondary destination is still held by
+another transaction. It checks the refreshed key after the wait and
+uses the row image it already evaluated. It also rechecks a key whose
+holder committed while the assignment was running. All 24 UPDATE schedules in
+the original matrix match MySQL. The two-key probe also matches on
+wait order, assignment counts, warnings, and final rows for UPDATE
+and UPDATE IGNORE. A fatal duplicate discards earlier staged changes.
+The ignored form keeps accepted rows and visits later destinations.
+The same checks pass with WAL enabled. The audited move and delete
+schedules also match through a checked view and with a qualified
+foreign-key relationship. A
+cross-database foreign-key transaction can still fail to commit after
+another session commits disjoint changes, as it did before this fix.
+
+In seven paired native Debug runs of 600 autocommit point updates,
+the median paired throughput for changes to a secondary unique key
+was 18% lower after routing them through a tracked statement. Payload-only
+updates were within 1% by the same measure.
+
+ON DUPLICATE KEY UPDATE and its ignored form can still reject a
+duplicate during staging while its owner holds the key. The plain
+INSERT path still takes a row lock on a duplicate secondary value. It
+can wait unnecessarily behind a payload-only update or an exact
+primary-key locking read.
 Probe results show that replacing this fallback also requires modeling
 the secondary records visited by range, IN-list, and covering index
 scans, and protecting the primary gaps visited by clustered scans.

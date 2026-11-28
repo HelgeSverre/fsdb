@@ -4209,16 +4209,26 @@ let private autocommitExecution (session: Session) dbName statement =
         let database, table = splitQualified dbName table
 
         let store = Session.currentStore session
-        if mayRunNestedWrites || (Storage.tableSnapshot store database table |> Result.isError) then
-            TrackStatement
-        else
+        match Storage.tableSnapshot store database table with
+        | Error _ -> TrackStatement
+        | Ok _ when mayRunNestedWrites -> TrackStatement
+        | Ok target ->
             match statement with
             | Insert(_, _, _ :: _ :: _, _ :: _, true) -> TrackStatement
             | Update _ | Delete _ ->
                 let isolation = configuredIsolation session
                 let protectGaps = isolation = RepeatableRead || isolation = Serializable
                 match Executor.tryUnindexedWriteScan protectGaps store (registryFor session) dbName statement with
-                | None -> RunDirectly
+                | None ->
+                    match statement with
+                    | Update update ->
+                        let assignments = update.Assignments |> List.map (fun assignment -> splitQualified "" assignment.Column |> snd)
+                        let hasTriggers = lazy (Executor.hasMutationTriggers store database target.OriginalName "UPDATE")
+                        let changesKey (column: ColumnDef) =
+                            assignments |> List.exists (fun name -> column.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                            || hasTriggers.Value
+                        if Storage.mayChangeSecondaryUniqueKey target changesKey then TrackStatement else RunDirectly
+                    | _ -> RunDirectly
                 | Some(database, table) ->
                     let event = match statement with Update _ -> "UPDATE" | _ -> "DELETE"
                     if isolation = Serializable && Executor.hasMutationTriggers store database table.OriginalName event then TrackStatement

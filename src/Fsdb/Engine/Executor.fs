@@ -38250,7 +38250,7 @@ let rec private executeAsWithViewSources
                         | Ok changed ->
                             match publishPermanent with
                             | Some publish -> publish targetStore
-                            | None when useSnapshot -> Storage.commitCatalogInto store baseCatalog targetStore
+                            | None when useSnapshot -> publishMutationSnapshot store baseCatalog targetStore
                             | None -> ()
 
                             ids, Affected(uint64 (if foundRows then targetRows.Length else changed))

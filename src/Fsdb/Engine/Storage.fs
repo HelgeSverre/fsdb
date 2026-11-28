@@ -3031,6 +3031,15 @@ let private uniqueKeyGroups (table: Table) : IndexKeyGroup list =
 
     Option.toList primary @ fromIndexes
 
+/// A statement changing a unique secondary key can need a refreshed write view.
+let internal mayChangeSecondaryUniqueKey (table: Table) (assigns: ColumnDef -> bool) =
+    uniqueKeyGroups table
+    |> List.exists (fun group ->
+        not (group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase))
+        && (group.Indices |> List.exists (fun index ->
+            let column = table.Columns.[index]
+            column.Generated.IsSome || assigns column)))
+
 let private secondaryKeyGroups (table: Table) : IndexKeyGroup list =
     table.Indexes
     |> List.filter (fun index -> index.Kind = BTree && not index.Unique)
@@ -10586,18 +10595,21 @@ let private formatDuplicateUniqueValue columns group (row: Value[]) =
     |> String.concat "-"
 
 // A replacement may retain its own key; only another row can conflict.
-let private validateUpdatedUniqueKeys (table: Table) groups index rowId candidate =
+let private validateUpdatedUniqueKeysWith resolveConflict (table: Table) groups index rowId candidate =
     groups
     |> List.tryPick (fun group ->
         encodeUniqueKey table.Columns group candidate
         |> Option.bind (fun key ->
             match Map.tryFind key (Map.find group.Name index) with
-            | Some otherRowId when otherRowId <> rowId ->
+            | Some otherRowId when otherRowId <> rowId && resolveConflict group key otherRowId ->
                 Some(DuplicateKey(table.OriginalName, group.Name, formatDuplicateUniqueValue table.Columns group candidate))
             | _ -> None))
     |> function
         | Some error -> Error error
         | None -> Ok candidate
+
+let private validateUpdatedUniqueKeys table groups index rowId candidate =
+    validateUpdatedUniqueKeysWith (fun _ _ _ -> true) table groups index rowId candidate
 
 let private tryDuplicateConstraintValue (columns: ColumnDef list) (indices: int list) (rows: Value[] seq) =
     let rec loop seen remaining =
@@ -14215,6 +14227,7 @@ let private withPointUpdateDatabase
     (tableName: string)
     (rowIds: RowId list)
     (eventsOf: 'a -> CommitEvent list)
+    (refresh: unit -> bool)
     (claimKeys: Database * 'a -> (Database * 'a -> Result<'a, StorageError>) -> Result<'a, StorageError>)
     (operation: Database -> Result<Database * 'a, StorageError>)
     : Result<'a, StorageError> =
@@ -14229,23 +14242,24 @@ let private withPointUpdateDatabase
         // before taking the database cell needed by that transaction's commit.
         operation baseDb
         |> Result.bind (fun prepared -> claimKeys prepared (fun (batchDb, result) ->
-            let published =
-                lock slot (fun () ->
+            let refreshed = refresh ()
+            let publishInto (currentSlot: Database ref) =
+                lock currentSlot (fun () ->
                     let attached =
                         match store.Databases.TryGetValue dbName with
-                        | true, current -> obj.ReferenceEquals(current, slot)
+                        | true, current -> obj.ReferenceEquals(current, currentSlot)
                         | false, _ -> false
 
-                    let liveDb = slot.Value
+                    let liveDb = currentSlot.Value
 
                     if not attached then
                         Error(NoSuchDatabase dbName)
                     elif obj.ReferenceEquals(liveDb, baseDb) then
-                        publishCatalogRoots store (fun () -> slot.Value <- batchDb)
+                        publishCatalogRoots store (fun () -> currentSlot.Value <- batchDb)
                         Ok(prepareResultEvents store eventsOf result)
                     elif not rowIds.IsEmpty && canMergePointUpdate tableKey rowIds baseDb batchDb liveDb then
                         let mergedDb = mergePointUpdate dbName tableKey rowIds baseDb batchDb liveDb
-                        publishCatalogRoots store (fun () -> slot.Value <- mergedDb)
+                        publishCatalogRoots store (fun () -> currentSlot.Value <- mergedDb)
                         Ok(prepareResultEvents store eventsOf result)
                     else
                         Ok(
@@ -14253,11 +14267,18 @@ let private withPointUpdateDatabase
                                 (Fsdb.Limits.lockWaitTimeout ())
                                 store
                                 dbName
-                                slot
+                                currentSlot
                                 baseDb
                                 batchDb
                                 (fun () -> prepareResultEvents store eventsOf result)
                         ))
+
+            let published =
+                if refreshed then
+                    match store.Databases.TryGetValue dbName with
+                    | true, current -> publishInto current
+                    | false, _ -> Error(NoSuchDatabase dbName)
+                else publishInto slot
 
             published
             |> Result.map (fun acknowledge ->
@@ -14403,6 +14424,36 @@ let private withOwnedWriteLocks owner store database table rowIds keys body =
     withWriteLocksForContext (Some owner) (Fsdb.Limits.statementLockWaitTimeout ()) true
         store database table rowIds keys body
 
+let private occupiedSecondaryKeyByOtherOwner (store: Store) (owner: TransactionLockContext) database tableName key =
+    match store.KeyLocks.TryGetValue(lockNamespaceKey database tableName) with
+    | true, cache ->
+        match cache.Entries.TryGetValue key with
+        | true, weak ->
+            match weak.TryGetTarget() with
+            | true, stripe -> lock stripe.SyncRoot (fun () -> stripe.ExclusiveOwner |> Option.exists ((<>) owner.Owner))
+            | _ -> false
+        | _ -> false
+    | _ -> false
+
+let private recheckOccupiedSecondaryKey owner store database tableName (original: Table) onRecheck
+    (group: IndexKeyGroup) encoded otherRow =
+    let originalOwner = Map.find group.Name original.UniqueIndex |> Map.tryFind encoded
+    if group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase) || originalOwner <> Some otherRow then true
+    else
+        let key = uniqueKeyLockName group encoded
+        let stillOccupied () =
+            match tryCatalogTable (tableAddress database tableName) (currentUpdateCatalog store) with
+            | Some current when sameTableSchema original current ->
+                Map.find group.Name current.UniqueIndex |> Map.containsKey encoded
+            | _ -> raise (LockWaitTimeout database)
+
+        // The holder may have committed while this row's assignments ran.
+        if occupiedSecondaryKeyByOtherOwner store owner database tableName key || not (stillOccupied ()) then
+            withOwnedWriteLocks owner store database tableName [] [ key ] (fun () ->
+                onRecheck ()
+                stillOccupied ())
+        else true
+
 let private withUpdateKeyClaims owner store groups publish =
     let rec claim = function
         | [] -> publish ()
@@ -14521,6 +14572,7 @@ let private withStagedCatalogSlots (store: Store) (dbName: string) body =
 let private withStagedCatalogPublishing
     (store: Store)
     dbName
+    stageOutsideLocks
     eventsOf
     (operation: Catalog -> Database -> Result<Catalog * 'result, StorageError>)
     keysOf
@@ -14559,25 +14611,31 @@ let private withStagedCatalogPublishing
             acknowledge ()
             Ok result)
 
-    let prepared =
+    let stage (slots: (string * Database ref) list) baseCatalog =
+        match tryCatalogDatabase dbName baseCatalog with
+        | None -> Error(NoSuchDatabase dbName)
+        | Some database ->
+            operation baseCatalog database
+            |> Result.map (fun (batchCatalog, result) ->
+                match keysOf result with
+                | [] when not stageOutsideLocks ->
+                    publishCatalogRoots store (fun () ->
+                        for name, slot in slots do
+                            slot.Value <- overlayChangedTables baseCatalog.[name] batchCatalog.[name] slot.Value)
+                    let acknowledge = prepareResultEvents store eventsOf result
+                    fun () -> acknowledge (); Ok result
+                | keys -> publishAfterKeyWait baseCatalog batchCatalog result keys)
+
+    let withSlots body =
         withReferentialSchemaLock SharedAccess store (fun () ->
-            withStagedCatalogSlots store dbName (fun slots baseCatalog ->
-                match tryCatalogDatabase dbName baseCatalog with
-                | None -> Error(NoSuchDatabase dbName)
-                | Some database ->
-                    operation baseCatalog database
-                    |> Result.map (fun (batchCatalog, result) ->
-                        match keysOf result with
-                        | [] ->
-                            publishCatalogRoots store (fun () ->
-                                for name, slot in slots do
-                                    slot.Value <- overlayChangedTables baseCatalog.[name] batchCatalog.[name] slot.Value)
-                            let acknowledge = prepareResultEvents store eventsOf result
-                            fun () -> acknowledge (); Ok result
-                        | keys ->
-                            // Wait after leaving the schema and catalog locks. A holder
-                            // must be able to commit or roll back before this can publish.
-                            publishAfterKeyWait baseCatalog batchCatalog result keys)))
+            withStagedCatalogSlots store dbName body)
+
+    let prepared =
+        if stageOutsideLocks then
+            // Transaction-private roots are immutable. A collision can wait during staging,
+            // so capture the catalog first and take the slots again only to publish.
+            stage [] (withSlots (fun _ catalog -> catalog))
+        else withSlots stage
 
     prepared |> Result.bind (fun publish -> publish ())
 
@@ -14655,7 +14713,7 @@ let private deleteRowsCore
                     withOwnedWriteLocks owner store database table [] keys (fun () -> claim rest prepared publish)
             let ids = candidates |> Option.map (List.map fst) |> Option.defaultWith (fun () -> fullScanRowIds store dbName tableName)
             withOwnedWriteLocks owner store dbName tableName ids [] (fun () ->
-                withStagedCatalogPublishing store dbName eventsOf operation releasedKeys claim))
+                withStagedCatalogPublishing store dbName false eventsOf operation releasedKeys claim))
 
     match result with
     | Ok(affected, _, _, _) -> Ok affected
@@ -14681,8 +14739,8 @@ let deleteRowsCandidates
 let internal deleteRowsCandidatesById store dbName tableName candidates predicate =
     deleteRowsCore store dbName tableName (Some candidates) predicate
 
-let private withQualifiedUpdatePublishing owner store dbName policy tableName eventsOf operation =
-    withStagedCatalogPublishing store dbName eventsOf operation (updateKeyClaims dbName tableName)
+let private withQualifiedUpdatePublishing owner store dbName stageOutsideLocks policy tableName eventsOf operation =
+    withStagedCatalogPublishing store dbName stageOutsideLocks eventsOf operation (updateKeyClaims dbName tableName)
         (fun keys batch publish -> withCheckedUpdateDestinations owner store policy keys setCatalogTable batch publish)
 
 /// Upserts through the collation-aware unique indexes. MySQL counts a changed
@@ -14798,7 +14856,7 @@ and internal upsertRowsWithOrdinalChecked
                                     publish (ignoredLateDuplicate (snd batch))
                                 | Error error, _ -> Error error
                                 | Ok (), _ -> publish batch)
-                        let publish () = withStagedCatalogPublishing store dbName eventsOf operation keysOf claimKeys
+                        let publish () = withStagedCatalogPublishing store dbName false eventsOf operation keysOf claimKeys
                         let lockRows = rowsIn |> List.choose (Result.toOption >> Option.map (List.map Some))
                         match tryInsertLockTargets store dbName tableName columns lockRows with
                         | Some targets when not lockRows.IsEmpty ->
@@ -14901,7 +14959,7 @@ let private updateRowsCore
                   let database, table = catalogTableIdentity batch.OriginalCatalog address
                   RowsUpdatedById(database, table, updates) ]
 
-    let apply candidateRows catalog db =
+    let apply resolveConflict candidateRows catalog db =
         let key = normalizeTableName tableName
         let address = tableAddress dbName key
 
@@ -14959,7 +15017,7 @@ let private updateRowsCore
                                     else
                                         withUpdateRow (fun () -> updater row |> Result.bind (coerceRow row))
                                         |> Result.bind (fun newRow ->
-                                            validateUpdatedUniqueKeys table uniqueGroups index rowId newRow
+                                            validateUpdatedUniqueKeysWith (resolveConflict table) table uniqueGroups index rowId newRow
                                             |> Result.bind (fun newRow ->
                                                 (if checkFks then
                                                      let currentDatabase = tryCatalogDatabase address.Database cascadeCatalog |> Option.get
@@ -15012,6 +15070,21 @@ let private updateRowsCore
                 setCatalogTable address updated cascadeCatalog, batch))
 
     let publish owner =
+        let canWait = dynamicWriteRebaseActive store
+        let mutable needsRefresh = false
+        let resolveConflict table =
+            if canWait then recheckOccupiedSecondaryKey owner store dbName tableName table (fun () -> needsRefresh <- true)
+            else fun _ _ _ -> true
+        let apply = apply resolveConflict
+        let refresh () =
+            if not needsRefresh then false
+            else
+                match prepareDynamicWriteRebase store with
+                | Some(rebase, prepared) ->
+                    applyDynamicWriteRebase store rebase prepared
+                    true
+                | None -> false
+
         let qualifiedForeignKeys =
             catalogHasQualifiedForeignKeysAffecting store.Catalog (Set.singleton (dbName.ToLowerInvariant()))
         let claimMovedKeys ((_, result) as prepared) publish =
@@ -15023,13 +15096,13 @@ let private updateRowsCore
                 let catalog = setCatalogDatabase dbName db store.Catalog
                 applyRows catalog db
                 |> Result.map (fun (updatedCatalog, result) -> tryCatalogDatabase dbName updatedCatalog |> Option.get, result)
-            withPointUpdateDatabase store dbName tableName rowIds eventsOf claimMovedKeys operation
+            withPointUpdateDatabase store dbName tableName rowIds eventsOf refresh claimMovedKeys operation
 
         match candidates with
         | None ->
             withOwnedWriteLocks owner store dbName tableName (fullScanRowIds store dbName tableName) [] (fun () ->
                 if qualifiedForeignKeys then
-                    withQualifiedUpdatePublishing owner store dbName constraintPolicy tableName eventsOf (apply None)
+                    withQualifiedUpdatePublishing owner store dbName canWait constraintPolicy tableName eventsOf (apply None)
                 else publishPrepared [] (apply None))
         | Some rows ->
             let rowIds = rows |> List.map fst
@@ -15046,7 +15119,7 @@ let private updateRowsCore
             // Refresh only inside publication locks, retaining the requested row order.
             withOwnedWriteLocks owner store dbName tableName rowIds [] (fun () ->
                 if qualifiedForeignKeys then
-                    withQualifiedUpdatePublishing owner store dbName constraintPolicy tableName eventsOf applyRefreshed
+                    withQualifiedUpdatePublishing owner store dbName canWait constraintPolicy tableName eventsOf applyRefreshed
                 else
                     publishPrepared rowIds applyRefreshed)
 
