@@ -72,20 +72,39 @@ in memory and WAL mode.
 
 ### Conditions on a materialized CTE
 
-Fsdb now pushes eligible predicates on direct numeric projections into a
-singly referenced CTE materialized by `NO_MERGE`. This filters the underlying
-table before projection and geometry validation. Renamed columns, prepared
-numeric bounds, and qualified filters in an inner join match the pinned
-MySQL oracle in memory and WAL mode. The filter stays outside the CTE if
-pushdown is disabled by the hint, if the CTE is shared or uses an inner
-`LIMIT`, or if the reference is on the nullable side of an outer join.
+Fsdb pushes eligible predicates on direct numeric projections and bounded
+signed integer arithmetic into a singly referenced CTE materialized by
+`NO_MERGE`. This filters the underlying table before projection and
+geometry validation. Arithmetic can move when every addition, subtraction,
+and multiplication fits in signed `BIGINT` for the declared column ranges.
+Renamed columns, prepared parameters, and qualified filters in an inner
+join are covered. Pushdown stays disabled when the hint requests it, for
+shared CTEs or an inner `LIMIT`, and on the nullable side of an outer join.
 [MySQL condition pushdown rules](https://dev.mysql.com/doc/refman/8.4/en/derived-condition-pushdown-optimization.html)
+
+An impossible filter can skip materialization even with pushdown disabled.
+MySQL uses the temporary field's integer width and nullability for this
+decision. For example, `4 * smallint_col` can occupy an `INT` field, while
+`int_col - 5` occupies a `BIGINT` field. A comparison to a value just above
+the `INT` maximum can skip the first materialization. The second still
+validates geometry. [MySQL temporary field selection](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_tmp_table.cc#L232-L264)
 
 An indexed point filter over 2,000 source rows returned the same polygon
 with 2 examined rows, compared with 4,000 when pushdown was disabled.
+A filter on `(id + 3) * (id - 1)` over the same fixture examined 2,001 rows
+with pushdown and 4,000 with it disabled. The computed filter still scans
+the source and materializes only the matching row.
 
-Computed outputs, grouped and union CTEs, and CTEs materialized without
-an explicit hint still need pushdown coverage. MySQL also skips a shared
-materialization if an unmaterialized join input can prove the result
-empty. Fsdb can validate that CTE before the join discovers the empty
-input. Disabling `derived_merge` through `optimizer_switch` remains open.
+The pinned MySQL 8.4.11 replay matched Fsdb in memory and WAL mode for
+integer boundary comparisons, exponent literals, renamed outputs, explicit
+pushdown opt-outs, and text and binary prepared statements. Markers in
+both the CTE and its outer filter bind in SQL text order.
+
+Other computed outputs, grouped and union CTEs, and CTEs materialized without
+an explicit hint still need pushdown coverage. Signed arithmetic that can
+overflow stays outside this optimization. In the overflow control, MySQL
+returns error 1690 for `BIGINT` maximum plus one and Fsdb returns the widened
+decimal value. MySQL also skips a shared materialization if an unmaterialized
+join input can prove the result empty. Fsdb can validate that CTE before the
+join discovers the empty input. Disabling `derived_merge` through
+`optimizer_switch` remains open.

@@ -476,6 +476,42 @@ type private PhysicalProjectionColumn =
     | ProjectColumn of index: int
     | CalculateColumn of read: (Value[] -> Value) * bounds: (bigint * bigint) * shiftedKey: (int * bigint) option
 
+let private signedIntegerTypeBounds columnType =
+    let bits =
+        match columnType with
+        | TTinyInt false -> Some 8
+        | TSmallInt false -> Some 16
+        | TMediumInt false -> Some 24
+        | TInt false -> Some 32
+        | TBigInt false -> Some 64
+        | _ -> None
+    bits |> Option.map (fun bits ->
+        let limit = 1I <<< (bits - 1)
+        -limit, limit - 1I)
+
+let private tryBoundedSignedArithmetic operator (a: bigint, b: bigint) (c: bigint, d: bigint) =
+    let calculated =
+        match operator with
+        | Add -> Some(Value.add, (a + c, b + d))
+        | Sub -> Some(Value.sub, (a - d, b - c))
+        | SignedSub -> Some(Value.subSigned, (a - d, b - c))
+        | Mul ->
+            let products = [ a * c; a * d; b * c; b * d ]
+            Some(Value.mul, (List.min products, List.max products))
+        | _ -> None
+    calculated |> Option.filter (fun (_, (lower, upper)) ->
+        lower >= bigint System.Int64.MinValue && upper <= bigint System.Int64.MaxValue)
+
+let private trySignedIntegerConstant = function
+    | LiteralValue(VInt value) -> Some(bigint value)
+    | Neg(LiteralValue(VInt value)) when value >= 0L -> Some(bigint (-value))
+    | Cast(LiteralValue(VInt value), target) ->
+        let number = bigint value
+        signedIntegerTypeBounds target
+        |> Option.filter (fun (minimum, maximum) -> number >= minimum && number <= maximum)
+        |> Option.map (fun _ -> number)
+    | _ -> None
+
 let private readProjectionColumn (row: Value[]) = function
     | ProjectColumn index -> row.[index]
     | CalculateColumn(read, _, _) -> read row
@@ -902,7 +938,13 @@ type private AggregateBindingScope =
 type private CteOuterCondition =
     { Qualifier: string
       AllowsBareColumns: bool
+      PushdownEnabled: bool
       Predicate: Expr }
+
+type private CteNumericOutput =
+    { Expression: Expr
+      MaterializedBounds: (bigint * bigint) option
+      Nullable: bool }
 
 type private StatementMemo =
     { FromSubqueries: Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>
@@ -15485,12 +15527,55 @@ and private pushMaterializedCteCondition store registry dbName cte condition =
                 if cte.CteColumns.IsEmpty then projections |> List.map projectionLabel else cte.CteColumns
             if not (sameLength names projections) || (tryDuplicateIgnoreCase id names).IsSome then None
             else
+                let qualified (column: ColumnDef) = QualifiedCol(qualifier, column.Name)
+                let context =
+                    lazy (contextFactory store registry dbName
+                            (columnIndexOf table.Columns) (singleQualifier qualifier table.Columns)
+                            None (probeRow table.Columns))
+                // MySQL chooses the temporary field by display width, independently of the arithmetic bounds.
+                let temporaryIntegerBounds expression =
+                    metadataOfExpr context.Value expression
+                    |> Option.bind (fun metadata ->
+                        if metadata.TypeId = TypeLongLong && not (hasMetadataFlag UnsignedFlag metadata) then
+                            signedIntegerTypeBounds (if metadata.ColumnLength < 10u then TInt false else TBigInt false)
+                        else None)
+
+                let rec boundArithmetic expression =
+                    match expression with
+                    | BinOp((Add | Sub | SignedSub | Mul as operator), left, right) ->
+                        Option.map2 (fun left right -> left, right) (boundArithmetic left) (boundArithmetic right)
+                        |> Option.bind (fun ((left, leftBounds, leftNullable), (right, rightBounds, rightNullable)) ->
+                            tryBoundedSignedArithmetic operator leftBounds rightBounds
+                            |> Option.map (fun (_, bounds) -> BinOp(operator, left, right), bounds, leftNullable || rightNullable))
+                    | _ ->
+                        match trySignedIntegerConstant expression with
+                        | Some value -> Some(expression, (value, value), false)
+                        | None ->
+                            numericProjection qualifier table.Columns expression
+                            |> Option.bind (fun column ->
+                                signedIntegerTypeBounds column.Type
+                                |> Option.map (fun bounds -> qualified column, bounds, column.Nullable))
+
+                let numericOutput expression : CteNumericOutput option =
+                    match expression with
+                    | BinOp((Add | Sub | SignedSub | Mul), _, _) ->
+                        boundArithmetic expression
+                        |> Option.map (fun (rewritten, _, nullable) ->
+                            { Expression = rewritten
+                              MaterializedBounds = temporaryIntegerBounds rewritten
+                              Nullable = nullable })
+                    | _ ->
+                        numericProjection qualifier table.Columns expression
+                        |> Option.filter (_.Type >> isExactNumericIndexType)
+                        |> Option.map (fun column ->
+                            { Expression = qualified column
+                              MaterializedBounds = signedIntegerTypeBounds column.Type
+                              Nullable = column.Nullable })
+
                 let keys =
                     List.zip names projections
                     |> List.choose (fun (name, projection) ->
-                        numericProjection qualifier table.Columns projection.Expression
-                        |> Option.filter (_.Type >> isExactNumericIndexType)
-                        |> Option.map (fun column -> name.ToLowerInvariant(), QualifiedCol(qualifier, column.Name)))
+                        numericOutput projection.Expression |> Option.map (fun expression -> name.ToLowerInvariant(), expression))
                     |> Map.ofList
                 let outputKey = function
                     | Col name when condition.AllowsBareColumns && (tryRoutineVariable name).IsNone ->
@@ -15500,16 +15585,50 @@ and private pushMaterializedCteCondition store registry dbName cte condition =
                     | _ -> None
                 let rec safe = function
                     | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VNull) -> true
+                    | LiteralValue(VDouble value) | Neg(LiteralValue(VDouble value)) -> System.Double.IsFinite value
+                    | Neg(LiteralValue(VDecimal _)) -> true
                     | (Col _ | QualifiedCol _) as key -> (outputKey key).IsSome
                     | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq | And | Or), left, right) -> safe left && safe right
                     | IsNull value | IsNotNull value | Not value -> safe value
                     | In(value, candidates) -> safe value && List.forall safe candidates
                     | Between(value, lower, upper) -> safe value && safe lower && safe upper
+                    | expression -> (trySignedIntegerConstant expression).IsSome
+                let comparisonInteger expression =
+                    let exactDouble value =
+                        if abs value <= float (1L <<< 53) && value = System.Math.Truncate value then Some(bigint (int64 value))
+                        else None
+                    match expression with
+                    | LiteralValue(VDouble value) -> exactDouble value
+                    | Neg(LiteralValue(VDouble value)) -> exactDouble (-value)
+                    | _ -> trySignedIntegerConstant expression
+
+                let rec cannotMatch = function
+                    | IsNull expression -> outputKey expression |> Option.exists (fun output -> not output.Nullable)
+                    | BinOp(And, left, right) -> cannotMatch left || cannotMatch right
+                    | BinOp(Or, left, right) -> cannotMatch left && cannotMatch right
+                    | BinOp((Lt | Lte | Gt | Gte | Eq | NullSafeEq as operator), left, right) ->
+                        let impossible relation key constant =
+                            match outputKey key |> Option.bind _.MaterializedBounds, comparisonInteger constant with
+                            | Some(minimum, maximum), Some value ->
+                                match relation with
+                                | Lt -> minimum >= value
+                                | Lte -> minimum > value
+                                | Gt -> maximum <= value
+                                | Gte -> maximum < value
+                                | _ -> value < minimum || value > maximum
+                            | _ -> false
+                        let reverse =
+                            match operator with Lt -> Gt | Lte -> Gte | Gt -> Lt | Gte -> Lte | _ -> operator
+                        impossible operator left right || impossible reverse right left
                     | _ -> false
                 let pushed =
-                    condition.Predicate |> conjuncts
-                    |> List.filter (fun expression -> safe expression && Expression.exists (outputKey >> Option.isSome) expression)
-                    |> List.map (Expression.rewrite outputKey)
+                    if safe condition.Predicate && cannotMatch condition.Predicate then [ Lit(VInt 0L) ]
+                    elif not condition.PushdownEnabled then []
+                    else
+                        let rewrite = outputKey >> Option.map (fun output -> output.Expression)
+                        condition.Predicate |> conjuncts
+                        |> List.filter (fun expression -> safe expression && Expression.exists (outputKey >> Option.isSome) expression)
+                        |> List.map (Expression.rewrite rewrite)
                 if pushed.IsEmpty then None
                 else
                     let where = combineConjuncts ((select.Where |> optionalConjuncts) @ pushed)
@@ -18506,37 +18625,15 @@ and private tryPhysicalProjectionUncached
                     directIndex expression
                     |> Option.map (projectionFilterColumn input)
 
-                let signedBounds columnType =
-                    let bits =
-                        match columnType with
-                        | TTinyInt false -> Some 8
-                        | TSmallInt false -> Some 16
-                        | TMediumInt false -> Some 24
-                        | TInt false -> Some 32
-                        | TBigInt false -> Some 64
-                        | _ -> None
-                    bits |> Option.map (fun bits ->
-                        let limit = 1I <<< (bits - 1)
-                        -limit, limit - 1I)
-
                 let rec compileArithmetic expression =
-                    let combine evaluate bounds left right =
-                        Option.map2 (fun (readLeft, physicalLeft, leftBounds) (readRight, physicalRight, rightBounds) ->
-                            let read first second row = evaluate (first row) (second row)
-                            read readLeft readRight, read physicalLeft physicalRight, bounds leftBounds rightBounds)
-                            (compileArithmetic left) (compileArithmetic right)
-                        |> Option.filter (fun (_, _, (lower, upper)) ->
-                            lower >= bigint System.Int64.MinValue && upper <= bigint System.Int64.MaxValue)
-
                     match expression with
-                    | BinOp(Add, left, right) ->
-                        combine Value.add (fun (a, b) (c, d) -> a + c, b + d) left right
-                    | BinOp(Sub, left, right) ->
-                        combine Value.sub (fun (a, b) (c, d) -> a - d, b - c) left right
-                    | BinOp(Mul, left, right) ->
-                        combine Value.mul (fun (a, b) (c, d) ->
-                            let products = [ a * c; a * d; b * c; b * d ]
-                            List.min products, List.max products) left right
+                    | BinOp((Add | Sub | Mul as operator), left, right) ->
+                        Option.map2 (fun left right -> left, right) (compileArithmetic left) (compileArithmetic right)
+                        |> Option.bind (fun ((readLeft, physicalLeft, leftBounds), (readRight, physicalRight, rightBounds)) ->
+                            tryBoundedSignedArithmetic operator leftBounds rightBounds
+                            |> Option.map (fun (evaluate, bounds) ->
+                                let read first second row = evaluate (first row) (second row)
+                                read readLeft readRight, read physicalLeft physicalRight, bounds))
                     | _ ->
                         match correlatedSignedIntegerLiteral expression with
                         | Some value ->
@@ -18549,7 +18646,7 @@ and private tryPhysicalProjectionUncached
                                 let bounds =
                                     match physical with
                                     | CalculateColumn(_, bounds, _) -> Some bounds
-                                    | ProjectColumn _ -> signedBounds input.OutputColumns.[index].Type
+                                    | ProjectColumn _ -> signedIntegerTypeBounds input.OutputColumns.[index].Type
                                 bounds
                                 |> Option.map (fun bounds ->
                                     (fun (row: Value[]) -> row.[index]), (fun row -> readProjectionColumn row physical), bounds))
@@ -27236,7 +27333,7 @@ let private emitJoinHintDiagnostics store registry schema statement =
                         Map.tryFind (parent, Some alias) pending.ConditionPushdown
                         |> Option.orElseWith (fun () -> Map.tryFind (parent, None) pending.ConditionPushdown)
                     match source.Cte, blocks.[parent].Query with
-                    | Some cte, Some owner when pushdown <> Some false && not (sharedCtes.Contains cte) ->
+                    | Some cte, Some owner when not (sharedCtes.Contains cte) ->
                         let sources = blocks.[parent].Sources |> List.collect FromItem.leaves
                         let aliasCount =
                             sources |> List.sumBy (fun item ->
@@ -27244,7 +27341,10 @@ let private emitJoinHintDiagnostics store registry schema statement =
                         if aliasCount = 1 && not (Set.contains alias (nullableJoinQualifiers owner)) then
                             owner.Where |> Option.iter (fun predicate ->
                                 memo.MaterializedCteConditions.[cte] <-
-                                    { Qualifier = alias; AllowsBareColumns = sources.Length = 1; Predicate = predicate })
+                                    { Qualifier = alias
+                                      AllowsBareColumns = sources.Length = 1
+                                      PushdownEnabled = pushdown <> Some false
+                                      Predicate = predicate })
                     | _ -> ()
                 | _ -> ()
             | _ -> ()

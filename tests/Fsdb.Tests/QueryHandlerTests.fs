@@ -5556,8 +5556,8 @@ let tests =
               let source = $"SELECT id,{shape} AS shape FROM envelope_ids"
               let run =
                   queryFixture
-                      [ "CREATE TABLE envelope_ids(id INT PRIMARY KEY)"
-                        "INSERT INTO envelope_ids VALUES(1),(2)"
+                      [ "CREATE TABLE envelope_ids(id INT PRIMARY KEY, amount SMALLINT NULL)"
+                        "INSERT INTO envelope_ids VALUES(1,NULL),(2,2)"
                         $"CREATE ALGORITHM=MERGE VIEW merged_envelopes AS {source}"
                         $"CREATE ALGORITHM=TEMPTABLE VIEW temp_envelopes AS {source}"
                         "CREATE VIEW constant_envelope AS SELECT ST_MakeEnvelope(POINT(0,0),POINT(0,0)) AS shape" ]
@@ -5594,11 +5594,28 @@ let tests =
                   match run sql with
                   | ResultSet(_, rows) -> Expect.isEmpty rows sql
                   | other -> failtestf "%s should be empty, got %A" sql other
-              let partlyValid = "SELECT id,ST_MakeEnvelope(POINT(id,0),POINT(IF(id>1,id+1,id),IF(id>1,1,0))) AS shape FROM envelope_ids"
+              let mixedShape = "ST_MakeEnvelope(POINT(id,0),POINT(IF(id>1,id+1,id),IF(id>1,1,0)))"
+              let partlyValid = $"SELECT id,{mixedShape} AS shape FROM envelope_ids"
               let matching = $"WITH e AS ({partlyValid}) SELECT /*+ NO_MERGE(e) */ id FROM e WHERE id=2"
               Expect.equal (run matching) (ResultSet([ "id" ], [ [ Some "2" ] ])) matching
+              let computed = $"SELECT (id+3)*(id-1) AS k,{mixedShape} AS g FROM envelope_ids"
+              let expected = ResultSet([ "k" ], [ [ Some "5" ] ])
+              for predicate in [ "k IN (-1,5)"; "k IN (-1e0,5e0)" ] do
+                  let sql = $"WITH e AS ({computed}) SELECT /*+ NO_MERGE(e) */ k FROM e WHERE {predicate}"
+                  Expect.equal (run sql) expected sql
+              let disabled = "/*+ NO_MERGE(e) NO_DERIVED_CONDITION_PUSHDOWN(e) */"
+              let impossible = $"WITH e AS ({computed}) SELECT {disabled} k FROM e WHERE k IS NULL"
+              let outsideInt = $"WITH e AS (SELECT 4*amount AS k,{shape} AS g FROM envelope_ids) SELECT {disabled} k FROM e WHERE k>=2.14748365e9"
+              for sql in [ impossible; outsideInt ] do
+                  Expect.equal (run sql) (ResultSet([ "k" ], [])) sql
+              let prepared = $"WITH e AS (SELECT id+? AS k,{mixedShape} AS g FROM envelope_ids) SELECT /*+ NO_MERGE(e) */ k FROM e WHERE k=?"
+              Expect.equal (run $"PREPARE computed FROM '{prepared}'") (Affected 0UL) prepared
+              run "SET @shift=3,@target=5" |> ignore
+              Expect.equal (run "EXECUTE computed USING @shift,@target") expected prepared
               for sql in
                   [ $"WITH e AS ({source}) SELECT /*+ NO_MERGE(e) NO_DERIVED_CONDITION_PUSHDOWN(e) */ id FROM e WHERE id=999"
+                    $"WITH e AS ({computed}) SELECT /*+ NO_MERGE(e) NO_DERIVED_CONDITION_PUSHDOWN(e) */ k FROM e WHERE k=5"
+                    $"WITH e AS (SELECT id-5 AS k, {shape} AS g FROM envelope_ids) SELECT {disabled} k FROM e WHERE k>=2147483650"
                     $"WITH e AS ({partlyValid}) SELECT /*+ NO_MERGE(a) NO_MERGE(b) */ a.id FROM e a JOIN e b ON b.id=a.id WHERE a.id=2"
                     $"WITH e AS ({source} LIMIT 1) SELECT /*+ NO_MERGE(e) */ id FROM e WHERE id=999" ] do
                   TestSupport.Sql.expectError 1416 (run sql) sql
