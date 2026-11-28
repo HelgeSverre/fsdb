@@ -1240,6 +1240,9 @@ let private planningProbe = System.Threading.AsyncLocal<bool>()
 let private emptyPhysicalPlanningProbe = System.Threading.AsyncLocal<bool>()
 let private accessPlanningMemo = System.Threading.AsyncLocal<AccessPlanningMemo option>()
 let private directOnlyRestriction = System.Threading.AsyncLocal<string option>()
+
+let private hasReadViewRestrictions (store: Store) =
+    store.HasUnavailableReadIndexes || not store.UnavailableReadLayouts.IsEmpty
 let private triggerRowScope = System.Threading.AsyncLocal<TriggerRowScope option>()
 let private observedTriggerWrites = System.Threading.AsyncLocal<(Value[] * HashSet<int>) option>()
 let private viewCheckScope = System.Threading.AsyncLocal<ViewCheckScope option>()
@@ -8371,7 +8374,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | Exists select ->
         let ctx = expressionSubqueryContext ctx select
         let indexed =
-            if Set.isEmpty ctx.Store.UnavailableReadLayouts && not ctx.Store.HasUnavailableReadIndexes then
+            if not (hasReadViewRestrictions ctx.Store) then
                 tryCorrelatedExists ctx select |> Option.orElseWith (fun () -> tryDecorrelatedExists ctx select)
             else None
         match indexed with
@@ -8388,7 +8391,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | Subquery select ->
         let ctx = expressionSubqueryContext ctx select
         let shortcut =
-            if Set.isEmpty ctx.Store.UnavailableReadLayouts && not ctx.Store.HasUnavailableReadIndexes then
+            if not (hasReadViewRestrictions ctx.Store) then
                 tryMissingCorrelatedAggregateArgument ctx select
                 |> Option.orElseWith (fun () -> tryCorrelatedCount ctx select)
                 |> Option.orElseWith (fun () -> tryFoldCorrelatedRangeAggregate ctx select)
@@ -10324,9 +10327,8 @@ and private runExpressionSubquery
           RowEqualityMembership = None }
 
     match memo.TryGetValue cacheKey with
-    // A metadata-only result must not satisfy a later physical read of a changed table.
-    | _ when (metadataProbe.Value || planningProbe.Value)
-             && (ctx.Store.HasUnavailableReadIndexes || not (Set.isEmpty ctx.Store.UnavailableReadLayouts)) -> execute (Some ctx)
+    // A probe may skip read-view checks that execution must enforce.
+    | _ when (metadataProbe.Value || planningProbe.Value) && hasReadViewRestrictions ctx.Store -> execute (Some ctx)
     | true, MemoizedSubquery result -> result
     | true, UnmemoizedSubquery -> execute (Some ctx)
     | _ when isStatementStableSelect ctx.Store ctx.Registry ctx.DbName emptySubqueryScope cacheKey ->
@@ -17559,19 +17561,20 @@ and private runUnlockedSelectStmt
             | Some(columns, rows) -> runArbitrary columns rows None select
             | None ->
                 let physicalTable = physicalFastPathTable store dbName tref
-                let hasUnavailableIndexes = physicalTable |> Option.exists (fun table -> not table.UnavailableReadIndexes.IsEmpty)
+                let restrictedTable = physicalTable |> Option.filter (fun table -> not table.UnavailableReadIndexes.IsEmpty)
+                let hasUnavailableIndexes = restrictedTable.IsSome
                 let forced scope name =
                     indexHintsFor scope tref |> List.exists (fun hint ->
                         hint.Kind = ForceIndex && hint.Indexes |> List.exists (equalsIgnoreCase name))
                 let withIndexes names read =
                     let error =
-                        if not hasUnavailableIndexes then None
-                        else physicalTable |> Option.bind (fun table -> snapshotIndexReadError store registry dbName table tref select outer names)
+                        restrictedTable
+                        |> Option.bind (fun table -> snapshotIndexReadError store registry dbName table tref select outer names)
                     match error with
                     | Some error -> error, [], []
                     | None -> read ()
                 let viableOrder scope (plan: IndexOrderPlan) =
-                    physicalTable |> Option.forall (fun table ->
+                    restrictedTable |> Option.forall (fun table ->
                         not (Storage.readIndexUnavailable table plan.KeyName)
                         || forced scope plan.KeyName || snapshotIndexCovers table select plan.KeyName)
                 match tryGroupIndexOrder store registry dbName tref select |> Option.filter (viableOrder IndexGroupBy) with
@@ -17584,13 +17587,18 @@ and private runUnlockedSelectStmt
                         let physicalCandidates =
                             physicalTable
                             |> Option.map (fun table ->
-                                physicalAccessCandidatesInTableWith CostedRead store registry table tref select.Where
-                                |> List.filter (fun access ->
-                                    table.UnavailableReadIndexes.IsEmpty
-                                    || not (QueryPlanner.preferScanForSmallSecondaryRead table.RowsArray.Count)
-                                    || (physicalAccessKeyNames access |> List.forall (fun name ->
-                                        not (Storage.readIndexUnavailable table name) || forced IndexJoin name
-                                        || (match access with IndexMergeAccess _ -> false | _ -> snapshotIndexCovers table select name)))))
+                                let candidates = physicalAccessCandidatesInTableWith CostedRead store registry table tref select.Where
+                                if not hasUnavailableIndexes || not (QueryPlanner.preferScanForSmallSecondaryRead table.RowsArray.Count) then
+                                    candidates
+                                else
+                                    candidates |> List.filter (fun access ->
+                                        let covers name =
+                                            match access with
+                                            | IndexMergeAccess _ -> false
+                                            | _ -> snapshotIndexCovers table select name
+                                        physicalAccessKeyNames access
+                                        |> List.forall (fun name ->
+                                            not (Storage.readIndexUnavailable table name) || forced IndexJoin name || covers name)))
                             |> Option.defaultValue []
 
                         let coveredSelect access =
@@ -17649,14 +17657,12 @@ and private runUnlockedSelectStmt
                                     | Some plan -> withIndexes [ plan.KeyName ] (fun () -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] })
                                     | None ->
                                         let fullScanIndex () =
-                                            if not hasUnavailableIndexes then []
-                                            else
-                                                match physicalTable with
-                                                | Some table ->
-                                                    match table.Indexes |> List.filter (fun index -> index.Kind = BTree && forced IndexJoin index.Name) with
-                                                    | [ index ] when snapshotIndexCovers table select index.Name -> [ index.Name ]
-                                                    | _ -> []
-                                                | None -> []
+                                            match restrictedTable with
+                                            | Some table ->
+                                                match table.Indexes |> List.filter (fun index -> index.Kind = BTree && forced IndexJoin index.Name) with
+                                                | [ index ] when snapshotIndexCovers table select index.Name -> [ index.Name ]
+                                                | _ -> []
+                                            | None -> []
                                         let names = physicalAccess |> Option.map physicalAccessKeyNames |> Option.defaultWith fullScanIndex
                                         withIndexes names (fun () ->
                                             let resolved =

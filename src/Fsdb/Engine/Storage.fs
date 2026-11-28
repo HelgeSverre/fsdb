@@ -4108,62 +4108,67 @@ let private overlayConsistentRows (pinned: Table) (baseline: Table) (working: Ta
                 SecondaryOrder = rebuildSecondaryOrder visible }
             |> publishRowsWithDocumentRules (documentRulesFrom working sourceRowIds) pinned)
 
-let private buildReadIndexBinding (pinned: Table) (current: Table) =
-    let bound =
-        { pinned with
-            OriginalName = current.OriginalName
-            Columns = current.Columns
-            Indexes = current.Indexes
-            ReadIndexRevisions = current.ReadIndexRevisions }
+let private useCurrentReadDefinition (pinned: Table) (current: Table) =
+    { pinned with
+        OriginalName = current.OriginalName
+        Columns = current.Columns
+        Indexes = current.Indexes
+        ReadIndexRevisions = current.ReadIndexRevisions }
 
-    if pinned.Indexes = current.Indexes && pinned.ReadIndexRevisions = current.ReadIndexRevisions then bound
-    else
-        let previousNames =
-            pinned.Indexes |> List.choose (fun index ->
-                pinned.ReadIndexRevisions |> Map.tryFind (index.Name.ToLowerInvariant())
-                |> Option.map (fun revision -> revision, index.Name)) |> Map.ofList
-        let inherited, added =
-            current.Indexes |> List.fold (fun (inherited, added) index ->
-                let source =
-                    current.ReadIndexRevisions |> Map.tryFind (index.Name.ToLowerInvariant())
-                    |> Option.bind (fun revision -> Map.tryFind revision previousNames)
-                match source with
-                | Some name -> (index.Name, name) :: inherited, added
-                | None -> inherited, index :: added) ([], [])
-        let previousExplicit = pinned.Indexes |> List.map _.Name |> Set.ofList
-        let inheritNamed previous =
-            let synthetic = previous |> Map.filter (fun name _ -> not (Set.contains name previousExplicit))
-            inherited |> List.fold (fun indexes (name, source) ->
-                match Map.tryFind source previous with
-                | Some entries -> Map.add name entries indexes
-                | None -> indexes) synthetic
-        let addedBtrees = added |> List.filter (fun index ->
+let private rebindChangedReadIndexes (pinned: Table) (current: Table) =
+    let bound = useCurrentReadDefinition pinned current
+    let previousNames =
+        pinned.Indexes
+        |> List.choose (fun index ->
+            Map.tryFind (index.Name.ToLowerInvariant()) pinned.ReadIndexRevisions
+            |> Option.map (fun revision -> revision, index.Name))
+        |> Map.ofList
+    let inherited, added =
+        current.Indexes
+        |> List.fold (fun (inherited, added) index ->
+            let previousName =
+                Map.tryFind (index.Name.ToLowerInvariant()) current.ReadIndexRevisions
+                |> Option.bind (fun revision -> Map.tryFind revision previousNames)
+            match previousName with
+            | Some name -> (index.Name, name) :: inherited, added
+            | None -> inherited, index :: added) ([], [])
+    let previousExplicit = pinned.Indexes |> List.map _.Name |> Set.ofList
+    let inheritNamed previous =
+        let synthetic = previous |> Map.filter (fun name _ -> not (Set.contains name previousExplicit))
+        inherited
+        |> List.fold (fun indexes (name, previousName) ->
+            match Map.tryFind previousName previous with
+            | Some entries -> Map.add name entries indexes
+            | None -> indexes) synthetic
+    let addedBtrees =
+        added
+        |> List.filter (fun index ->
             index.Kind = BTree && (index.KeyColumns |> List.forall (fun column -> column.Transform.IsNone)))
-        let addPlanningEntries build inherited =
-            if addedBtrees.IsEmpty then inherited
-            else
-                // The costing and ordering paths need real key distributions.
-                // Build candidates from the pinned rows so no newer rows enter the read view.
-                build { bound with Indexes = addedBtrees }
-                |> Map.fold (fun indexes name value ->
-                    if addedBtrees |> List.exists (fun index -> index.Name = name) then Map.add name value indexes else indexes) inherited
-        withoutIndexExpressionDiagnostics (fun () ->
-            { bound with
-                UnavailableReadIndexes = added |> List.map (fun index -> index.Name.ToLowerInvariant()) |> Set.ofList
-                UniqueIndex = addPlanningEntries rebuildUniqueIndex (inheritNamed pinned.UniqueIndex)
-                SecondaryIndex = addPlanningEntries rebuildSecondaryIndex (inheritNamed pinned.SecondaryIndex)
-                SecondaryOrder = addPlanningEntries rebuildSecondaryOrder (inheritNamed pinned.SecondaryOrder)
-                SpatialIndexes = inheritNamed pinned.SpatialIndexes
-                FullTextIndexes = inheritNamed pinned.FullTextIndexes })
+    let addedBtreeNames = addedBtrees |> List.map _.Name |> Set.ofList
+    let addPlanningEntries build inherited =
+        if addedBtrees.IsEmpty then inherited
+        else
+            // Costing and ordering need the real key distribution of the pinned rows.
+            build { bound with Indexes = addedBtrees }
+            |> Map.fold (fun indexes name value ->
+                if Set.contains name addedBtreeNames then Map.add name value indexes else indexes) inherited
+    withoutIndexExpressionDiagnostics (fun () ->
+        { bound with
+            UnavailableReadIndexes = added |> List.map (fun index -> index.Name.ToLowerInvariant()) |> Set.ofList
+            UniqueIndex = addPlanningEntries rebuildUniqueIndex (inheritNamed pinned.UniqueIndex)
+            SecondaryIndex = addPlanningEntries rebuildSecondaryIndex (inheritNamed pinned.SecondaryIndex)
+            SecondaryOrder = addPlanningEntries rebuildSecondaryOrder (inheritNamed pinned.SecondaryOrder)
+            SpatialIndexes = inheritNamed pinned.SpatialIndexes
+            FullTextIndexes = inheritNamed pinned.FullTextIndexes })
 
 let private readIndexBindings = Runtime.CompilerServices.ConditionalWeakTable<Table, ConcurrentDictionary<int64, Lazy<Table>>>()
 
 let private bindReadIndexes (pinned: Table) (current: Table) =
     if pinned.Indexes = current.Indexes && pinned.ReadIndexRevisions = current.ReadIndexRevisions then
-        buildReadIndexBinding pinned current
+        useCurrentReadDefinition pinned current
     else
         let bindings = readIndexBindings.GetValue(pinned, fun _ -> ConcurrentDictionary())
-        bindings.GetOrAdd(current.SchemaRevision, fun _ -> lazy (buildReadIndexBinding pinned current)).Value
+        bindings.GetOrAdd(current.SchemaRevision, fun _ -> lazy (rebindChangedReadIndexes pinned current)).Value
 
 /// The write base can advance independently of the committed read view.
 /// Overlay only this transaction's changes on that read view.
