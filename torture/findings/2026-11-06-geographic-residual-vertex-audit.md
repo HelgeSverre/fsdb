@@ -1222,3 +1222,22 @@ and crosses in both directions.
 The replacement fixtures agree with native MySQL 8.4.11 on macOS ARM64
 and the pinned MySQL 8.4.11 image on Linux ARM64 and x64. The geography
 test filter passes all 67 tests on both Linux architectures.
+
+### Fresh WGS 84 overlay seeds
+
+Two new EPSG 4326 sweeps use mixed-latitude seed `308889` with 128 polygons
+and polar seed `185330` with 96 polygons. The Release assemblies ran on
+macOS ARM64 with .NET 10.0.12 and Linux ARM64 with .NET 10.0.15. The
+comparisons used MySQL 8.4.11 on macOS and the digest-pinned Linux image,
+all four overlay operations, both operand orders, both line directions,
+and a coordinate tolerance of 10⁻⁸ degrees. [Geographic edge oracle](../scripts/geographic-edge-oracle.py).
+
+| Sweep | Results | macOS Fsdb vs native MySQL | macOS Fsdb vs pinned MySQL | Linux Fsdb vs pinned MySQL |
+| --- | ---: | ---: | ---: | ---: |
+| Mixed latitudes | 4,096 | 0 | 41 | 17 |
+| Polar | 6,144 | 0 | 345 | 235 |
+
+The direct MySQL comparison differed on exactly the same cases as macOS
+Fsdb against the pinned image. Of the Linux Fsdb differences, 22 polar
+intersections occurred where both MySQL builds agreed. Those cases include
+changes between isolated points, line strings, and geometry collections.
