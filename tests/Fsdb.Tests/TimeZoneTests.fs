@@ -209,6 +209,26 @@ let tests =
                    + " WHERE e.instant<=p.hi ORDER BY e.instant,e.id LIMIT 1) AS chosen FROM picks p WHERE p.id=3")
                   [ "3"; "1" ]
 
+          testCase "named TIMESTAMP bounds reuse an exact covering interval"
+          <| fun _ ->
+              let date month day hour minute second = System.DateTime(2024, month, day, hour, minute, second)
+              let utc month day hour minute second =
+                  System.DateTime.SpecifyKind(date month day hour minute second, System.DateTimeKind.Utc)
+              let zone =
+                  Fsdb.Temporal.namedTimeZone "Test" -18000 [ 1710054000L, -14400; 1730613600L, -18000 ]
+                  |> Fsdb.Temporal.NamedTimeZone
+              let summer = Some(date 7 1 9 0 0, true)
+              let winter = Some(date 12 1 9 0 0, false)
+              let slices = Fsdb.Temporal.tryNamedTimestampRangeSlices zone
+              Expect.isNone (slices summer winter) "both endpoint windows match the covering offsets"
+              Expect.isNone (slices summer None) "the lower bound already gives an exact seek"
+              Expect.isNone (slices None winter) "the upper bound already gives an exact seek"
+              let repeated = slices (Some(date 11 3 1 30 0, true)) (Some(date 11 3 1 30 5, false))
+              Expect.equal repeated
+                  (Some [ Some(utc 11 3 5 30 0), utc 11 3 5 30 5
+                          Some(utc 11 3 6 30 0), utc 11 3 6 30 5 ])
+                  "the repeated wall time still needs two UTC slices"
+
           testCase "correlated TIMESTAMP ranges order collation ties by the next key"
           <| fun _ ->
               let session =

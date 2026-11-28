@@ -168,44 +168,63 @@ let internal mysqlTimestampMaximumUtc =
 let internal tryNamedTimestampRangeSlices zone lower upper =
     match zone with
     | NamedTimeZone rules ->
-        let minUtc = mysqlTimestampMinimumUtc.Ticks
-        let maxUtc = mysqlTimestampMaximumUtc.Ticks + 1L
-        let lowerTicks = lower |> Option.map (fun (wall: DateTime, inclusive) -> wall.Ticks + (if inclusive then 0L else 1L))
-        let upperTicks = upper |> Option.map (fun (wall: DateTime, inclusive) -> wall.Ticks + (if inclusive then 1L else 0L))
-        let offsetTicks seconds = int64 seconds * TimeSpan.TicksPerSecond
-        let toUtc ticks = DateTime(ticks, DateTimeKind.Utc)
-        let start = lowerTicks |> Option.map (fun ticks -> max minUtc (ticks - offsetTicks (Array.max rules.Offsets))) |> Option.defaultValue minUtc
-        let finish = upperTicks |> Option.map (fun ticks -> min maxUtc (ticks - offsetTicks (Array.min rules.Offsets))) |> Option.defaultValue maxUtc
-        let slices =
-            if start >= finish then []
-            else
-                let epoch = DateTime.UnixEpoch.Ticks
-                let transitionIndex ticks = nextTransitionIndex rules ((ticks - epoch) / TimeSpan.TicksPerSecond)
-                let first = transitionIndex start
-                let cuts =
-                    [ yield start, offsetBeforeTransition rules first
-                      for index in first .. transitionIndex finish - 1 do
-                          let seconds, offset = rules.Transitions.[index]
-                          let ticks = epoch + seconds * TimeSpan.TicksPerSecond
-                          if ticks < finish then yield ticks, offset
-                      yield finish, 0 ]
-                let append slices ((periodStart, offset), (periodEnd, _)) =
-                    let shift = offsetTicks offset
-                    let start = lowerTicks |> Option.map (fun ticks -> max periodStart (ticks - shift)) |> Option.defaultValue periodStart
-                    let finish = upperTicks |> Option.map (fun ticks -> min periodEnd (ticks - shift)) |> Option.defaultValue periodEnd
-                    if start >= finish then slices
-                    else
-                        match slices with
-                        | (priorStart, priorEnd) :: rest when priorEnd = start -> (priorStart, finish) :: rest
-                        | _ -> (start, finish) :: slices
-                cuts |> List.pairwise |> List.fold append [] |> List.rev
-        let bounded = slices |> List.map (fun (start, finish) -> Some(toUtc start), toUtc finish)
-        // A zero TIMESTAMP sorts before the valid UTC domain. An upper-only
-        // predicate can still match it even when no real instants qualify.
-        match lower, bounded with
-        | None, (Some start, finish) :: rest when start = mysqlTimestampMinimumUtc -> Some((None, finish) :: rest)
-        | None, _ -> Some((None, mysqlTimestampMinimumUtc) :: bounded)
-        | _ -> Some bounded
+        let minOffset = Array.min rules.Offsets
+        let maxOffset = Array.max rules.Offsets
+        let second = TimeSpan.TicksPerSecond
+        let epoch = DateTime.UnixEpoch.Ticks
+        let agreesWithCovering expected bound =
+            match bound with
+            | None -> true
+            | Some(wall: DateTime, _) ->
+                let first = wall.Ticks - int64 maxOffset * second - epoch
+                let finish = wall.Ticks - int64 minOffset * second - epoch
+                if first < 0L then false
+                else
+                    let index = nextTransitionIndex rules (first / second)
+                    offsetBeforeTransition rules index = expected
+                    && (index = rules.Transitions.Length || fst rules.Transitions.[index] > finish / second)
+
+        // When both endpoint windows use the covering offsets, the
+        // original seek already covers exactly the valid instants.
+        if agreesWithCovering maxOffset lower && agreesWithCovering minOffset upper then None
+        else
+            let minUtc = mysqlTimestampMinimumUtc.Ticks
+            let maxUtc = mysqlTimestampMaximumUtc.Ticks + 1L
+            let lowerTicks = lower |> Option.map (fun (wall: DateTime, inclusive) -> wall.Ticks + (if inclusive then 0L else 1L))
+            let upperTicks = upper |> Option.map (fun (wall: DateTime, inclusive) -> wall.Ticks + (if inclusive then 1L else 0L))
+            let offsetTicks seconds = int64 seconds * TimeSpan.TicksPerSecond
+            let toUtc ticks = DateTime(ticks, DateTimeKind.Utc)
+            let start = lowerTicks |> Option.map (fun ticks -> max minUtc (ticks - offsetTicks maxOffset)) |> Option.defaultValue minUtc
+            let finish = upperTicks |> Option.map (fun ticks -> min maxUtc (ticks - offsetTicks minOffset)) |> Option.defaultValue maxUtc
+            let slices =
+                if start >= finish then []
+                else
+                    let transitionIndex ticks = nextTransitionIndex rules ((ticks - epoch) / TimeSpan.TicksPerSecond)
+                    let first = transitionIndex start
+                    let cuts =
+                        [ yield start, offsetBeforeTransition rules first
+                          for index in first .. transitionIndex finish - 1 do
+                              let seconds, offset = rules.Transitions.[index]
+                              let ticks = epoch + seconds * TimeSpan.TicksPerSecond
+                              if ticks < finish then yield ticks, offset
+                          yield finish, 0 ]
+                    let append slices ((periodStart, offset), (periodEnd, _)) =
+                        let shift = offsetTicks offset
+                        let start = lowerTicks |> Option.map (fun ticks -> max periodStart (ticks - shift)) |> Option.defaultValue periodStart
+                        let finish = upperTicks |> Option.map (fun ticks -> min periodEnd (ticks - shift)) |> Option.defaultValue periodEnd
+                        if start >= finish then slices
+                        else
+                            match slices with
+                            | (priorStart, priorEnd) :: rest when priorEnd = start -> (priorStart, finish) :: rest
+                            | _ -> (start, finish) :: slices
+                    cuts |> List.pairwise |> List.fold append [] |> List.rev
+            let bounded = slices |> List.map (fun (start, finish) -> Some(toUtc start), toUtc finish)
+            // A zero TIMESTAMP sorts before the valid UTC domain. An upper-only
+            // predicate can still match it even when no real instants qualify.
+            match lower, bounded with
+            | None, (Some start, finish) :: rest when start = mysqlTimestampMinimumUtc -> Some((None, finish) :: rest)
+            | None, _ -> Some((None, mysqlTimestampMinimumUtc) :: bounded)
+            | _ -> Some bounded
     | _ -> None
 
 let internal isMySqlTimestampInstant (value: DateTime) =

@@ -92,6 +92,18 @@ the first row immediately took about 138 ms before and 150–152 ms
 after, using the median of four warmed runs in each of two passes.
 That case pays for calculating the UTC slices with no rows to skip.
 
+The planner now reuses the covering seek when the offsets throughout
+both endpoint windows make its bounds exact. A single precise slice
+also uses one lookup directly. A lower-only slice that reaches the
+physical TIMESTAMP maximum can leave the index upper bound open.
+
+In a follow-up with 12 warmed measurements per build and rotated
+execution order on the same host, the control took 117.56 ms before
+disjoint slices, 126.21 ms with disjoint slices, and 115.88 ms with
+covering-seek reuse. The fall-back probes still examined 7 rows per
+loop for the two-sided range and 601 rows for each one-sided range.
+All 80 query variants also matched MySQL with the named time zone set.
+
 ### CTE reference materialization
 
 Two scalar subqueries can refer to the same CTE using the same alias while

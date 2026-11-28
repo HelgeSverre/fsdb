@@ -3226,9 +3226,10 @@ implementation effort:
    [Correlated TIMESTAMP ranges](torture/findings/2026-11-27-correlated-timestamp-top-n.md#seeking-correlated-timestamp-ranges)
    seek in UTC with TIMESTAMP as the leading column or after a composite
    equality prefix. [Named-zone bounds](torture/findings/2026-11-27-correlated-timestamp-top-n.md#disjoint-named-zone-ranges)
-   use disjoint slices across clock transitions. The session-local
-   predicate applies before OFFSET and LIMIT. System time zones still
-   use a covering interval.
+   use exact slices when covering bounds can include extra instants,
+   and reuse the covering seek when it is exact.
+   The session-local predicate applies before OFFSET and LIMIT. System
+   time zones still use a covering interval.
    [Derived projections with renamed columns](torture/findings/2026-11-27-correlated-derived-top-n.md)
    can retain the physical index order through audited filters and aliases.
    The scalar fixture examines 40 rows, down from 1,610.

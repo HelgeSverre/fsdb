@@ -23850,22 +23850,29 @@ and private tryIndexPrefixOrder
                 coveringLookup () |> Option.map (fun lookup ->
                     { lookup with OrderedRows = Seq.empty; OrderedGroups = Seq.empty; OrderedRowCount = 0 })
             | Some ranges ->
-                let ranges = if directions.[matched.PinnedCount] = Desc then List.rev ranges else ranges
                 let exactIndex name = allowed name && equalsIgnoreCase resolved.Name name
-                ranges
-                |> List.map (fun (start, finish) ->
+                let seekSlice (start, finish: System.DateTime) =
                     let lower = start |> Option.map (fun utc -> VTimestamp utc, true)
-                    seek exactIndex lower (Some(VTimestamp finish, false)))
-                |> tryAllSome
-                |> Option.bind (function
-                    | [ lookup ] -> Some lookup
-                    | first :: _ as pieces ->
-                        Some { first with
-                                OrderedRows = pieces |> Seq.collect _.OrderedRows
-                                OrderedGroups = pieces |> Seq.collect _.OrderedGroups
-                                OrderedRowCount = pieces |> List.sumBy _.OrderedRowCount }
-                    | [] -> None)
-                |> Option.orElseWith coveringLookup))
+                    let upper =
+                        if upper.IsNone && finish.Ticks = mysqlTimestampMaximumUtc.Ticks + 1L then None
+                        else Some(VTimestamp finish, false)
+                    seek exactIndex lower upper
+                let lookup =
+                    match ranges with
+                    | [ range ] -> seekSlice range
+                    | _ ->
+                        let ranges = if directions.[matched.PinnedCount] = Desc then List.rev ranges else ranges
+                        ranges
+                        |> List.map seekSlice
+                        |> tryAllSome
+                        |> Option.bind (function
+                            | first :: _ as pieces ->
+                                Some { first with
+                                        OrderedRows = pieces |> Seq.collect _.OrderedRows
+                                        OrderedGroups = pieces |> Seq.collect _.OrderedGroups
+                                        OrderedRowCount = pieces |> List.sumBy _.OrderedRowCount }
+                            | [] -> None)
+                lookup |> Option.orElseWith coveringLookup))
 
 and private tryGroupingIndexOrder
     (store: Store)
