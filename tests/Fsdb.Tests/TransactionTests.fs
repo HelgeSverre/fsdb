@@ -1649,21 +1649,23 @@ let tests =
               finally
                   run reader "ROLLBACK" (Affected 0UL) |> ignore
 
-          testCase "SERIALIZABLE read-only snapshots do not conflict with later writes"
+          testCase "SERIALIZABLE read-only transactions can commit after a disjoint write"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let reader = create 1 store
               let reader, _ = handle reader "CREATE TABLE tx_serial_read (id INT PRIMARY KEY)"
+              let reader, _ = handle reader "INSERT INTO tx_serial_read VALUES (10)"
               let reader, _ = handle reader "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE"
               let reader, _ = handle reader "BEGIN"
-              let reader, _ = handle reader "SELECT id FROM tx_serial_read"
-              let writer = create 2 store
-              let _, inserted = handle writer "INSERT INTO tx_serial_read VALUES (1)"
-              Expect.equal inserted (Affected 1UL) "the concurrent write commits"
+              let reader, selected = handle reader "SELECT id FROM tx_serial_read WHERE id=10"
+              let matchingRow = ResultSet([ "id" ], [ [ Some "10" ] ])
+              Expect.equal selected matchingRow "the read locks one existing primary key"
+              let writer, _ = handle (create 2 store) "SET innodb_lock_wait_timeout=1"
+              let _, inserted = handle writer "INSERT INTO tx_serial_read VALUES (20)"
+              Expect.equal inserted (Affected 1UL) "the disjoint write commits"
 
-              match handle reader "SELECT id FROM tx_serial_read" |> snd with
-              | ResultSet(_, []) -> ()
-              | result -> failtestf "expected the repeatable serializable snapshot, got %A" result
+              let reader, selected = handle reader "SELECT id FROM tx_serial_read WHERE id=10"
+              Expect.equal selected matchingRow "the exact read is still repeatable"
 
               match handle reader "COMMIT" |> snd with
               | Affected 0UL -> ()
@@ -8597,6 +8599,39 @@ let tests =
                   TestSupport.Sql.expectOk (handle first "ROLLBACK" |> snd) "end the first reader"
                   Expect.equal result (ResultSet([ "n" ], [])) "two exact misses can coexist"
                   Expect.equal updated (Affected 1UL) "the missing seek does not lock an unrelated row"
+
+          testCase "full primary locking scans protect the final gap in repeatable reads"
+          <| fun _ ->
+              let cases =
+                  [ "REPEATABLE READ", " FORCE INDEX(PRIMARY)", " FOR UPDATE", false
+                    "REPEATABLE READ", "", " FOR SHARE NOWAIT", true
+                    "REPEATABLE READ", " FORCE INDEX(PRIMARY)", " FOR UPDATE SKIP LOCKED", false
+                    "SERIALIZABLE", "", "", true
+                    "READ COMMITTED", " FORCE INDEX(PRIMARY)", " FOR UPDATE", false ]
+              for isolation, hint, locking, empty in cases do
+                  let store = Fsdb.Storage.create ()
+                  let run session sql expected =
+                      let next, result = handle session sql
+                      Expect.equal result expected sql
+                      next
+                  let reader = create 1 store
+                  let secondary = if hint = "" then "" else ", KEY ix(n)"
+                  let reader = run reader $"CREATE TABLE t(id INT PRIMARY KEY,n INT{secondary})" (Affected 0UL)
+                  let reader = if empty then reader else run reader "INSERT INTO t VALUES(10,1),(20,2)" (Affected 2UL)
+                  let reader = run reader $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  let rows = if empty then [] else [ [ Some "10" ]; [ Some "20" ] ]
+                  let reader = run reader $"SELECT id FROM t{hint}{locking}" (ResultSet([ "id" ], rows))
+                  let writer = create 2 store
+                  let pending = Threading.Tasks.Task.Run(fun () -> handle writer "INSERT INTO t VALUES(80,3)")
+                  let blocked () = lock store.LockWaits.SyncRoot (fun () -> store.LockWaits.Edges.Count > 0)
+                  let observed = Threading.SpinWait.SpinUntil((fun () -> blocked () || pending.IsCompleted), TimeSpan.FromSeconds 3.0)
+                  let wasBlocked = blocked ()
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+                  Expect.isTrue (pending.Wait(TimeSpan.FromSeconds 4.0)) "the insert finishes after the reader ends"
+                  Expect.isTrue observed "the insert either waits or finishes while the reader is open"
+                  Expect.equal wasBlocked (isolation <> "READ COMMITTED") $"{isolation}{hint}{locking}"
+                  Expect.equal (snd pending.Result) (Affected 1UL) "the final gap is writable after release"
 
           testCase "exact primary reads with NOWAIT or SKIP LOCKED protect the MySQL gap"
           <| fun _ ->

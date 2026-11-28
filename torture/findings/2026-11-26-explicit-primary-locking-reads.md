@@ -130,6 +130,23 @@ pending key 25. It kept row 20 locked during the second wait and
 returned both inserts after their transactions committed.
 
 Reselection after a completed row-lock batch still rolls back the
-statement's claims if it subsequently times out. Gap handling for
-`NOWAIT` and `SKIP LOCKED`, secondary indexes, and other read shapes
-remains open.
+statement's claims if it subsequently times out. Other scan shapes and
+access paths still need separate gap coverage.
+
+## Full primary scans
+
+A locking read without a predicate, sort, or limit can scan the entire
+primary index when it is forced or is the only visible B-tree index.
+At REPEATABLE READ and SERIALIZABLE, the cursor protects the insertion
+gap after the last row. An empty index also protects its gap. At READ
+COMMITTED, these reads leave unrelated inserts free to proceed.
+
+The pinned MySQL comparison matched 76 schedules covering both access
+paths, empty and populated tables, shared and exclusive locks, `NOWAIT`,
+`SKIP LOCKED`, and implicit SERIALIZABLE reads. Another 48 schedules
+matched the rows, errors, and retained gaps when a nonblocking reader
+encountered a locked row or pending insert. Twenty WAL-backed schedules
+also matched which gaps a blocking scan protected while it waited.
+Another 24 schedules matched across mixed-direction composite, collated
+text, decimal, and binary keys. Eight explicit `READ ONLY` transactions
+at SERIALIZABLE matched the implicit and explicit shared-read behavior.

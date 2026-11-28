@@ -39306,7 +39306,10 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
 
             let boundedClusteredScan =
                 select.Limit.IsSome && (select.OrderBy.IsEmpty || wait = SkipLocked)
-            if keys.IsEmpty || (conditions.IsEmpty && not boundedClusteredScan)
+            let fullClusteredScan =
+                protectGaps && primaryIsOnlyChoice && select.Limit.IsNone
+                && select.OrderBy.IsEmpty && select.Offset.IsNone
+            if keys.IsEmpty || (conditions.IsEmpty && not (boundedClusteredScan || fullClusteredScan))
                || not (List.forall simpleProjection select.Projections) then None
             else
                 exact ()
