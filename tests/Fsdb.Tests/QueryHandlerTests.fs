@@ -16803,6 +16803,11 @@ let tests =
               let reader = run reader "SELECT k FROM t FORCE INDEX(old_key) ORDER BY id" (ResultSet([ "k" ], [ [ Some "10" ]; [ Some "20" ] ]))
               let reader = run reader "SELECT payload FROM t FORCE INDEX(inherited) WHERE k=10" (ResultSet([ "payload" ], [ [ Some "100" ] ]))
               let reader = run reader "SELECT payload FROM t IGNORE INDEX(old_key) WHERE id=1" (ResultSet([ "payload" ], [ [ Some "100" ] ]))
+              let reader = run reader "INSERT INTO t VALUES(3,30,400)" (Affected 1UL)
+              let reader = run reader "SELECT id,payload FROM t FORCE INDEX(PRIMARY) ORDER BY id"
+                               (ResultSet([ "id"; "payload" ],
+                                   [ [ Some "1"; Some "100" ]; [ Some "2"; Some "200" ]; [ Some "3"; Some "400" ] ]))
+              let reader = run reader "SELECT id FROM t FORCE INDEX(old_key) WHERE payload=400" unavailable
               let reader = run reader "COMMIT" (Affected 0UL)
               let reader = run reader "SELECT payload FROM t WHERE id=1" (ResultSet([ "payload" ], [ [ Some "300" ] ]))
               let reader = run reader "START TRANSACTION WITH CONSISTENT SNAPSHOT" (Affected 0UL)

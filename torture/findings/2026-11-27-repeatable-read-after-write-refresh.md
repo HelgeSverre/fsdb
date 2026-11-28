@@ -135,6 +135,9 @@ different key creates a separate identity. Supported single-source SELECT
 plans check visibility when they select a B-tree for an equality probe,
 range, ordered read, or forced covering scan. A qualifying clustered scan
 can still return an old row, including when a newly created key exists.
+After an insert by the reader, a clustered scan also returns the reader's
+new row alongside the pinned rows. A lookup that opens the replacement
+key still returns 1412.
 
 The pinned MySQL comparison includes matching and missing keys, covering
 and noncovering projections, forced and ignored keys, no-scan conditions,

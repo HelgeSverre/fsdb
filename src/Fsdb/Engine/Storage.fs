@@ -4186,7 +4186,8 @@ let internal consistentReadSnapshot (working: Store) (writeBase: Catalog) (live:
                             match Map.tryFind name baseline, Map.tryFind name pinned with
                             | Some before, _ when obj.ReferenceEquals(before, workingTable) -> tables
                             | Some before, Some readTable when obj.ReferenceEquals(before, readTable) -> Map.add name workingTable tables
-                            | Some before, Some readTable when sameTableSchema before workingTable && sameTableSchema before readTable ->
+                            | Some before, Some readTable when sameTableSchema before workingTable
+                                                               && before.ReadLayoutRevision = readTable.ReadLayoutRevision ->
                                 Map.add name (overlayConsistentRows readTable before workingTable) tables
                             | _ -> Map.add name workingTable tables) pinned
                     Map.add dbName tables visible
