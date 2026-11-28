@@ -9092,6 +9092,81 @@ let tests =
                   run reader "ROLLBACK" (Affected 0UL) |> ignore
                   run holder "ROLLBACK" (Affected 0UL) |> ignore
 
+          testCase "secondary filesort locks the matching range before applying offset and limit"
+          <| fun _ ->
+              for key, primary, order, hint, filesort in
+                  [ "score,id", "tenant DESC,id DESC", "score DESC,id DESC,tenant ASC", "FORCE INDEX(ix)", true
+                    "score,id", "tenant DESC,id DESC", "score DESC,id DESC,tenant ASC", "", true
+                    "score,tenant", "tenant DESC,id DESC", "score ASC,tenant ASC,id DESC", "FORCE INDEX(ix)", true
+                    "score,id", "tenant DESC,id DESC", "score DESC,id DESC", "FORCE INDEX(ix)", false
+                    "score,id", "tenant,id", "score DESC,id DESC,tenant DESC", "FORCE INDEX(ix)", false ] do
+                  let store = Fsdb.Storage.create ()
+                  let run session sql expected =
+                      let next, result = handle session sql
+                      Expect.equal result expected sql
+                      next
+                  let owner = create 1 store
+                  run owner $"CREATE TABLE jobs(tenant INT,id INT,score DECIMAL(6,2),PRIMARY KEY({primary}),KEY ix({key}))" (Affected 0UL)
+                  |> ignore
+                  run owner "INSERT INTO jobs VALUES(2,4,20.15),(1,1,10.50),(2,3,20.15),(3,6,30.50),(4,5,40.50)" (Affected 5UL)
+                  |> ignore
+                  let reader = run (create 2 store) "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED" (Affected 0UL)
+                  let observer = create 3 store
+                  let probe tenant id = handle observer $"SELECT id FROM jobs WHERE tenant={tenant} AND id={id} FOR UPDATE NOWAIT" |> snd
+                  let query = $"SELECT tenant,id FROM jobs {hint} WHERE score>10.50 AND score<=30.50 ORDER BY {order} LIMIT 1 OFFSET 1 FOR UPDATE"
+                  let selected = if key = "score,tenant" then "3" else "4"
+                  let expected = ResultSet([ "tenant"; "id" ], [ [ Some "2"; Some selected ] ])
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  let reader = run reader (query + " NOWAIT") expected
+                  if filesort then
+                      TestSupport.Sql.expectError 3572 (probe 3 6) "the filesort still holds the offset or unreturned row"
+                      TestSupport.Sql.expectError 3572 (probe 2 3) "the filesort holds every matching row"
+                  else
+                      Expect.equal (probe 3 6) (ResultSet([ "id" ], [ [ Some "6" ] ])) "the ordered cursor releases its offset row"
+                      Expect.equal (probe 2 3) (ResultSet([ "id" ], [ [ Some "3" ] ])) "the ordered cursor stops at LIMIT"
+                  Expect.equal (probe 4 5) (ResultSet([ "id" ], [ [ Some "5" ] ])) "the range excludes this row"
+                  let reader = run reader "ROLLBACK" (Affected 0UL)
+                  let holder = run owner "BEGIN" (Affected 0UL)
+                  let holder = run holder "INSERT INTO jobs VALUES(2,2,20.15)" (Affected 1UL)
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  let reader, result = handle reader (query + " NOWAIT")
+                  if filesort then TestSupport.Sql.expectError 3572 result "the filesort visits the pending row"
+                  else Expect.equal result expected "the ordered cursor stops before the pending row"
+                  let reader = run reader "ROLLBACK" (Affected 0UL)
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  let reader = run reader (query + " SKIP LOCKED") expected
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+                  run holder "ROLLBACK" (Affected 0UL) |> ignore
+
+          testCase "mixed secondary ranges distinguish exact BETWEEN from separate inequalities"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let owner = create 1 store
+              run owner "CREATE TABLE jobs(id INT PRIMARY KEY,grp INT,score INT,KEY ix(grp,score DESC,id))" (Affected 0UL)
+              |> ignore
+              run owner "INSERT INTO jobs VALUES(1,7,10),(3,7,20),(4,7,30),(5,8,40)" (Affected 4UL) |> ignore
+              let holder = run owner "BEGIN" (Affected 0UL)
+              let holder = run holder "INSERT INTO jobs VALUES(2,7,20)" (Affected 1UL)
+              let reader = create 2 store
+
+              for predicate, sorts in
+                  [ "score BETWEEN 20 AND 20", false
+                    "score BETWEEN 20.00 AND 20.0", false
+                    "score BETWEEN 20 AND 20.0", true
+                    "score>=20 AND score<=20", true ] do
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  let sql = $"SELECT id FROM jobs FORCE INDEX(ix) WHERE grp=7 AND {predicate} ORDER BY score ASC,id DESC LIMIT 1 FOR UPDATE NOWAIT"
+                  let reader, result = handle reader sql
+                  if sorts then TestSupport.Sql.expectError 3572 result sql
+                  else Expect.equal result (ResultSet([ "id" ], [ [ Some "3" ] ])) sql
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+
+              run holder "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "implicit secondary suffixes protect gaps around the visited primary key"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -9148,7 +9223,7 @@ let tests =
               try
                   let selection =
                       Fsdb.Storage.tryLockOrderedSecondaryRead TimeSpan.Zero initial latest refresh db "jobs" "ix" terms [ VInt 7L ]
-                          None None UpdateLock NoWait true 0 1
+                          None None UpdateLock NoWait true 0 (Some 1)
                   let table = Fsdb.Storage.tableSnapshot latest db "jobs" |> Result.defaultWith (fun error -> failtestf "%A" error)
                   let remainingId, _ = table.RowsArray.Indexed |> Seq.exactlyOne
                   match selection with

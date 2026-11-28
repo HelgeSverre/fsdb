@@ -989,8 +989,10 @@ protect the visited gaps on audited exact-numeric indexes. The gaps block
 inserts and key moves from UPDATE and ON DUPLICATE KEY UPDATE, including
 audited upserts through checked views and cascaded moves to a child table.
 Lower isolation retains row-only locking and can release OFFSET rows.
-Secondary filesort lock coverage, other key types, and covering FOR SHARE
-record ownership remain open.
+[Audited secondary filesorts](torture/findings/2026-11-27-ordered-secondary-locking.md#locking-through-a-secondary-filesort)
+lock the covered numeric range before applying OFFSET and LIMIT, including
+unreturned matching rows at READ COMMITTED. Competing access paths, residual
+predicates, other key types, and covering FOR SHARE ownership remain open.
 The [blocking form](torture/findings/2026-11-27-ordered-secondary-locking.md#blocking-reads)
 waits for a pending insert or row lock before the limit and reopens the
 seek after the blocker resolves. Audited timeouts retain the visited

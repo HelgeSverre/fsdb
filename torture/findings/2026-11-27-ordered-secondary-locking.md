@@ -76,13 +76,37 @@ insert allocations rose from 1,125 MB to 1,254 MB and median retained heap
 rose from 33.6 MiB to 46.3 MiB. The retained heap includes the table and
 both index orders.
 
-The composite test went from 12 differences to one in 24 outcomes. The
-remaining case agreed across memory and WAL restart. With
-`PRIMARY KEY(tenant DESC,id DESC)` and `KEY ix(score,id)`,
+## Locking through a secondary filesort
+
+With `PRIMARY KEY(tenant DESC,id DESC)` and `KEY ix(score,id)`,
 MySQL uses filesort for `score>10.50 AND score<=30.50 ORDER BY score DESC,
-id DESC,tenant ASC LIMIT 2 OFFSET 1`. It reaches a pending row beyond the
-ordered limit and returns 3572. Fsdb uses the physical index order and
-fills the limit before reaching that row.
+id DESC,tenant ASC LIMIT 2 OFFSET 1`. The range scan runs forward and
+locks qualifying rows before the sort applies OFFSET and LIMIT. It reaches
+a pending row beyond the ordered limit and returns 3572. A successful
+filesort retains locks on qualifying rows excluded by OFFSET and LIMIT
+even at READ COMMITTED. The reverse ordered control on `score DESC,id DESC`
+stops when the limit is filled and can release the READ COMMITTED offset row.
+
+MySQL's order check visits the declared secondary key and then starts at
+the first primary-key part. The physical secondary key appends just the
+missing parts. MySQL also declines a backward range when the order check
+encounters mixed key directions. Identical numeric BETWEEN endpoints can
+use an equality lookup. In the audited cases separate inequalities and
+endpoints with different literal types keep their range plans.
+[MySQL 8.4.11 order check](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_optimizer.cc#L1830-L1966)
+
+Fsdb now locks the qualifying range in forward index order and passes the
+original OFFSET and LIMIT to the sort. This covers exact-numeric
+single-index predicates when the index is forced, and audited unhinted
+queries with a sole covering secondary index. Competing index paths,
+residual filtering, and other key types still need coverage.
+
+All 24 composite outcomes now match the pinned MySQL image in memory
+and WAL mode. An additional 112 schedules matched in both modes. They
+checked returned rows, lock ownership from a third session, NOWAIT,
+SKIP LOCKED, and waits that resolved after commit, rollback, or timeout.
+The audit included conflicts before the first matching key and after
+the scan had acquired a row lock.
 
 ## Blocking reads
 
@@ -174,12 +198,13 @@ Separate waits resumed after the reader committed or rolled back.
 Rolling the reader back to a preceding savepoint also released its gap
 in the audited case.
 
-The audited path requires whole exact-numeric key parts and explicit
-primary-key columns in the secondary index. Implicit suffixes, mixed
-residual predicates, purge of ordinary secondary boundary records, and
-covering shared-record ownership remain open.
+The original probe used whole exact-numeric key parts and declared the
+primary-key parts in the secondary index. Mixed residual predicates,
+purge of ordinary secondary boundary records, and covering shared-record
+ownership remain open.
 
-With `KEY ix(k,stamp)` and `PRIMARY KEY (id)`, MySQL and Fsdb both
+Before the implicit suffix fix, with `KEY ix(k,stamp)` and
+`PRIMARY KEY (id)`, MySQL and Fsdb both
 returned id 10 for the first `k=7` row ordered by `stamp,id` when
 ids 20 and 10 shared stamp 10. A concurrent insert at `(7,10,5)`
 in `(k,stamp,id)` order timed out on MySQL and succeeded on Fsdb.

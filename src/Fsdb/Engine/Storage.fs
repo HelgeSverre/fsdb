@@ -8936,7 +8936,8 @@ let internal tryLockOrderedSecondaryRead
 
                             let mutable index = if traversal = Forward then selected.First else selected.AfterLast - 1
                             let mutable starting = true
-                            while ids.Count < limit && index >= selected.First && index < selected.AfterLast do
+                            let belowLimit () = limit |> Option.forall (fun count -> ids.Count < count)
+                            while belowLimit () && index >= selected.First && index < selected.AfterLast do
                                 Limits.checkQueryInterruption queryCancellation.Value
                                 let entry = entries.[index]
                                 match pending with
@@ -8961,7 +8962,7 @@ let internal tryLockOrderedSecondaryRead
                                     registerGap true index
                                     if lockRecord entry then ids.Add entry.RowId
                                 index <- if traversal = Forward then index + 1 else index - 1
-                            if ids.Count < limit then
+                            if belowLimit () then
                                 pending |> Option.iter (snd >> stopAtPending)
                                 if protectsGaps then
                                     if traversal = Backward then
