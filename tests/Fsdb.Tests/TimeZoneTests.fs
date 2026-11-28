@@ -156,6 +156,29 @@ let tests =
                      + "WINDOW by_stamp AS (ORDER BY instant,ordinal DESC,id) ORDER BY id")
                   [ [ "12"; "1"; "1" ]; [ "13"; "2"; "2" ]; [ "22"; "3"; "3" ] ]
 
+          testCase "TIMESTAMP window partitions split when local keys recur after intervening rows"
+          <| fun _ ->
+              let session =
+                  [ "SET time_zone='+00:00'"
+                    "CREATE TABLE events (id INT PRIMARY KEY, instant TIMESTAMP NOT NULL, KEY by_instant(instant,id))"
+                    "INSERT INTO events VALUES (4,'2024-11-03 05:15:00'),(3,'2024-11-03 05:45:00'),(2,'2024-11-03 06:15:00'),(1,'2024-11-03 06:45:00'),(5,'2024-11-03 06:45:00'),(6,'2024-11-03 05:45:00'),(7,'2024-11-03 05:15:00')"
+                    "SET time_zone='Fsdb/Test_Eastern'" ]
+                  |> List.fold execute (populatedSession ())
+
+              let check sql expected =
+                  match handle session sql |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows (expected |> List.map (List.map Some)) sql
+                  | other -> failtestf "Expected rows for %s, got %A" sql other
+
+              check ("SELECT id,ROW_NUMBER() OVER(PARTITION BY instant ORDER BY id), "
+                     + "COUNT(*) OVER(PARTITION BY instant ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) "
+                     + "FROM events IGNORE INDEX(by_instant) ORDER BY id")
+                  [ [ "1"; "1"; "2" ]; [ "2"; "1"; "1" ]; [ "3"; "1"; "2" ]; [ "4"; "1"; "2" ]
+                    [ "5"; "2"; "2" ]; [ "6"; "2"; "2" ]; [ "7"; "2"; "2" ] ]
+              check ("SELECT id,ROW_NUMBER() OVER(PARTITION BY instant ORDER BY id) AS r "
+                     + "FROM events IGNORE INDEX(by_instant) ORDER BY instant,r,id LIMIT 5")
+                  [ [ "2"; "1" ]; [ "4"; "1" ]; [ "7"; "2" ]; [ "1"; "1" ]; [ "3"; "1" ] ]
+
           testCase "TIMESTAMP sorts after a join compare local times"
           <| fun _ ->
               let session =

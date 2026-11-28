@@ -25563,6 +25563,11 @@ and private runWindowedSelect
                     orderKeyOf row
                     |> Result.map (fun orderKey -> partitionKey, orderKey, row)))
             |> Result.bind (fun keyed ->
+                // Finite RANGE frames still require monotone local-time keys.
+                let usesStoredWindowKeys =
+                    lazy (not hasRangeOffset && select.Joins.IsEmpty
+                          && firstWindowSort.Value = Some(bindSortTerms (windowSortTerms spec)))
+
                 // The first sort on the original table can use stored instants.
                 // The window still compares peers and frame bounds in local time.
                 let storedSortKeys =
@@ -25571,9 +25576,7 @@ and private runWindowedSelect
                             | _, _, _, Some(index, { Type = TTimestamp _ }) -> Some index
                             | _ -> None)
 
-                    // Finite RANGE frames still require monotone local-time keys.
-                    if not hasRangeOffset && select.Joins.IsEmpty && (timestampTerms |> List.exists Option.isSome)
-                       && firstWindowSort.Value = Some(bindSortTerms (windowSortTerms spec)) then
+                    if (timestampTerms |> List.exists Option.isSome) && usesStoredWindowKeys.Value then
                         keyed
                         |> List.map (fun (_, key, row) ->
                             List.map2 (fun index part ->
@@ -25594,26 +25597,35 @@ and private runWindowedSelect
                     |> Option.map (List.map2 (fun (partitionKey, _, row) orderKey -> partitionKey, orderKey, row) keyed)
                     |> Option.defaultValue keyed
 
-                let partitionCollations = partitionBy |> List.map (keyCollation (ctxFor (probeRow columns)))
-                let partitionIndex = Dictionary<Value[], int>(SqlValueKeyComparer(partitionCollations, false))
+                let partitionContext = ctxFor (probeRow columns)
+                let partitionCollations = partitionBy |> List.map (keyCollation partitionContext)
+                let comparer = SqlValueKeyComparer(partitionCollations, false) :> IEqualityComparer<Value[]>
                 let grouped = ResizeArray<ResizeArray<WindowRow>>()
-
-                for item in List.indexed keyed do
-                    let _, (partitionKey, _, _) = item
-                    let key = Array.ofList partitionKey
-
-                    match partitionIndex.TryGetValue key with
-                    | true, index -> grouped.[index].Add item
-                    | false, _ ->
-                        let group = ResizeArray()
-                        group.Add item
-                        partitionIndex.Add(key, grouped.Count)
-                        grouped.Add group
-
-                let denseCumeDist =
-                    match fn, rankedOrderKeys, dirs with
-                    | WinCumeDist, Some _, [ direction ] -> tryCumeDistDenseRanks direction grouped
-                    | _ -> None
+                let partitionTimestampTerms =
+                    partitionBy |> List.map (timestampColumnPosition partitionContext)
+                // A single observed offset preserves both ordering and equality.
+                let offsetVaries keyPosition columnIndex =
+                    let mutable firstOffset = ValueNone
+                    keyed |> List.exists (fun (key, _, row) ->
+                        let offset =
+                            match row.[columnIndex], key.[keyPosition] with
+                            | VTimestamp utc, VDateTime local -> ValueSome(local.Ticks - utc.Ticks)
+                            | VDateTime _, VDateTime _ -> ValueSome 0L
+                            | _ -> ValueNone
+                        match firstOffset, offset with
+                        | ValueSome first, ValueSome current -> first <> current
+                        | ValueNone, ValueSome _ ->
+                            firstOffset <- offset
+                            false
+                        | _, ValueNone -> false)
+                let orderedPartitions =
+                    match store.ExecutionSettings.TimeZone with
+                    | FixedOffset _ -> false
+                    | _ ->
+                        (partitionTimestampTerms |> List.exists Option.isSome)
+                        && usesStoredWindowKeys.Value
+                        && (partitionTimestampTerms |> List.indexed |> List.exists (fun (keyPosition, index) ->
+                            index |> Option.exists (offsetVaries keyPosition)))
 
                 let compareWindowRows (leftIndex, (_, leftKey, _)) (rightIndex, (_, rightKey, _)) =
                     let compared =
@@ -25621,6 +25633,48 @@ and private runWindowedSelect
                         | Some keys -> compareByOrderKeys dirs keys.[leftIndex] keys.[rightIndex]
                         | None -> compareByOrderKeys dirs leftKey rightKey
                     if compared <> 0 then compared else Operators.compare leftIndex rightIndex
+
+                let indexed = List.indexed keyed
+                if orderedPartitions then
+                    // The original table sorts by UTC, while partition boundaries
+                    // compare adjacent local keys. Equal local keys can recur.
+                    let partitionDirs = List.replicate partitionBy.Length Asc
+                    let partitioned =
+                        indexed
+                        |> List.map (fun ((_, (key, _, row)) as item) ->
+                            let sortKey =
+                                List.map3 (fun index part collation ->
+                                    match index |> Option.bind (storedTimestampAt row) with
+                                    | Some stored -> stored, None
+                                    | None -> part, Some collation) partitionTimestampTerms key partitionCollations
+                            sortKey, Array.ofList key, item)
+                        |> Array.ofList
+                    partitioned |> Array.sortInPlaceWith (fun (leftKey, _, left) (rightKey, _, right) ->
+                        let compared = compareByOrderKeys partitionDirs leftKey rightKey
+                        if compared = 0 then compareWindowRows left right else compared)
+                    let mutable previous = None
+                    for _, key, item in partitioned do
+                        if previous |> Option.forall (fun prior -> not (comparer.Equals(prior, key))) then
+                            grouped.Add(ResizeArray())
+                        previous <- Some key
+                        grouped.[grouped.Count - 1].Add item
+                else
+                    let partitionIndex = Dictionary<Value[], int>(comparer)
+                    for item in indexed do
+                        let _, (partitionKey, _, _) = item
+                        let key = Array.ofList partitionKey
+                        match partitionIndex.TryGetValue key with
+                        | true, index -> grouped.[index].Add item
+                        | false, _ ->
+                            let group = ResizeArray()
+                            group.Add item
+                            partitionIndex.Add(key, grouped.Count)
+                            grouped.Add group
+
+                let denseCumeDist =
+                    match fn, rankedOrderKeys, dirs with
+                    | WinCumeDist, Some _, [ direction ] when not orderedPartitions -> tryCumeDistDenseRanks direction grouped
+                    | _ -> None
 
                 let sortGroup (group: ResizeArray<WindowRow>) =
                     let source = group.ToArray()
@@ -25640,7 +25694,7 @@ and private runWindowedSelect
                         if expression = windowFunc then alias else None)
 
                 let matchesFinalOrder alias =
-                    if select.OrderBy.Length <> partitionBy.Length + 1 then
+                    if orderedPartitions || select.OrderBy.Length <> partitionBy.Length + 1 then
                         false
                     else
                         match List.splitAt partitionBy.Length select.OrderBy with
@@ -25680,6 +25734,8 @@ and private runWindowedSelect
                 let partitions =
                     if denseCumeDist.IsSome || streamedRowNumberLimit.IsSome then
                         []
+                    elif orderedPartitions then
+                        grouped |> Seq.map (fun group -> group.ToArray()) |> List.ofSeq
                     else
                         // Partition key order is observable in expression diagnostics.
                         let directions = List.replicate partitionBy.Length Asc

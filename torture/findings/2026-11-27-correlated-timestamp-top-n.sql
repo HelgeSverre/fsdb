@@ -115,3 +115,15 @@ SELECT /*+ NO_MERGE(b) */ a.id
 FROM d a JOIN d b ON a.id=b.id
 WHERE a.id BETWEEN 12 AND 22 AND a.enabled=1
 ORDER BY a.instant,b.ordinal DESC,a.id;
+
+SET time_zone='+00:00';
+CREATE TABLE partition_events(id INT PRIMARY KEY, instant TIMESTAMP NOT NULL, KEY by_instant(instant,id));
+INSERT INTO partition_events VALUES
+    (4,'2024-11-03 05:15:00'),(3,'2024-11-03 05:45:00'),(2,'2024-11-03 06:15:00'),(1,'2024-11-03 06:45:00'),
+    (5,'2024-11-03 06:45:00'),(6,'2024-11-03 05:45:00'),(7,'2024-11-03 05:15:00');
+SET time_zone='Fsdb/Test_Eastern';
+SELECT id, ROW_NUMBER() OVER(PARTITION BY instant ORDER BY id) AS row_number_by_timestamp,
+    COUNT(*) OVER(PARTITION BY instant ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS partition_size
+FROM partition_events IGNORE INDEX(by_instant) ORDER BY id;
+SELECT id, ROW_NUMBER() OVER(PARTITION BY instant ORDER BY id) AS r
+FROM partition_events IGNORE INDEX(by_instant) ORDER BY instant,r,id LIMIT 5;

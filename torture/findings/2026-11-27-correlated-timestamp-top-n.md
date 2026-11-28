@@ -148,8 +148,25 @@ window and the final order remains in UTC.
 
 The audited `ROW_NUMBER()`, `DENSE_RANK()`, final sort aliases and ordinals,
 and shared and inherited window sorts match. In an interleaved fall-back
-fixture, timestamp partition keys and finite temporal `RANGE` bounds still
-differ. Adjacent UTC rows can move backward in local time, affecting which
-rows a partition or frame retains. An unordered `ROW_NUMBER()` can also
+fixture, finite temporal `RANGE` bounds still differ. Adjacent UTC rows
+can move backward in local time. An unordered `ROW_NUMBER()` can also
 number rows in a different sequence when MySQL sorts the input before
 evaluating the window. [MySQL 8.4.11 window planning](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_select.cc#L4519-L4617).
+
+### Window partitions across the repeated hour
+
+For the first window sort on a base source, MySQL arranges timestamp
+partition keys by stored UTC and compares adjacent keys in local time.
+Two occurrences of `01:15` form separate partitions if an `01:45` row
+appears between them in UTC order. Equal local keys in adjacent rows
+stay together. A later window that sorts a materialized result can
+group both occurrences under one local key.
+
+The audited `ROW_NUMBER()`, `COUNT(*)`, `LAG()`, and final top-N cases
+use those boundaries. Fsdb retains its usual grouping path when each
+timestamp partition key has a constant UTC offset in the input rows.
+On a 10,000-row single-offset control in a named zone, interleaved native
+runs measured 72–73 ms before the change and 71–77 ms with the offset
+check. Always sorting by UTC took 114 ms in the initial run.
+Finite temporal `RANGE` frames still need separate handling for keys
+that move backward in local time.

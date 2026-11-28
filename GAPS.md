@@ -3227,7 +3227,9 @@ implementation effort:
    distinguish the first input sort from later local-time sorts and peer
    comparisons. [Audited joined sorts](torture/findings/2026-11-27-correlated-timestamp-top-n.md#sorting-joined-rows)
    also distinguish a base-table sort from a sort that consumes joined rows.
-   Broader join orders and some window partitions and frames still differ.
+   [Timestamp window partitions](torture/findings/2026-11-27-correlated-timestamp-top-n.md#window-partitions-across-the-repeated-hour)
+   can split when a local key recurs after intervening UTC rows. Broader
+   join orders and finite temporal window frames still differ.
    [Correlated TIMESTAMP ranges](torture/findings/2026-11-27-correlated-timestamp-top-n.md#seeking-correlated-timestamp-ranges)
    seek in UTC with TIMESTAMP as the leading column or after a composite
    equality prefix. [Named-zone bounds](torture/findings/2026-11-27-correlated-timestamp-top-n.md#disjoint-named-zone-ranges)
