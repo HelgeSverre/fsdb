@@ -13,8 +13,11 @@ then copy the **whole** data directory while FSDB is stopped. Keep
 `snapshot.fsdb`, any `snapshot.fsdb.new`, and `wal.bin` together. Copying only
 the snapshot can lose later committed writes; copying live files at different
 moments can produce an inconsistent pair. `Db.own` checkpoints on disposal,
-after it closes its owned connections. A server process should be stopped
-before copying its directory.
+after it closes its owned connections. On current CLI source, `SIGINT`
+requests an orderly shutdown. Unix also handles `SIGTERM`. The listener
+stops accepting connections, closes and waits for client sessions, then
+flushes the final durable checkpoint. Wait for the process to exit before
+copying its directory.
 
 Restore into a new, empty directory owned by the FSDB process account. Start
 FSDB against that directory on loopback, inspect recovery diagnostics, and
@@ -22,6 +25,12 @@ query representative schema, row counts, and account grants. Test the restore
 regularly with a copy of production data before relying on the backup.
 The original directory should remain untouched until the restored copy has
 been checked.
+
+The audited TablePlus Backup workflow uses native `mysqldump`, which can
+stop on a session timeout setting. Restoring a native SQL dump can stop
+on an explicit trigger definer after writing earlier statements. The
+[TablePlus findings](../torture/findings/2026-11-26-tableplus-compatibility.md#backup-and-restore-follow-up)
+record the tested workflow.
 
 ## Upgrade a durable directory
 

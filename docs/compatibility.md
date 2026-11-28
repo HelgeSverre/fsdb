@@ -9,6 +9,10 @@ important operational detail. This is not a blanket compatibility claim:
 - [Validation method](#validation-method)
 - [Application gauntlet](#application-gauntlet)
 - [Implemented surface](#implemented-surface)
+- [Planning and correlated queries](#planning-and-correlated-queries)
+- [Transactions and locking](#transactions-and-locking)
+- [Spatial SQL](#spatial-sql)
+- [Full-text search](#full-text-search)
 - [GUI clients and introspection](#gui-clients-and-introspection)
 - [TLS transport](#tls-transport)
 - [Bulk wire commands](#bulk-wire-commands)
@@ -142,18 +146,126 @@ Evidence comes from external clients, reference application suites, focused
 MySQL-oracle regressions, the differential harness, and performance profiles.
 No single lane is treated as proof of complete MySQL compatibility.
 
+## Planning and correlated queries
+
+- Indexed correlated lookups include audited scalar aggregates and ordered
+  `LIMIT` queries over numeric, text, and temporal keys. Composite seeks can
+  use an equality prefix followed by a range. Direct projections and selected
+  bounded expressions in derived tables or CTEs preserve the underlying
+  access path. See the [top-N oracle](../torture/findings/2026-11-26-correlated-index-top-n.md)
+  and the [derived projection cases](../torture/findings/2026-11-27-correlated-derived-top-n.md).
+- Eligible correlated `TIMESTAMP` lookups can translate named-zone bounds
+  into disjoint UTC ranges. This matters when a daylight-saving clock change
+  repeats a local time. Comparison, sorting, and window behavior still
+  depend on the SQL expression and access path. See the
+  [timestamp top-N findings](../torture/findings/2026-11-27-correlated-timestamp-top-n.md).
+- Selected numeric predicates push into singly referenced materialized CTEs,
+  grouped CTEs, and set-operation CTEs when the pushdown preserves the
+  result. `NO_MERGE` can target an individual CTE reference. Inspect
+  `EXPLAIN` for the specific statement. MySQL cost estimates and additional
+  plan shapes remain in the [query execution gaps](../GAPS.md#2-query-execution).
+- SQL-text `PREPARE` accepts multiline statements. Audited `FOUND_ROWS()`
+  cases account for a consumed offset and for `SQL_CALC_FOUND_ROWS` counting
+  beyond the returned limit.
+
+## Transactions and locking
+
+REPEATABLE READ retains the first committed read view and overlays the
+transaction's own writes after a write refresh. READ COMMITTED refreshes
+each statement. In an open SERIALIZABLE transaction, ordinary table reads
+use shared locking in the covered paths.
+
+Audited primary-key seeks, ranges, and clustered scans coordinate row locks
+with insertion gaps. The covered `NOWAIT` and `SKIP LOCKED` paths account for
+pending inserts. READ COMMITTED generally leaves unrelated insertions free.
+An unrelated secondary index can coexist with a primary cursor when the
+secondary cannot cover the projection or supply a bound. Selected ordered
+secondary seeks also wait or skip in cursor order. Covering secondary scans,
+some range boundaries, and composite access paths still differ. See
+[primary locking reads](../torture/findings/2026-11-26-explicit-primary-locking-reads.md)
+and [ordered secondary locking](../torture/findings/2026-11-27-ordered-secondary-locking.md).
+
+Ordinary transactions retain metadata locks on opened permanent tables.
+Conflicting DDL waits for release, and eligible locks acquired after a
+savepoint can be released by rollback to that savepoint. Prepared XA
+transactions retain their claims, including metadata ownership in the audited
+recovery cases. Concurrent writes recheck occupied unique-key destinations
+after a wait, including audited updates and upsert batches.
+[Concurrency gaps](../GAPS.md#7-transactions-and-concurrency).
+
+## Spatial SQL
+
+For eligible single-table statements, a spatial index can narrow
+`MBRIntersects`, `MBRWithin`, `MBRContains`, `MBREquals`, `MBRDisjoint`,
+`MBROverlaps`, and `MBRTouches` with a suitable constant geometry operand.
+The index stores bounding rectangles and execution still validates each
+candidate. Supported geographic SRSs can use this path as well as planar data.
+Scalar MBR predicates also include `MBRCovers` and `MBRCoveredBy`.
+
+| Area | Implemented operations |
+|---|---|
+| Constructors and accessors | Numeric `POINT(x, y)`, `ST_MakeEnvelope`, point coordinate getters and setters `ST_X` and `ST_Y`, and the geohash family `ST_GeoHash`, `ST_LatFromGeoHash`, `ST_LongFromGeoHash`, and `ST_PointFromGeoHash` |
+| Measurement | `ST_Area` for polygons and multipolygons, discrete `ST_FrechetDistance` for lines, and `ST_HausdorffDistance` for supported point and line types |
+| Validation and collection | `ST_IsSimple`, `ST_Validate`, planar `ST_Simplify`, and grouped or windowed `ST_Collect` |
+| Overlay | Intersection, union, difference, and symmetric difference for audited Cartesian and geographic shapes, including selected mixed collections |
+
+Supported geometry types and SRSs vary by function. Geographic topology
+and numerical edge cases still differ in some fixtures. The
+[spatial gap ledger](../GAPS.md#3-built-in-functions) links the operation-specific probes.
+
+```sql
+SELECT ST_Area(ST_GeomFromText('POLYGON((0 0,2 0,2 3,0 3,0 0))')) AS area,
+       ST_GeoHash(10.75, 59.91, 8) AS geohash;
+```
+
+## Full-text search
+
+Fsdb maintains `FULLTEXT` indexes for the default word parser and for
+`WITH PARSER ngram`. `MATCH ... AGAINST` supports natural-language, Boolean,
+and query-expansion searches in the covered combinations. The
+`ngram_token_size` startup setting defaults to two characters. Configure it
+before creating and populating ngram indexes.
+
+Current CJK coverage includes pinned Chinese and Japanese collation weights
+on audited SQL and posting paths, plus ngram phrase parsing, wildcard
+matching, stopwords, and relevance. Results can depend on collation,
+tokenization, and posting-cache state. Per-table and server-wide cache
+thresholds control synchronization of cached postings and are configured
+at startup. See the [ngram prefix findings](../torture/findings/2026-11-27-ngram-collation-prefixes.md)
+and [full-text gaps](../GAPS.md#11-full-text-search).
+
+```sql
+CREATE TABLE documents (
+    id INT PRIMARY KEY,
+    body TEXT NOT NULL,
+    FULLTEXT KEY by_body (body) WITH PARSER ngram
+);
+INSERT INTO documents VALUES (1, '東京駅'), (2, '大阪駅');
+SELECT id FROM documents WHERE MATCH(body) AGAINST('東京' IN BOOLEAN MODE);
+```
+
 ## GUI clients and introspection
 
 The introspection surface follows queries sent by real clients. Fixtures cover
 TablePlus connect, browse, and structure flows and phpMyAdmin query builders.
 Supported `information_schema` descriptors are pinned against MySQL 8.4.
 
+The [native TablePlus run](../torture/findings/2026-11-26-tableplus-compatibility.md)
+also verified paging and sorting, grid edits, composite-key and keyless
+tables, CSV import/export, TLS with a restricted account, schema creation,
+and routine and trigger inspection. The tested TablePlus Backup workflow
+uses `mysqldump`, which stops at Fsdb's session `net_write_timeout` restriction.
+A native dump can also stop on an explicit trigger definer and leave a
+partial restore. Use the [physical backup procedure](operations.md#back-up-and-restore)
+for a complete durable directory.
+
 The fixture also includes `SHOW SLAVE STATUS`, which MySQL 8.4 rejects with
 1064; accepting a familiar but removed statement would be a compatibility bug.
 
 Stored views, triggers, procedures, functions, parameters, and events populate
 their corresponding catalogs. `PROCESSLIST`, `Threads_connected`, and `KILL`
-operate on the live connection registry.
+operate on the live connection registry. In the audited running-query case,
+`KILL QUERY` disconnects the victim and rolls back its open transaction.
 
 `information_schema.INNODB_TRX` exposes active seeded transactions, including
 their isolation mode, logical write weight, and held row stripes. InnoDB-only
@@ -270,6 +382,13 @@ always requires a valid calendar date.
 
 ## Schema moves
 
+`CREATE DATABASE` and `ALTER DATABASE` persist the default charset and
+collation. New tables inherit the database default unless the table or
+column specifies its own. Changing the database default leaves existing
+columns with their recorded settings. `SHOW CREATE DATABASE` and
+`INFORMATION_SCHEMA.SCHEMATA` expose the stored default.
+[Database character defaults](../torture/findings/2026-11-27-database-character-defaults.md).
+
 `RENAME TABLE` evaluates its pairs from left to right and publishes the whole
 statement atomically. This permits swaps through an intermediate name and
 ensures a later missing source or occupied target leaves every earlier object
@@ -326,6 +445,11 @@ Single-table views and nested views over that shape accept `UPDATE` and
 `DELETE`, including predicates over computed projections. A view's `ORDER BY`
 guides limited updates and deletes, survives direct nesting, and yields to an
 explicit outer `ORDER BY`.
+Audited joined `UPDATE` and `DELETE` can use mergeable single-table views as
+targets, including computed projections used as filters. Caller subqueries
+resolve exposed view columns, and saved views keep their permanent base-table
+bindings when a session creates a temporary table of the same name.
+[Joined view writes](../torture/findings/2026-11-26-joined-update-shadow.md).
 
 Direct physical inner-join views accept `UPDATE` against one component table
 and `INSERT` with an explicit column list against one insertable component.
@@ -661,7 +785,8 @@ output.
 transaction conflict waits, and recursive CTEs. Session-scoped
 `wait_timeout`, `net_read_timeout`, `innodb_lock_wait_timeout`, and
 `cte_max_recursion_depth` are honoured. Process-wide `max_connections` and
-`max_allowed_packet` reject a session-scoped `SET`.
+`max_allowed_packet` reject a session-scoped `SET`. Set
+`net_write_timeout` globally or in the server option file.
 
 `max_points_in_geometry` is GLOBAL and SESSION scoped. It bounds newly created
 buffer strategies without invalidating values created under an earlier limit.

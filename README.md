@@ -16,6 +16,9 @@ primary design constraint, ahead of raw performance. The default server is
 in-memory, with an opt-in binary WAL and snapshots for durable use. The
 [compatibility guide](docs/compatibility.md) explains how behavior is
 validated; [GAPS.md](GAPS.md) is the live ledger of known differences.
+This README describes the source on `main`. See the [release notes](docs/releases)
+for published versions and [NuGet](https://www.nuget.org/packages/Fsdb/) for
+the current library package.
 
 ## Contents
 
@@ -98,7 +101,8 @@ fall into a few groups:
 | Concern | Options |
 |---|---|
 | Listener | `--listen`, `--port` / `-p` |
-| Storage | `--data-dir`, `--ngram-token-size`, `--innodb-ft-min-token-size`, `--innodb-ft-max-token-size`, `--ft-query-expansion-limit`, `--innodb-ft-enable-stopword`, `--innodb-ft-user-stopword-table`, `--innodb-ft-server-stopword-table` |
+| Storage | `--data-dir` |
+| Full-text | `--ngram-token-size`, `--innodb-ft-min-token-size`, `--innodb-ft-max-token-size`, `--innodb-ft-cache-size`, `--innodb-ft-total-cache-size`, `--ft-query-expansion-limit`, `--innodb-ft-enable-stopword`, `--innodb-ft-user-stopword-table`, `--innodb-ft-server-stopword-table` |
 | Option files | `--defaults-file` |
 | TLS | `--ssl-cert`, `--ssl-key`, `--ssl-ca`, `--require-secure-transport` |
 | Server files | `--secure-file-priv` |
@@ -107,6 +111,13 @@ fall into a few groups:
 | Information | `--version`, `--help` |
 
 ## Configuration
+
+The startup full-text posting cache limits are 8,000,000 bytes per table and
+640,000,000 bytes across tables. Set them with
+`--innodb-ft-cache-size` and `--innodb-ft-total-cache-size`, or with
+`innodb_ft_cache_size` and `innodb_ft_total_cache_size` in `[mysqld]`.
+See [full-text search](docs/compatibility.md#full-text-search) for parser,
+collation, and cache behavior.
 
 ### Ngram token size
 
@@ -356,10 +367,13 @@ top-(n+offset) set instead of materializing the full sort.
 Databases and tables live in a value-swapped catalog. Transaction visibility
 depends on the selected isolation level:
 
-- repeatable read establishes a snapshot on the first database statement;
+- repeatable read keeps a committed view from the first consistent table
+  read and overlays the transaction's own writes;
 - read committed refreshes from committed roots before each statement;
 - read uncommitted also composes active private deltas into that statement
-  view.
+  view;
+- serializable acquires shared locks for ordinary table reads in an open
+  transaction. The covered index paths also protect insertion gaps.
 
 Writes remain private until commit at every isolation level. Within each
 affected database, commit performs a row-level three-way merge so disjoint
@@ -379,17 +393,18 @@ copying the entire table.
 
 #### Locks
 
-`FOR UPDATE`, `FOR SHARE`, and `LOCK IN SHARE MODE` read current committed row
-versions and retain shared or exclusive row-stripe ownership until the
-transaction ends. `OF`, `NOWAIT`, and `SKIP LOCKED` follow MySQL's transaction
-behavior. Direct indexed predicates narrow a single-table lock set; joins and
-scan-shaped locking reads conservatively lock every targeted physical source.
+`FOR UPDATE`, `FOR SHARE`, and `LOCK IN SHARE MODE` read current rows and retain
+shared or exclusive locks. Audited primary-key seeks, ranges, and clustered
+scans protect visited gaps under REPEATABLE READ and SERIALIZABLE. Covered
+`NOWAIT` and `SKIP LOCKED` paths account for pending inserts as well as
+existing rows. Other access paths can lock more broadly. See
+[transactions and locking](docs/compatibility.md#transactions-and-locking).
 
 `LOCK TABLES` provides session-scoped shared or exclusive ownership. It honors
 MySQL's alias restrictions, temporary-table exception, atomic replacement
-lists, and implicit view and trigger dependencies. Ordinary statements acquire
-compatible table ownership only while they execute, so explicit locks also
-coordinate with sessions that never issue `LOCK TABLES`.
+lists, and implicit view and trigger dependencies. Open transactions retain
+metadata locks on opened permanent tables. Conflicting DDL waits until the
+transaction or an eligible savepoint rollback releases the lock.
 
 Named `FLUSH TABLES ... WITH READ LOCK` and `FOR EXPORT` use the same read-lock
 lifecycle. The global `FLUSH TABLES WITH READ LOCK` form lets reads and
@@ -509,11 +524,11 @@ different access pattern:
   diagnostics. Arithmetic and other general expression keys retain their DDL
   and metadata but still scan or sort.
 
-- **Spatial access.** Planar `SPATIAL` and `RTREE` declarations maintain
-  immutable minimum-bounding-rectangle entries. They narrow direct
-  `MBRINTERSECTS`, `MBRWITHIN`, and `MBRCONTAINS` predicates in single-table
-  reads, updates, and deletes. The full predicate still validates every
-  candidate.
+- **Spatial access.** `SPATIAL` and `RTREE` declarations maintain immutable
+  minimum-bounding-rectangle entries. Supported planar and geographic MBR
+  predicates can use these entries with suitable constant geometry operands.
+  Execution still checks the full predicate. See
+  [spatial SQL](docs/compatibility.md#spatial-sql) for functions and limits.
 
 - **Joins.** Equi-joins choose between one hash build and repeated index
   probes. Physical inner, left, and right joins can probe an index when rows
@@ -527,8 +542,11 @@ different access pattern:
   outer-row equalities may supply different key parts; projection aliases are
   mapped back to their stored columns before the lookup. A fully covered
   `COUNT(*)` reads the index cardinality directly when its comparison semantics
-  match the stored key. More complex or coercive shapes retain the materialized
-  or row-by-row path.
+  match the stored key. Audited numeric, text, and temporal ranges can seek
+  composite keys for scalar aggregates and ordered `LIMIT` subqueries.
+  Selected numeric predicates push into single-use, grouped, and set-operation
+  materialized CTEs. [Planning and correlated queries](docs/compatibility.md#planning-and-correlated-queries)
+  describes the paths and their limits.
 
 Equality buckets and ordered entries remain separate derived structures. That
 trade spends memory and incremental write work to keep point probes direct and
@@ -540,9 +558,10 @@ The registry covers MySQL 8.4's utf8mb4 names and common Unicode, Windows,
 DOS, CJK, ISO Latin, KOI8, and Mac character sets. `utf8_*` remains available
 as MySQL's deprecated alias.
 
-Each collation carries a locale, fold level, and padding rule. ICU supplies
-the comparison and sort keys, so the exact weight bytes can differ from
-MySQL's UCA tables. Column declarations and `SET collation_connection` feed
+Each collation carries a locale, fold level, and padding rule. Fsdb uses
+pinned MySQL weights for audited paths, including Chinese and Japanese
+`utf8mb4` 9.0 collations. Other paths can use ICU or Fsdb's own folding rules
+and can still differ from MySQL. Column declarations and `SET collation_connection` feed
 the same coercibility rules used by comparisons, grouping, deduplication,
 joins, and unique indexes.
 
@@ -568,16 +587,17 @@ current boundaries live in [GAPS.md](GAPS.md).
 
 - Queries: joins including `NATURAL`/`USING`, derived and lateral tables,
   `GROUP BY`/`HAVING`, window functions, `UNION [ALL]`, expression subqueries,
-  ordinary and recursive CTEs, JSON paths, `JSON_TABLE`, planar spatial
-  predicates, overlays, independently configurable buffer strategies, and
+  ordinary and recursive CTEs, JSON paths, `JSON_TABLE`, planar and selected
+  geographic spatial predicates and overlays, configurable buffer strategies, and
   EPSG 4326 point distance and line length with axis-order and linear-unit
   handling, EPSG 3857/3395 projected planar distance and length,
   `ST_Transform` among 4326/3857/3395, line interpolation across supported
   SRSs, plus spherical
-  point and multipoint distance.
+  point and multipoint distance. The [spatial guide](docs/compatibility.md#spatial-sql)
+  lists the additional measurement, constructor, validation, and aggregation functions.
 - Writes and schema: `INSERT`, `INSERT ... SELECT`, `REPLACE`, multi-table
   `UPDATE`/`DELETE`, generated columns, foreign keys, HASH partition metadata,
-  atomic multi-pair and cross-database table renames, foreign-server catalog
+  persisted database character defaults, atomic multi-pair and cross-database table renames, foreign-server catalog
   DDL, `EXPLAIN`, and enforced or `NOT ENFORCED` `CHECK` constraints.
 - Stored objects: views and `WITH CHECK OPTION`, procedures, functions,
   scheduled events, and `BEFORE`/`AFTER` triggers with compound bodies and
@@ -595,8 +615,10 @@ The introspection surface used by GUI clients exposes compatible schemas and
 live data wherever fsdb owns the underlying subsystem. Its
 `information_schema` column sets are checked against MySQL 8.4. The `SHOW`
 family covers metadata such as `STATUS`, `VARIABLES`, `ENGINES`, `GRANTS`, and
-`CREATE TABLE`; `PROCESSLIST` is live, with working `KILL QUERY` and
-`KILL CONNECTION` commands.
+`CREATE TABLE`. `PROCESSLIST` is live. `KILL CONNECTION` closes the chosen
+session, and the audited `KILL QUERY` path also disconnects the client.
+See [GUI clients](docs/compatibility.md#gui-clients-and-introspection) for
+TablePlus workflows and backup limitations.
 
 Every comparison, sort, group, deduplication, join, and unique key uses the
 effective collation of its operands. `SET collation_connection` governs
@@ -715,6 +737,8 @@ register tables before opening connections or starting a listener:
 | API | Purpose |
 |---|---|
 | `Db.withDataDir` | Load and attach durable WAL/snapshot storage. |
+| `Db.withNgramTokenSize`, `Db.withFullTextWordLengths` | Configure tokenization before creating indexes or opening connections. |
+| `Db.withFullTextCacheSize`, `Db.withFullTextTotalCacheSize` | Set the startup full-text posting cache thresholds on current source. |
 | `Db.withLogger` | Route process-wide diagnostics to a host callback. |
 | `Db.withTlsCertificate` | Supply the listener's server certificate. |
 | `Db.withClientCertificateAuthority` | Trust a CA for client certificates. |
@@ -743,6 +767,7 @@ rows, and cancellable asynchronous calls:
 
 ```fsharp
 open System.Threading
+open Fsdb
 open Fsdb.Value
 
 let demo () =
@@ -1141,7 +1166,9 @@ fsdb optimizes for readable, idiomatic F# over raw speed, so MySQL is expected
 to win many workloads. The measurements identify scaling slopes and engine
 hotspots rather than serving as a parity target. See the
 [benchmark guide](benchmarks/README.md) for durability, isolation, and
-interpretation rules.
+interpretation rules. The [native and container peer report](benchmarks/results/789a3519-peer-benchmark.md)
+records the engine versions, durability settings, and workload-specific
+results from a wider comparison.
 
 ## Development
 
@@ -1190,6 +1217,8 @@ moves on.
 | Guide | Use it for |
 |---|---|
 | [Compatibility](docs/compatibility.md) | Validation method and detailed supported behavior |
+| [Operations](docs/operations.md) | Durable storage, backup, restore, and upgrades |
+| [Distribution](docs/distribution.md) | Library packaging and the release workflow |
 | [Open gaps](GAPS.md) | Current, evidence-backed differences from MySQL 8.4 |
 | [Independent review response](docs/independent-review-response.md) | Disposition of the October 14 engineering review and remaining production-readiness work |
 | [Comment style](docs/comment-style.md) | The grading every source comment and maintained document survives |

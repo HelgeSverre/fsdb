@@ -1,13 +1,24 @@
 # Fsdb
 
-Fsdb is an embeddable F# database with a MySQL-compatible SQL engine and wire-protocol server for .NET 10. It can host SQL inside a .NET application, extend SQL with F# functions and tables, or serve MySQL clients from the same engine.
+Fsdb is an embeddable F# database for .NET 10. Run SQL in process, extend the engine with F# functions and read-only tables, or serve MySQL clients from the same engine.
 
-MySQL 8.4 is the compatibility target, but some behavior differs; see the [compatibility gaps](https://github.com/HelgeSverre/fsdb/blob/main/GAPS.md) before depending on a specific MySQL feature. The API and storage format may evolve in later minor releases.
+MySQL 8.4 is the compatibility target. Check the [compatibility guide](https://github.com/HelgeSverre/fsdb/blob/main/docs/compatibility.md) for supported paths and the [release notes](https://github.com/HelgeSverre/fsdb/tree/main/docs/releases) for your package version. The API and storage format may evolve across releases.
 
 ## Install
 
 ```sh
-dotnet add package Fsdb --version 0.1.2
+dotnet add package Fsdb
+```
+
+Add `--version` with a specific published version to pin a dependency.
+If your SDK reports `NU1605` for `FSharp.Core`, use an SDK that supplies the
+required version or update the implicit package reference in your F# project.
+Fsdb 0.1.9 requires `FSharp.Core` 10.1.404 or later.
+
+```xml
+<ItemGroup>
+  <PackageReference Update="FSharp.Core" Version="10.1.404" />
+</ItemGroup>
 ```
 
 ## Run SQL in process
@@ -22,8 +33,13 @@ let run () =
     use host = Db.create () |> Db.own
     use connection = host.Connect()
 
-    connection.Execute("CREATE TABLE items (id INT PRIMARY KEY, name TEXT)", []) |> ignore
-    connection.Execute("INSERT INTO items VALUES (?, ?)", [ VInt 1L; VString "first" ]) |> ignore
+    let execute sql values =
+        match connection.Execute(sql, values) with
+        | Executor.Affected _ -> ()
+        | other -> failwithf "Write failed: %A" other
+
+    execute "CREATE TABLE items (id INT PRIMARY KEY, name TEXT)" []
+    execute "INSERT INTO items VALUES (?, ?)" [ VInt 1L; VString "first" ]
 
     match connection.QueryValues("SELECT name FROM items WHERE id = ?", [ VInt 1L ]) with
     | Ok([ "name" ], [ [ Some(VString name) ] ]) -> printfn "%s" name
@@ -39,7 +55,9 @@ This example uses an in-memory database. For WAL-backed storage, configure a dir
 use host = Db.create () |> Db.withDataDir "./fsdb-data" |> Db.own
 ```
 
-Dispose the host cleanly to checkpoint durable storage. Keep one connection per independent transaction; a connection is a stateful SQL session.
+Dispose the host cleanly to checkpoint durable storage. A connection is a stateful SQL session. Use one connection per independent transaction, and configure the data directory before opening connections or subscribing to commits.
+
+Use `connection.Prepare` to reuse a statement with different positional values. The disposable command offers typed queries and cancellable asynchronous methods. The [package consumer example](https://github.com/HelgeSverre/fsdb/tree/main/examples/PackageConsumer) demonstrates a prepared query, a scalar extension, and a commit subscription in one F# project.
 
 ## Extend or serve the database
 
@@ -68,6 +86,11 @@ let run () =
 run ()
 ```
 
-`Db.registerAggregate`, `Db.registerFunction`, and `Db.registerTable` provide other extension points. `Db.subscribeCommits` exposes committed changes, and `Db.serve` starts a stoppable MySQL-protocol listener. Connections also offer prepared commands and cancellable asynchronous methods.
+| API | Use |
+|---|---|
+| `Db.registerAggregate`, `Db.registerFunction` | Add grouped computations or scalars with query context. |
+| `Db.registerTable` | Expose host data as a read-only SQL table. |
+| `Db.subscribeCommits`, `host.SubscribeCommits()` | Consume committed row and schema changes. |
+| `Db.serve` | Start a MySQL-protocol listener and get its bound endpoint. |
 
-The [embedding guide](https://github.com/HelgeSverre/fsdb#embedding--extensibility) covers these APIs in detail. The [package consumer example](https://github.com/HelgeSverre/fsdb/tree/main/examples/PackageConsumer) is a standalone project that exercises a published-style package reference. The command-line server is built separately and is not included in this library package.
+The command-line server is a separate build. For listener configuration, host lifetime, and additional examples, see the [embedding guide](https://github.com/HelgeSverre/fsdb#embedding--extensibility).

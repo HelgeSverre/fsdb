@@ -2,16 +2,21 @@
 
 `src/Fsdb/Fsdb.fsproj` produces the `Fsdb` NuGet library for .NET 10.
 `src/Fsdb.Cli/Fsdb.Cli.fsproj` produces the server executable and is not part
-of the library package. `0.1.0-preview.1` was the first published preview;
-the current source targets stable package `0.1.9`. Its public
-embedding entry point is `Fsdb.Db`. Later minor versions may evolve the API
-and storage format; test a copy of durable data before upgrading.
+of the library package. Install the latest published stable version with
+`dotnet add package Fsdb`, or pin a version from the
+[NuGet version list](https://www.nuget.org/packages/Fsdb/).
+The public embedding entry point is `Fsdb.Db`. The project version on
+`main` can remain unchanged while development continues. Use the tagged
+source and [release notes](releases) to check what a published package contains.
+Later releases may evolve the API and storage format. Test a copy of durable
+data before upgrading.
 
 Run `just check` and `just package-check` before releasing. The package check
 builds both `.nupkg` and `.snupkg`, then restores
 [`examples/PackageConsumer`](../examples/PackageConsumer/README.md) from an
-isolated package cache and exercises an in-process SQL connection. To retain artifacts
-for inspection, run:
+isolated package cache and exercises scalar extensions, prepared typed
+queries, and commit subscriptions through an in-process connection.
+To retain artifacts for inspection, run:
 
 ```sh
 dotnet pack src/Fsdb/Fsdb.fsproj -c Release -o artifacts/packages

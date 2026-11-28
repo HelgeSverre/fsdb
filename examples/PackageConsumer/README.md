@@ -6,7 +6,13 @@ parameterized query, reuses a prepared command for typed asynchronous results,
 and consumes a commit event without a server. It has no project reference to
 fsdb's source tree.
 
-Run `just package-check` from the repository root to build the current package
-and restore this example from an isolated local package cache. After the
-matching version is published, `dotnet run --project
-examples/PackageConsumer` also works with normal NuGet sources.
+Run the example from the repository root.
+
+```sh
+dotnet run --project examples/PackageConsumer
+```
+
+This uses the version pinned in [PackageConsumer.fsproj](PackageConsumer.fsproj)
+from your configured NuGet sources. Run `just package-check` to test current
+source instead. It packs the library and restores this example from an
+isolated local feed and package cache.
