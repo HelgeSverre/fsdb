@@ -784,6 +784,26 @@ let tests =
                   [ "1" ]
                   "indexed range uses the same collation order"
 
+          testCase "Japanese SQL collations distinguish tailored ideographs in indexed ranges"
+          <| fun _ ->
+              for collation in [ "utf8mb4_ja_0900_as_cs"; "utf8mb4_ja_0900_as_cs_ks" ] do
+                  let store = create ()
+                  run store $"CREATE TABLE japanese_keys(id INT PRIMARY KEY,s VARCHAR(20) COLLATE {collation},KEY ix(s))" |> ignore
+                  run store "INSERT INTO japanese_keys VALUES (1,'神'),(2,'駅'),(3,'神'),(4,'丑')" |> ignore
+                  Expect.equal
+                      (ids (run store "SELECT id FROM japanese_keys FORCE INDEX(ix) WHERE s='神' ORDER BY id"))
+                      [ "3" ] collation
+                  Expect.equal
+                      (ids (run store "SELECT id FROM japanese_keys FORCE INDEX(ix) WHERE s<'神' ORDER BY s,id"))
+                      [ "4"; "2" ] collation
+                  Expect.equal
+                      (ids (run store "SELECT HEX(WEIGHT_STRING(s)) FROM japanese_keys WHERE id=1"))
+                      [ "FB40F95E0000002000000002" ] collation
+                  let markWeight = "1C0D1FBC000000200037002000370000000E00010021000E0002"
+                  let expected = if collation.EndsWith("_ks") then markWeight + "000000020002" else markWeight
+                  Expect.equal (ids (run store $"SELECT HEX(WEIGHT_STRING('ゝが' COLLATE {collation}))")) [ expected ] "the leading mark sees the final kana at later levels"
+                  Expect.equal (ids (run store $"SELECT 'カ' COLLATE {collation} LIKE 'か'")) [ "1" ] "LIKE uses the three-level character comparison"
+
           testCase "Japanese kana-sensitive ngrams distinguish compatibility ideographs"
           <| fun _ ->
               let store = create ()

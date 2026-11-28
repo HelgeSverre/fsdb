@@ -1646,6 +1646,8 @@ let internal fullTextPrefixExpansion name (rune: Rune) =
 
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let chinese0900 = name = "utf8mb4_zh_0900_as_cs"
+    let japanese0900 = name = "utf8mb4_ja_0900_as_cs" || name = "utf8mb4_ja_0900_as_cs_ks"
+    let kanaSensitive = name = "utf8mb4_ja_0900_as_cs_ks"
     let ci = compareInfoFor spec.Locale
     let trim (s: string) =
         if not spec.PadSpace then s
@@ -1716,18 +1718,6 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                   |> foldKanaVariants |> foldSmallKana |> foldUnicodeQuoteForms
                   |> foldLegacyUnicodeJamo
         | _ -> value
-
-    let japaneseKanaKey (value: string) =
-        let value = normalizeJapaneseKana value
-        let script =
-            value
-            |> Seq.choose (fun c ->
-                if (c >= '\u3041' && c <= '\u3096') || c = '\u309D' || c = '\u309E' then Some 0uy
-                elif (c >= '\u30A1' && c <= '\u30FA') || c = '\u30FD' || c = '\u30FE' then Some 1uy
-                else None)
-            |> Seq.toArray
-        let baseKey = ci.GetSortKey(foldJapaneseCompatibility value, spec.Fold).KeyData
-        Array.append baseKey script
 
     let primaryText (s: string) = s |> foldText |> trim
     let fullTextKeyText (s: string) =
@@ -2016,8 +2006,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             compareBinary a b
         elif chinese0900 then
             Uca0900Weights.compareChinese a b
-        elif name = "utf8mb4_ja_0900_as_cs_ks" then
-            (japaneseKanaKey (trim a)).AsSpan().SequenceCompareTo((japaneseKanaKey (trim b)).AsSpan())
+        elif japanese0900 then
+            Uca0900Weights.compareJapanese kanaSensitive a b
         else
             ci.Compare(primaryText a, primaryText b, spec.Fold)
 
@@ -2029,8 +2019,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             // trimmed-equal under PAD SPACE: the extra-space side sorts
             // first (MySQL-verified), same tie-break as the ICU branch.
             if c <> 0 then c else countTrailingSpaces b - countTrailingSpaces a
-        elif chinese0900 then
-            Uca0900Weights.compareChinese a b
+        elif chinese0900 || japanese0900 then
+            comparePrimary a b
         else
             let primary = comparePrimary a b
 
@@ -2056,8 +2046,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                 "B" + Convert.ToHexString(binaryBytes s)
             elif chinese0900 then
                 Convert.ToHexString(Uca0900Weights.chineseWeight s)
-            elif name = "utf8mb4_ja_0900_as_cs_ks" then
-                Convert.ToHexString(japaneseKanaKey (trim s))
+            elif japanese0900 then
+                Convert.ToHexString(Uca0900Weights.japaneseWeight kanaSensitive s)
             else
                 Convert.ToHexString(ci.GetSortKey(primaryText s, spec.Fold).KeyData)
       FullTextKeyOf =
@@ -2070,10 +2060,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                 Uca0900Weights.accentSensitiveKey s
             elif name = "utf8mb4_0900_as_cs" then
                 Uca0900Weights.caseSensitiveKey s
-            elif name = "utf8mb4_ja_0900_as_cs" then
-                Uca0900Weights.japaneseFullTextKey false s
-            elif name = "utf8mb4_ja_0900_as_cs_ks" then
-                Uca0900Weights.japaneseFullTextKey true s
+            elif japanese0900 then
+                Uca0900Weights.japaneseFullTextKey kanaSensitive s
             elif usesGeneralFullTextWeights name then
                 s |> lowercaseWith LegacyFullTextCaseData.unicode400 |> trim |> generalFullTextKey
             else
@@ -2090,6 +2078,8 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                 binaryWeight s
             elif chinese0900 then
                 Uca0900Weights.chineseWeight s
+            elif japanese0900 then
+                Uca0900Weights.japaneseWeight kanaSensitive s
             else
                 legacyWeight s
                 |> Option.defaultWith (fun () -> ci.GetSortKey(foldText s, spec.Fold).KeyData)
@@ -2099,14 +2089,17 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                 hash (binaryBytes s)
             elif chinese0900 then
                 hash (Uca0900Weights.chineseWeight s)
-            elif name = "utf8mb4_ja_0900_as_cs_ks" then
-                hash (japaneseKanaKey (trim s))
+            elif japanese0900 then
+                hash (Uca0900Weights.japaneseWeight kanaSensitive s)
             else
                 ci.GetHashCode(primaryText s, spec.Fold)
       CharEquals =
         if spec.ByteOrder then
             fun a b -> binaryBytes (string a) = binaryBytes (string b)
-        elif chinese0900 || name = "utf8mb4_ja_0900_as_cs_ks" then
+        elif japanese0900 then
+            // Japanese LIKE uses three levels even with kana-sensitive ordering.
+            fun a b -> a = b || Uca0900Weights.compareJapanese false (string a) (string b) = 0
+        elif chinese0900 then
             fun a b -> comparePrimary (string a) (string b) = 0
         else
             fun a b -> ci.Compare(primaryText (string a), primaryText (string b), spec.Fold) = 0
@@ -2128,7 +2121,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
       PadSpace = spec.PadSpace
       EqualityIsOrderEquivalence =
         not spec.PadSpace
-        && (spec.ByteOrder || (spec.Fold = CompareOptions.None && name <> "utf8mb4_ja_0900_as_cs_ks")) }
+        && (spec.ByteOrder || japanese0900 || spec.Fold = CompareOptions.None) }
 
 // ---------------------------------------------------------------------------
 // The registry — every utf8mb4 collation MySQL 8.4 ships.

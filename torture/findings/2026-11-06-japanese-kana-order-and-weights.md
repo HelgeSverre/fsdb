@@ -11,17 +11,16 @@ Before the correction, `ORDER BY` displaced 180 documents, the first
 mixed-script comparison was reversed, and an indexed range omitted a row.
 The collation transform marked hiragana as an extra ICU primary. That put
 script before voicing, whereas MySQL's kana-sensitive weights distinguish
-voicing before script. Fsdb now compares the ICU base key first and appends
-the kana script as a tie-break. It normalizes halfwidth kana before either
-the sort or full-text key. The expanded oracle reports zero ordering,
+voicing before script. The first correction compared the ICU base key
+before the kana script and normalized halfwidth kana before building keys.
+The expanded oracle reported zero ordering,
 comparison, indexed-range, equality, search, and relevance differences at
 all ten sizes. Focused regressions cover the script and iteration-mark order
 plus an indexed range.
 
-`WEIGHT_STRING` remains a separate gap: all 192 singleton byte strings in
-this range still differ from MySQL because fsdb emits ICU bytes rather than
-MySQL's Japanese UCA 9.0 weight format. The correction is to query ordering
-and indexed ranges, not exact serialized weights or MeCab behavior.
+All 192 singleton weight strings still differed at that stage. The
+[SQL comparison follow-up](#sql-comparison-and-index-order) now covers
+the exact serialized weights for both Japanese collations.
 
 Reproduce after building `src/Fsdb.Cli` in Release:
 
@@ -128,3 +127,28 @@ there were 12. Repeating with a statistics read after the first match
 showed MySQL's estimates diverging from `COUNT(*)` after optimize. Fsdb
 uses the live count, so score differences from estimated document counts
 remain open. [MySQL document-count lookup](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L3668-L3672)
+
+## SQL comparison and index order
+
+Both Japanese UCA 9.0 collations now use the pinned weights for SQL
+equality, grouping, ordering, index keys, and `WEIGHT_STRING`. For
+example, `神` and `神` compare differently in MySQL. Fsdb previously
+grouped them together under `utf8mb4_ja_0900_as_cs`. The leading mark in
+`ゝが` receives context from the final Kana on later weight levels because
+MySQL's scanner retains the previous character between levels. [MySQL Japanese weight scanner](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/strings/ctype-uca.cc#L1480-L1542)
+
+The pinned MySQL replay compared 294 statements across two corpora.
+Both collations matched all 855 weight strings in the wider corpus,
+including the 192 scalars from U+3040 through U+30FF. Equality joins,
+grouping, plain and forced-index ordering, bounded ranges, and correlated
+`ORDER BY ... LIMIT` queries matched. Checkpoint and WAL data written
+by the previous build reopened with the corrected range and equality
+results, and the new primary-key insert distinguished `神` from `神`.
+The native MySQL 8.4.11 replay also matched all 11,520 Kana ngram
+searches, equality and ordering checks, and exact singleton weights
+across token sizes 1–10.
+
+One `LIKE` difference depended on MySQL's plan. Under
+`utf8mb4_ja_0900_as_cs_ks`, a scalar comparison and a table scan both
+match bare `ぁ` against `ァ%`. A covering range scan starts at `ァ`
+and omits that row. Fsdb's result agrees with the table scan.

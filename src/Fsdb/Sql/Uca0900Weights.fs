@@ -94,11 +94,40 @@ let private accentSensitiveTable = loadTable false "Fsdb.AccentSensitive0900Weig
 let private caseSensitiveTable = loadTable false "Fsdb.CaseSensitive0900Weights.bin.gz" 0x31534346u
 let private japaneseTable = loadTable true "Fsdb.Japanese0900Weights.bin.gz" 0x31414A46u
 
+let private japaneseLeadingMarkWeight first head pair =
+    let suffix start finish headLength =
+        let tailStart = min finish (start + headLength)
+        pair.Bytes[tailStart .. finish - 1]
+    let secondary = suffix (pair.PrimaryEnd + 2) pair.SecondaryEnd (head.SecondaryEnd - head.PrimaryEnd - 2)
+    let tertiary = suffix (pair.SecondaryEnd + 2) pair.TertiaryEnd (head.TertiaryEnd - head.SecondaryEnd - 2)
+    let fourth = suffix (pair.TertiaryEnd + 2) pair.Bytes.Length (max 0 (head.Bytes.Length - head.TertiaryEnd - 2))
+    let separator = [| 0uy; 0uy |]
+    let secondaryEnd = first.PrimaryEnd + 2 + secondary.Length
+    { Bytes = Array.concat
+          [ first.Bytes[0 .. first.PrimaryEnd - 1]; separator; secondary; separator; tertiary; separator; fourth ]
+      PrimaryEnd = first.PrimaryEnd
+      SecondaryEnd = secondaryEnd
+      TertiaryEnd = secondaryEnd + 2 + tertiary.Length }
+
 let private weightOf quaternary (ranges, scalars, contractions: IDictionary<char, (string * Weight)[]>) (value: string) =
     let separators = if quaternary then 6 else 4
     if value.Length = 0 then
         { Bytes = Array.zeroCreate<byte> separators; PrimaryEnd = 0; SecondaryEnd = 2; TertiaryEnd = 4 }
     else
+        // MySQL restarts the scan for each weight level while retaining the
+        // previous character. A leading mark can therefore use the last
+        // character as context after the primary level.
+        let leadingContext =
+            if not quaternary || value.Length < 2 then None
+            else
+                let last = value[value.Length - 1]
+                match contractions.TryGetValue last with
+                | true, pairs ->
+                    pairs |> Array.tryPick (fun (pair, weight) ->
+                        if pair.Length = 2 && pair[1] = value[0] then
+                            Some(scalarWeight ranges scalars (int last), weight)
+                        else None)
+                | _ -> None
         let segments = ResizeArray<Weight>()
         let mutable offset = 0
         let mutable primaryLength = 0
@@ -121,7 +150,12 @@ let private weightOf quaternary (ranges, scalars, contractions: IDictionary<char
                         match Rune.TryGetRuneAt(value, offset) with
                         | true, rune -> rune
                         | _ -> Rune.ReplacementChar
-                    rune.Utf16SequenceLength, scalarWeight ranges scalars rune.Value
+                    let weight = scalarWeight ranges scalars rune.Value
+                    let weight =
+                        match leadingContext with
+                        | Some(head, pair) when offset = 0 -> japaneseLeadingMarkWeight weight head pair
+                        | _ -> weight
+                    rune.Utf16SequenceLength, weight
 
             segments.Add(weight)
             offset <- offset + length
@@ -166,6 +200,21 @@ let accentSensitiveKey value =
 
 let caseSensitiveKey value =
     Convert.ToHexString((weightOf false caseSensitiveTable.Value value).Bytes)
+
+let private japaneseSqlWeight kanaSensitive value =
+    let weight = weightOf true japaneseTable.Value value
+    let hasKanaWeights = weight.Bytes.Length > weight.TertiaryEnd + 2
+    let length = if kanaSensitive && hasKanaWeights then weight.Bytes.Length else weight.TertiaryEnd
+    struct (weight.Bytes, length)
+
+let japaneseWeight kanaSensitive value =
+    let struct (bytes, length) = japaneseSqlWeight kanaSensitive value
+    if length = bytes.Length then bytes else Array.sub bytes 0 length
+
+let compareJapanese kanaSensitive left right =
+    let struct (leftBytes, leftLength) = japaneseSqlWeight kanaSensitive left
+    let struct (rightBytes, rightLength) = japaneseSqlWeight kanaSensitive right
+    leftBytes.AsSpan(0, leftLength).SequenceCompareTo(rightBytes.AsSpan(0, rightLength))
 
 let japaneseFullTextKey kanaSensitive value =
     let weight = weightOf true japaneseTable.Value value
