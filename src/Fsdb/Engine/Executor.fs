@@ -15945,7 +15945,7 @@ and private tryOrderedSecondaryLockingRead store registry dbName (select: Select
                                 |> storageOrderTerms
                             let count = min (int64 System.Int32.MaxValue) (int64 offset + int64 limit) |> int
                             let timeout = lockingReadTimeout.Value |> Option.defaultValue (Limits.lockWaitTimeout ())
-                            let lower, upper = fixedPrefixSuffixBounds store registry resolved.Table tref select.Where matched
+                            let lower, upper = fixedPrefixSuffixBounds false store registry resolved.Table tref select.Where matched
                             Storage.tryLockOrderedSecondaryRead timeout store (Option.defaultValue store live) refresh database tref.Table name keyTerms resolved.PinnedValues
                                 lower upper locking.Strength locking.Wait releaseLockingReadOffsetRows.Value offset count)))
     | _ -> None
@@ -21510,7 +21510,7 @@ and private tryIndexOrder
 
             direct
             |> Option.orElseWith (fun () ->
-                tryFixedPrefixIndexOrder IndexOrderBy store registry dbName tref select.Where orderedColumns Set.empty []
+                tryFixedPrefixIndexOrder false IndexOrderBy store registry dbName tref select.Where orderedColumns Set.empty []
                 |> Option.bind planLookup))
 
 and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull (select: SelectStmt) (outer: EvalContext option) readOuter =
@@ -21560,7 +21560,11 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
                     match columnExpression with
                     | Col _ | QualifiedCol _ ->
                         columnOf columnExpression
-                        |> Option.exists (fun column -> bound |> Option.exists (Storage.isExactTemporalIndexBound column.Type))
+                        |> Option.exists (fun column ->
+                            bound |> Option.exists (fun value ->
+                                match column.Type, value with
+                                | TTimestamp _, (VDate _ | VDateTime _) -> true
+                                | ty, value -> Storage.isExactTemporalIndexBound ty value))
                     | _ -> false
                 fits left right || fits right left
 
@@ -21575,6 +21579,26 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
 
             let key (column: ColumnDef) value = { Column = column.Name; Transform = None; Value = value }
             let indexedColumn expression = tryCorrelatedInnerColumn source expression |> Option.bind innerColumn
+            let hasCorrelatedTimestampRange columnName =
+                let timestampColumn expression =
+                    indexedColumn expression
+                    |> Option.bind (function
+                        | { Type = TTimestamp _; Name = name } when equalsIgnoreCase name columnName -> Some name
+                        | _ -> None)
+                let boundExpression expression =
+                    match expression with
+                    | LiteralValue(VDate _ | VDateTime _) -> Some false
+                    | Col _ | QualifiedCol _ when (indexedColumn expression).IsNone ->
+                        match temporalColumn expression with
+                        | Some(VDate _ | VDateTime _) -> Some true
+                        | _ -> None
+                    | _ -> None
+                predicate
+                |> conjuncts
+                |> List.exists (fun expression ->
+                    rangePredicatesFor timestampColumn boundExpression expression
+                    |> List.exists (fun range -> Option.exists fst range.Lower || Option.exists fst range.Upper))
+
             let temporalKeyValue columnType value =
                 let timestamp wall =
                     // A ref lookup maps the wall time back to one UTC key,
@@ -21643,22 +21667,23 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
                 let safeOrder (term: IndexOrderTerm) =
                     term.Transform.IsNone
                     && (innerColumn term.Column |> Option.exists (fun column ->
-                        match column.Type with
-                        // A UTC index can run backward in wall time at a fold.
-                        | TTimestamp _ -> false
-                        | ty -> isTextColumn (Some column) || isExactNumericIndexType ty || (temporalOrderProbeValue ty).IsSome))
+                        isTextColumn (Some column) || isExactNumericIndexType column.Type || (temporalOrderProbeValue column.Type).IsSome))
 
-                if correlatedPins.IsEmpty then None
+                let qualifiers = singleQualifier qualifier columns
+                let orderProjections = expandOrderProjections columns qualifiers select.Projections
+                let orderIsValid = validateOrderAliases (columnIndexOf columns) qualifiers orderProjections select.OrderBy |> Result.isOk
+                if not orderIsValid then None
                 else
-                    let qualifiers = singleQualifier qualifier columns
-                    let orderProjections = expandOrderProjections columns qualifiers select.Projections
-                    let orderIsValid = validateOrderAliases (columnIndexOf columns) qualifiers orderProjections select.OrderBy |> Result.isOk
-                    if not orderIsValid then None
-                    else
-                        let terms =
-                            indexOrderTerms registry tref select
-                            |> Option.filter (fun terms -> not terms.IsEmpty && List.forall safeOrder terms)
-                        Some(source, context, predicate, terms, List.map fst pins, correlatedPins))
+                    let terms =
+                        indexOrderTerms registry tref select
+                        |> Option.filter (fun terms -> not terms.IsEmpty && List.forall safeOrder terms)
+                    let correlatedSuffix =
+                        correlatedPins.IsEmpty
+                        && (terms |> Option.exists (function
+                            | first :: _ -> hasCorrelatedTimestampRange first.Column
+                            | [] -> false))
+                    if correlatedPins.IsEmpty && not correlatedSuffix then None
+                    else Some(source, context, predicate, terms, List.map fst pins, correlatedPins))
 
 and private planCorrelatedTopOrder store registry dbName fromItem (select: SelectStmt) outer readOuter bindPredicate =
     let scopedSource =
@@ -21717,7 +21742,7 @@ and private planCorrelatedTopOrder store registry dbName fromItem (select: Selec
                         terms
                         |> Option.bind (List.map (fun term -> column term.Column |> Option.map (fun name -> { term with Column = name })) >> tryAllSome)
 
-                    if physicalReferences.IsEmpty then None
+                    if physicalReferences.IsEmpty && (not references.IsEmpty || physicalTerms.IsNone) then None
                     else Some(plan physicalRef (combineConjuncts physicalConjuncts) physicalTerms physicalPins physicalReferences)))
 
 and private correlatedOrderAccesses store dbName (plan: CorrelatedTopOrderPlan) =
@@ -21762,7 +21787,7 @@ and private tryCorrelatedTopOrder store registry dbName fromItem select outer =
         plan |> Option.bind (fun plan ->
             correlatedOrderAccesses store dbName plan
             |> Seq.tryPick (fun (scope, terms, correlatedPins) ->
-                tryFixedPrefixIndexOrder scope store registry dbName plan.TableRef plan.Predicate terms correlatedPins plan.Pins
+                tryFixedPrefixIndexOrder true scope store registry dbName plan.TableRef plan.Predicate terms correlatedPins plan.Pins
                 |> Option.map (fun lookup -> lookup, not terms.IsEmpty))
             |> Option.map (fun (lookup, ordered) ->
                 // A NULL comparison cannot pass a top-level AND. Keep the
@@ -23073,6 +23098,7 @@ and private tryDirectSuffixTerm (matched: IndexPrefixMatch) =
     |> Option.filter (fun term -> term.Transform.IsNone)
 
 and private fixedPrefixSuffixBounds
+    (timestampRange: bool)
     (store: Store)
     (registry: Registry)
     (table: Table)
@@ -23085,7 +23111,23 @@ and private fixedPrefixSuffixBounds
     |> Option.bind (fun term ->
         rangeLookupBounds BareOrQualifiedColumn store registry table tref whereExpr
         |> List.tryFind (fun bounds -> equalsIgnoreCase bounds.Column term.Column))
-    |> Option.map (fun bounds -> bounds.Lower, bounds.Upper)
+    |> Option.map (fun bounds ->
+        let timestamp =
+            timestampRange
+            && (table.Columns |> List.exists (fun column ->
+                equalsIgnoreCase column.Name bounds.Column && (match column.Type with TTimestamp _ -> true | _ -> false)))
+        if not timestamp then bounds.Lower, bounds.Upper
+        else
+            let utcBound lower (value, inclusive) =
+                let fromWall wall =
+                    tryUtcTimestampRangeBound store.ExecutionSettings.TimeZone lower wall
+                    |> Option.map (fun utc -> VTimestamp utc, inclusive)
+                match value with
+                | VDateTime wall -> fromWall wall
+                | VDate day -> fromWall (day.ToDateTime(System.TimeOnly.MinValue))
+                | VTimestamp _ -> Some(value, inclusive)
+                | _ -> None
+            bounds.Lower |> Option.bind (utcBound true), bounds.Upper |> Option.bind (utcBound false))
     |> Option.defaultValue (None, None)
 
 and private trySuffixRangeCoverageCount
@@ -23181,6 +23223,7 @@ and private fixedPrefixOrderDirections (orderedTerms: IndexOrderTerm list) corre
         else None
 
 and private tryFixedPrefixIndexOrder
+    timestampRange
     (scope: TableIndexHintScope)
     (store: Store)
     (registry: Registry)
@@ -23202,7 +23245,7 @@ and private tryFixedPrefixIndexOrder
                 List.map2 (fun (term: IndexOrderTerm) direction -> { term with Direction = direction }) matched.Terms directions
                 |> storageOrderTerms
 
-            let lower, upper = fixedPrefixSuffixBounds store registry resolved.Table tref whereExpr matched
+            let lower, upper = fixedPrefixSuffixBounds timestampRange store registry resolved.Table tref whereExpr matched
             let tieOffsets =
                 if correlatedPins.IsEmpty then []
                 else
@@ -23233,7 +23276,7 @@ and private tryGroupingIndexOrder
     |> List.filter (fun resolved -> indexOrderPreservesSqlTies resolved.Table.Columns groupTerms)
     |> List.tryPick (fun resolved ->
         let terms = resolved.Match.Terms |> storageOrderTerms
-        let lower, upper = fixedPrefixSuffixBounds store registry resolved.Table tref whereExpr resolved.Match
+        let lower, upper = fixedPrefixSuffixBounds false store registry resolved.Table tref whereExpr resolved.Match
 
         let rangeLookup =
             match resolved.PinnedValues with

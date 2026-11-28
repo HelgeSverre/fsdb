@@ -125,6 +125,34 @@ let sqlTimeZoneFromUtc zone (value: DateTime) =
         TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(value, DateTimeKind.Utc), TimeZoneInfo.Local)
         |> fun local -> DateTime.SpecifyKind(local, DateTimeKind.Unspecified)
 
+let private systemOffsetExtremes =
+    lazy
+        let zone = TimeZoneInfo.Local
+        let baseline = zone.BaseUtcOffset
+        zone.GetAdjustmentRules()
+        |> Array.fold (fun (earliest, latest) rule ->
+            let standard = baseline + rule.BaseUtcOffsetDelta
+            let daylight = standard + rule.DaylightDelta
+            min earliest (min standard daylight), max latest (max standard daylight)) (baseline, baseline)
+
+/// A conservative UTC bound for a local-time predicate. The original
+/// predicate must still filter rows because a fold can split its UTC range.
+let internal tryUtcTimestampRangeBound zone lower (wall: DateTime) =
+    let offset =
+        match zone with
+        | FixedOffset minutes -> TimeSpan.FromMinutes(float minutes)
+        | NamedTimeZone rules ->
+            let seconds = if lower then Array.max rules.Offsets else Array.min rules.Offsets
+            TimeSpan.FromSeconds(float seconds)
+        | SystemTimeZone ->
+            let earliest, latest = systemOffsetExtremes.Value
+            if lower then latest else earliest
+    let ticks = wall.Ticks - offset.Ticks
+    if ticks >= DateTime.MinValue.Ticks && ticks <= DateTime.MaxValue.Ticks then
+        Some(DateTime(ticks, DateTimeKind.Utc))
+    else
+        None
+
 let internal mysqlTimestampMinimumUtc = DateTime(1970, 1, 1, 0, 0, 1, DateTimeKind.Utc)
 
 let internal mysqlTimestampMaximumUtc =

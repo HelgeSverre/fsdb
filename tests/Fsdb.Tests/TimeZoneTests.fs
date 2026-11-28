@@ -122,6 +122,32 @@ let tests =
                    + "(SELECT id FROM materialized_events e WHERE e.instant=p.wall ORDER BY e.instant,id LIMIT 1) FROM picks p")
                   [ "2"; "1" ]
 
+          testCase "correlated TIMESTAMP ranges seek ordered keys across a repeated local hour"
+          <| fun _ ->
+              let session =
+                  [ "SET time_zone='+00:00'"
+                    "CREATE TABLE events (id INT PRIMARY KEY, tenant INT NOT NULL, instant TIMESTAMP(2) NOT NULL, KEY by_slot(tenant,instant,id))"
+                    "INSERT INTO events VALUES (1,1,'2024-11-03 05:15:00'),(2,1,'2024-11-03 05:45:00'),(3,1,'2024-11-03 06:15:00'),(4,1,'2024-11-03 06:45:00'),(5,1,'2024-11-03 07:15:00'),(6,2,'2024-11-03 06:45:00')"
+                    "INSERT INTO events SELECT 100+id,1,'2024-11-03 04:30:00' FROM (WITH RECURSIVE seq(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM seq WHERE id<80) SELECT id FROM seq) d"
+                    "CREATE TABLE picks (id INT PRIMARY KEY, start_at DATETIME(2), end_at DATETIME(2))"
+                    "INSERT INTO picks VALUES(1,'2024-11-03 01:30:00','2024-11-03 02:00:00'),(2,'2024-11-03 01:00:00','2024-11-03 01:30:00'),(3,NULL,'2024-11-03 02:00:00')"
+                    "SET time_zone='Fsdb/Test_Eastern'" ]
+                  |> List.fold execute (populatedSession ())
+
+              let query source =
+                  "SELECT p.id,(SELECT e.id FROM " + source
+                  + " WHERE e.tenant=1 AND e.instant>=p.start_at AND e.instant<p.end_at"
+                  + " ORDER BY e.instant,e.id LIMIT 1 OFFSET 1) AS chosen FROM picks p ORDER BY p.id"
+
+              let indexed = query "events e FORCE INDEX(by_slot)"
+              let scanned = query "events e IGNORE INDEX(by_slot)"
+              let actual, examined = withExaminedRows (fun () -> handle session indexed |> snd)
+              let expected =
+                  ResultSet([ "id"; "chosen" ], [ [ Some "1"; Some "4" ]; [ Some "2"; Some "3" ]; [ Some "3"; None ] ])
+              Expect.equal actual expected indexed
+              Expect.equal (handle session scanned |> snd) expected scanned
+              Expect.isLessThan examined 20L "the index skips the out-of-range rows in the same tenant"
+
           testCase "named zones use catalog transitions including daylight saving gaps and folds" <| fun _ ->
               let session = populatedSession ()
               expectRow session

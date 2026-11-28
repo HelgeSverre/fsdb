@@ -35,7 +35,25 @@ references, merged derived tables, and merged views. An explicit DATETIME
 cast or a materialized projection sorts by the local value.
 
 Fsdb now carries the stored instant through merged projections and uses
-it for direct sort keys. The projected value still
-displays in the session time zone. All 720 comparisons now match the pinned
-oracle in memory and WAL mode. Broader correlated TIMESTAMP range seeks
-remain open.
+it for direct sort keys. The projected value still displays in the session
+time zone. All 720 comparisons match the pinned oracle in memory and WAL
+mode.
+
+## Seeking correlated TIMESTAMP ranges
+
+An ordered lookup on a composite index can now seek a TIMESTAMP suffix
+after a constant or correlated equality prefix. Fixed offsets produce
+exact UTC endpoints. Named and system time zones use a covering UTC
+interval based on their offset extremes. The executor still applies the
+session-local predicate before OFFSET and LIMIT, so it retains both
+qualifying occurrences in a repeated hour and filters out the intervening
+UTC instants that fall outside the local range.
+
+The digest-pinned MySQL 8.4.11 replay matched all 2,016 queries in memory
+and WAL mode. It covered direct and projected sources, ascending and
+descending traversal, open and closed bounds, fractional precision, NULL
+bounds, both DST transitions, and index hints. A seeded half-hour transition
+fixture matched all 4,000 outer-row choices. The regression fixture drops
+from 343 examined rows to fewer than 20. Range searches without an equality
+prefix and tighter disjoint UTC slices through a clock transition remain
+open.
