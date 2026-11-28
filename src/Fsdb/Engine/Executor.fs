@@ -16487,7 +16487,7 @@ and private tryOrderedSecondaryLockingRead store registry dbName (select: Select
                     |> List.filter _.PredicateCovered
                     |> List.tryPick (fun resolved ->
                         let matched = resolved.Match
-                        let lower, upper = fixedPrefixSuffixBounds false store registry resolved.Table tref predicate matched
+                        let lower, upper = fixedPrefixSuffixBounds store registry resolved.Table tref predicate matched
                         let isRange = lower.IsSome || upper.IsSome
                         let orderedTerms =
                             secondaryLockOrder resolved.Table pinned terms matched.Terms
@@ -23634,7 +23634,6 @@ and private tryDirectSuffixTerm (matched: IndexPrefixMatch) =
     |> Option.filter (fun term -> term.Transform.IsNone)
 
 and private fixedPrefixSuffixBounds
-    (timestampRange: bool)
     (store: Store)
     (registry: Registry)
     (table: Table)
@@ -23647,24 +23646,14 @@ and private fixedPrefixSuffixBounds
     |> Option.bind (fun term ->
         rangeLookupBounds BareOrQualifiedColumn store registry table tref whereExpr
         |> List.tryFind (fun bounds -> equalsIgnoreCase bounds.Column term.Column))
-    |> Option.map (fun bounds ->
-        let timestamp =
-            timestampRange
-            && (table.Columns |> List.exists (fun column ->
-                equalsIgnoreCase column.Name bounds.Column && (match column.Type with TTimestamp _ -> true | _ -> false)))
-        if not timestamp then bounds.Lower, bounds.Upper
-        else
-            let utcBound lower (value, inclusive) =
-                let fromWall wall =
-                    tryUtcTimestampRangeBound store.ExecutionSettings.TimeZone lower wall
-                    |> Option.map (fun utc -> VTimestamp utc, inclusive)
-                match value with
-                | VDateTime wall -> fromWall wall
-                | VDate day -> fromWall (day.ToDateTime(System.TimeOnly.MinValue))
-                | VTimestamp _ -> Some(value, inclusive)
-                | _ -> None
-            bounds.Lower |> Option.bind (utcBound true), bounds.Upper |> Option.bind (utcBound false))
+    |> Option.map (fun bounds -> bounds.Lower, bounds.Upper)
     |> Option.defaultValue (None, None)
+
+and private timestampWallBound (value, inclusive) =
+    match value with
+    | VDateTime wall -> Some(wall, inclusive)
+    | VDate day -> Some(day.ToDateTime(System.TimeOnly.MinValue), inclusive)
+    | _ -> None
 
 and private trySuffixRangeCoverageCount
     allowLeadingRange
@@ -23800,7 +23789,14 @@ and private tryIndexPrefixOrder
                 List.map2 (fun (term: IndexOrderTerm) direction -> { term with Direction = direction }) matched.Terms directions
                 |> storageOrderTerms
 
-            let lower, upper = fixedPrefixSuffixBounds (bounds <> StoredBounds) store registry resolved.Table tref whereExpr matched
+            let lower, upper = fixedPrefixSuffixBounds store registry resolved.Table tref whereExpr matched
+            let timestamp =
+                bounds <> StoredBounds && (lower.IsSome || upper.IsSome)
+                && (tryDirectSuffixTerm matched
+                    |> Option.exists (fun term ->
+                        resolved.Table.Columns |> List.exists (fun column ->
+                            equalsIgnoreCase column.Name term.Column
+                            && (match column.Type with TTimestamp _ -> true | _ -> false))))
             let tieOffsets =
                 if bounds = StoredBounds then []
                 else
@@ -23810,15 +23806,66 @@ and private tryIndexPrefixOrder
                     |> List.choose (fun (offset, term) ->
                         if indexTermPreservesSqlTies resolved.Table.Columns term then None else Some offset)
 
-            if not tieOffsets.IsEmpty
-               || (not prefixPins.IsEmpty && (resolved.PinnedValues |> List.exists (function VString _ -> true | _ -> false))) then
-                Storage.tryMergedEqualityPrefixOrderWith allowed store resolved.Table terms resolved.PinnedValues lower upper tieOffsets
-            elif matched.PinnedCount = 0 then
-                Storage.tryOrderedIndexRangeInTableWith allowed store resolved.Table terms lower upper
-            else
-                Storage.tryOrderedIndexPrefixRangeLookupWith allowed store resolved.Database tref.Table terms resolved.PinnedValues lower upper
+            let merge =
+                not tieOffsets.IsEmpty
+                || (not prefixPins.IsEmpty && (resolved.PinnedValues |> List.exists (function VString _ -> true | _ -> false)))
+            let seek allowed lower upper =
+                if merge then
+                    Storage.tryMergedEqualityPrefixOrderWith allowed store resolved.Table terms resolved.PinnedValues lower upper tieOffsets
+                elif matched.PinnedCount = 0 then
+                    Storage.tryOrderedIndexRangeInTableWith allowed store resolved.Table terms lower upper
+                else
+                    Storage.tryOrderedIndexPrefixRangeLookupWith allowed store resolved.Database tref.Table terms resolved.PinnedValues lower upper
+
+            let zone = store.ExecutionSettings.TimeZone
+            let coveringLookup () =
+                let convert isLower (value, inclusive) =
+                    match value with
+                    | VTimestamp _ -> Some(value, inclusive)
+                    | _ ->
+                        timestampWallBound (value, inclusive)
+                        |> Option.bind (fun (wall, inclusive) ->
+                            tryUtcTimestampRangeBound zone isLower wall
+                            |> Option.map (fun utc -> VTimestamp utc, inclusive))
+                let lower, upper =
+                    if timestamp then lower |> Option.bind (convert true), upper |> Option.bind (convert false)
+                    else lower, upper
+                seek allowed lower upper
                 |> Option.orElseWith (fun () ->
-                    Storage.tryOrderedIndexPrefixLookupWith allowed store resolved.Database tref.Table terms resolved.PinnedValues)))
+                    if merge || matched.PinnedCount = 0 then None
+                    else Storage.tryOrderedIndexPrefixLookupWith allowed store resolved.Database tref.Table terms resolved.PinnedValues)
+
+            let slices =
+                let wall = function
+                    | None -> Some None
+                    | Some bound -> timestampWallBound bound |> Option.map Some
+                if timestamp then
+                    Option.map2 (fun lower upper -> lower, upper) (wall lower) (wall upper)
+                    |> Option.bind (fun (lower, upper) -> tryNamedTimestampRangeSlices zone lower upper)
+                else None
+
+            match slices with
+            | None -> coveringLookup ()
+            | Some [] ->
+                coveringLookup () |> Option.map (fun lookup ->
+                    { lookup with OrderedRows = Seq.empty; OrderedGroups = Seq.empty; OrderedRowCount = 0 })
+            | Some ranges ->
+                let ranges = if directions.[matched.PinnedCount] = Desc then List.rev ranges else ranges
+                let exactIndex name = allowed name && equalsIgnoreCase resolved.Name name
+                ranges
+                |> List.map (fun (start, finish) ->
+                    let lower = start |> Option.map (fun utc -> VTimestamp utc, true)
+                    seek exactIndex lower (Some(VTimestamp finish, false)))
+                |> tryAllSome
+                |> Option.bind (function
+                    | [ lookup ] -> Some lookup
+                    | first :: _ as pieces ->
+                        Some { first with
+                                OrderedRows = pieces |> Seq.collect _.OrderedRows
+                                OrderedGroups = pieces |> Seq.collect _.OrderedGroups
+                                OrderedRowCount = pieces |> List.sumBy _.OrderedRowCount }
+                    | [] -> None)
+                |> Option.orElseWith coveringLookup))
 
 and private tryGroupingIndexOrder
     (store: Store)
@@ -23833,7 +23880,7 @@ and private tryGroupingIndexOrder
     |> List.filter (fun resolved -> indexOrderPreservesSqlTies resolved.Table.Columns groupTerms)
     |> List.tryPick (fun resolved ->
         let terms = resolved.Match.Terms |> storageOrderTerms
-        let lower, upper = fixedPrefixSuffixBounds false store registry resolved.Table tref whereExpr resolved.Match
+        let lower, upper = fixedPrefixSuffixBounds store registry resolved.Table tref whereExpr resolved.Match
 
         let rangeLookup =
             match resolved.PinnedValues with

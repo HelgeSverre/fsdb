@@ -175,6 +175,40 @@ let tests =
                   |> fun sql -> sql.Replace("e.tenant=1 AND ", "").Replace("e.instant", "e.stamp")
               Expect.equal (handle session projected |> snd) expected projected
 
+          testCase "correlated TIMESTAMP ranges skip the UTC gap between repeated wall-time slices"
+          <| fun _ ->
+              let session =
+                  [ "SET time_zone='+00:00'"
+                    "CREATE TABLE events (id INT PRIMARY KEY, tenant VARCHAR(16) COLLATE utf8mb4_0900_ai_ci, instant TIMESTAMP(2), enabled INT, KEY by_time(instant,id), KEY by_slot(tenant,instant,id))"
+                    "INSERT INTO events VALUES (11,'Résumé','2024-11-03 05:30:00.01',0),(13,'Résumé','2024-11-03 05:30:00.02',1),(21,'resume','2024-11-03 06:30:00.01',0),(23,'resume','2024-11-03 06:30:00.02',1)"
+                    "INSERT INTO events SELECT 100+id,'RESUME','2024-11-03 05:45:00',1 FROM (WITH RECURSIVE seq(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM seq WHERE id<120) SELECT id FROM seq) d"
+                    "CREATE TABLE picks (id INT PRIMARY KEY, tenant VARCHAR(16) COLLATE utf8mb4_0900_ai_ci, lo DATETIME(6), hi DATETIME(6))"
+                    "INSERT INTO picks VALUES (1,'rEsUmE','2024-11-03 01:30:00.000001','2024-11-03 01:30:00.03'),(2,'rEsUmE','2024-03-10 02:30:00','2024-03-10 02:31:00')"
+                    "SET time_zone='Fsdb/Test_Eastern'" ]
+                  |> List.fold execute (populatedSession ())
+
+              for index, prefix in [ "by_time", ""; "by_slot", " AND e.tenant=p.tenant" ] do
+                  for order, chosen in [ "e.instant,e.id", "23"; "e.instant DESC,e.id DESC", "13" ] do
+                      let sql =
+                          $"SELECT p.id,(SELECT e.id FROM events e FORCE INDEX({index})"
+                          + $" WHERE e.instant>=p.lo AND e.instant<p.hi AND e.enabled=1{prefix}"
+                          + $" ORDER BY {order} LIMIT 1 OFFSET 1) AS chosen FROM picks p ORDER BY p.id"
+                      let actual, examined = withExaminedRows (fun () -> handle session sql |> snd)
+                      let expected =
+                          ResultSet([ "id"; "chosen" ], [ [ Some "1"; Some chosen ]; [ Some "2"; None ] ])
+                      Expect.equal actual expected sql
+                      Expect.isLessThan examined 25L "unused UTC instants between the two slices are skipped"
+
+              let session =
+                  [ "SET sql_mode=''"
+                    "INSERT INTO events VALUES (1,'resume','0000-00-00 00:00:00',1)"
+                    "INSERT INTO picks VALUES (3,'rEsUmE',NULL,'1960-01-01 00:00:00')" ]
+                  |> List.fold execute session
+              expectRow session
+                  ("SELECT p.id,(SELECT e.id FROM events e FORCE INDEX(by_time)"
+                   + " WHERE e.instant<=p.hi ORDER BY e.instant,e.id LIMIT 1) AS chosen FROM picks p WHERE p.id=3")
+                  [ "3"; "1" ]
+
           testCase "correlated TIMESTAMP ranges order collation ties by the next key"
           <| fun _ ->
               let session =

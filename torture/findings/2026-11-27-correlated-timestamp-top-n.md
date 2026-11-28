@@ -43,11 +43,10 @@ mode.
 
 An ordered lookup on a composite index can now seek a TIMESTAMP suffix
 after a constant or correlated equality prefix. Fixed offsets produce
-exact UTC endpoints. Named and system time zones use a covering UTC
-interval based on their offset extremes. The executor still applies the
-session-local predicate before OFFSET and LIMIT, so it retains both
-qualifying occurrences in a repeated hour and filters out the intervening
-UTC instants that fall outside the local range.
+exact UTC endpoints. Named-zone wall-time bounds can produce disjoint
+UTC slices. System time zones still use a covering interval based on
+their offset extremes. The executor applies the session-local predicate
+before OFFSET and LIMIT.
 
 The digest-pinned MySQL 8.4.11 replay matched all 2,016 queries in memory
 and WAL mode. It covered direct and projected sources, ascending and
@@ -68,8 +67,30 @@ the stored UTC values for ordering.
 An expanded replay matched 3,024 queries against the pinned oracle in
 memory and WAL mode. On the forced leading-index query, the analyzed plans
 reported 4 rows per invocation in Fsdb and 89 in MySQL 8.4.11. Fsdb's
-regression drops from 173 examined rows to fewer than 20. Tighter disjoint
-UTC slices through a clock transition remain open.
+regression drops from 173 examined rows to fewer than 20.
+
+### Disjoint named-zone ranges
+
+Fsdb intersects each constant-offset UTC period with the inverse
+of the wall-time range. It seeks the resulting slices in index order,
+including reverse scans, before applying residual predicates, OFFSET,
+and LIMIT. A spring-forward gap can produce an empty lookup. Upper-only
+bounds also retain the zero TIMESTAMP key when it can qualify.
+
+A pinned MySQL 8.4.11 comparison used two hours of per-second events
+around the fall-back transition. The three narrow, two-sided probes
+returned the same rows as MySQL. Fsdb's ordered lookup fell from
+2,404 to 7 examined rows per loop. Separate lower-only and upper-only
+queries with an offset of 300 each fell from 3,601 to 601 rows examined.
+Another 80 query variants matched across fractional bounds, spring
+gaps, equivalent spellings in a correlated equality prefix, merged
+projections, and scan controls. The ten boundary cases also matched
+after reopening the WAL-backed database.
+
+A same-host control with 1,500 one-sided lookups that already found
+the first row immediately took about 138 ms before and 150–152 ms
+after, using the median of four warmed runs in each of two passes.
+That case pays for calculating the UTC slices with no rows to skip.
 
 ### CTE reference materialization
 

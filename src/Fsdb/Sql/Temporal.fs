@@ -32,7 +32,7 @@ let namedTimeZone name initialOffset transitions =
       Transitions = transitions
       Offsets = Array.append [| initialOffset |] (Array.map snd transitions) |> Array.distinct }
 
-let private offsetAt zone seconds =
+let private nextTransitionIndex zone seconds =
     let mutable lower = 0
     let mutable upper = zone.Transitions.Length
 
@@ -41,7 +41,13 @@ let private offsetAt zone seconds =
         if fst zone.Transitions.[middle] <= seconds then lower <- middle + 1
         else upper <- middle
 
-    if lower = 0 then zone.InitialOffset else snd zone.Transitions.[lower - 1]
+    lower
+
+let private offsetBeforeTransition zone index =
+    if index = 0 then zone.InitialOffset else snd zone.Transitions.[index - 1]
+
+let private offsetAt zone seconds =
+    offsetBeforeTransition zone (nextTransitionIndex zone seconds)
 
 let private namedZoneToUtc zone (value: DateTime) =
     let seconds = value.Ticks / TimeSpan.TicksPerSecond - DateTime.UnixEpoch.Ticks / TimeSpan.TicksPerSecond
@@ -157,6 +163,50 @@ let internal mysqlTimestampMinimumUtc = DateTime(1970, 1, 1, 0, 0, 1, DateTimeKi
 
 let internal mysqlTimestampMaximumUtc =
     DateTime(2038, 1, 19, 3, 14, 7, DateTimeKind.Utc).AddTicks(TimeSpan.TicksPerSecond - 10L)
+
+/// Disjoint UTC slices for named-zone wall bounds. Starts are inclusive and ends exclusive.
+let internal tryNamedTimestampRangeSlices zone lower upper =
+    match zone with
+    | NamedTimeZone rules ->
+        let minUtc = mysqlTimestampMinimumUtc.Ticks
+        let maxUtc = mysqlTimestampMaximumUtc.Ticks + 1L
+        let lowerTicks = lower |> Option.map (fun (wall: DateTime, inclusive) -> wall.Ticks + (if inclusive then 0L else 1L))
+        let upperTicks = upper |> Option.map (fun (wall: DateTime, inclusive) -> wall.Ticks + (if inclusive then 1L else 0L))
+        let offsetTicks seconds = int64 seconds * TimeSpan.TicksPerSecond
+        let toUtc ticks = DateTime(ticks, DateTimeKind.Utc)
+        let start = lowerTicks |> Option.map (fun ticks -> max minUtc (ticks - offsetTicks (Array.max rules.Offsets))) |> Option.defaultValue minUtc
+        let finish = upperTicks |> Option.map (fun ticks -> min maxUtc (ticks - offsetTicks (Array.min rules.Offsets))) |> Option.defaultValue maxUtc
+        let slices =
+            if start >= finish then []
+            else
+                let epoch = DateTime.UnixEpoch.Ticks
+                let transitionIndex ticks = nextTransitionIndex rules ((ticks - epoch) / TimeSpan.TicksPerSecond)
+                let first = transitionIndex start
+                let cuts =
+                    [ yield start, offsetBeforeTransition rules first
+                      for index in first .. transitionIndex finish - 1 do
+                          let seconds, offset = rules.Transitions.[index]
+                          let ticks = epoch + seconds * TimeSpan.TicksPerSecond
+                          if ticks < finish then yield ticks, offset
+                      yield finish, 0 ]
+                let append slices ((periodStart, offset), (periodEnd, _)) =
+                    let shift = offsetTicks offset
+                    let start = lowerTicks |> Option.map (fun ticks -> max periodStart (ticks - shift)) |> Option.defaultValue periodStart
+                    let finish = upperTicks |> Option.map (fun ticks -> min periodEnd (ticks - shift)) |> Option.defaultValue periodEnd
+                    if start >= finish then slices
+                    else
+                        match slices with
+                        | (priorStart, priorEnd) :: rest when priorEnd = start -> (priorStart, finish) :: rest
+                        | _ -> (start, finish) :: slices
+                cuts |> List.pairwise |> List.fold append [] |> List.rev
+        let bounded = slices |> List.map (fun (start, finish) -> Some(toUtc start), toUtc finish)
+        // A zero TIMESTAMP sorts before the valid UTC domain. An upper-only
+        // predicate can still match it even when no real instants qualify.
+        match lower, bounded with
+        | None, (Some start, finish) :: rest when start = mysqlTimestampMinimumUtc -> Some((None, finish) :: rest)
+        | None, _ -> Some((None, mysqlTimestampMinimumUtc) :: bounded)
+        | _ -> Some bounded
+    | _ -> None
 
 let internal isMySqlTimestampInstant (value: DateTime) =
     value >= mysqlTimestampMinimumUtc && value <= mysqlTimestampMaximumUtc
