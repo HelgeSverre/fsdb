@@ -2312,6 +2312,44 @@ let tests =
                             | Fsdb.Functions.SqlError(actual, _) -> Expect.equal actual code "area diagnostic"
                             | error -> failtestf "expected SQL error %d, got %A" code error)
 
+                testCase "ST_Centroid weighs the highest dimension of Cartesian geometry"
+                <| fun _ ->
+                    let centroid srid text =
+                        call "ST_Centroid" [ call "ST_GeomFromText" [ VString text; VInt srid ] ]
+
+                    for text, (x, y) in
+                        [ "POINT(2 4)", (2.0, 4.0)
+                          "MULTIPOINT((2 4),(4 8),(4 8))", (10.0 / 3.0, 20.0 / 3.0)
+                          "LINESTRING(0 0,2 0,2 6)", (1.75, 2.25)
+                          "LINESTRING(3 7,3 7,3 7)", (3.0, 7.0)
+                          "MULTILINESTRING((0 0,2 0),(0 0,0 6))", (0.25, 2.25)
+                          "POLYGON((0 0,10 0,10 10,0 10,0 0),(5 5,7 5,7 7,5 7,5 5))", (119.0 / 24.0, 119.0 / 24.0)
+                          "MULTIPOLYGON(((0 0,2 0,2 2,0 2,0 0)),((4 0,8 0,8 4,4 4,4 0)))", (5.0, 1.8)
+                          "GEOMETRYCOLLECTION(POINT(90 90),GEOMETRYCOLLECTION(LINESTRING(0 0,4 0),MULTILINESTRING((0 0,0 2))))", (4.0 / 3.0, 1.0 / 3.0)
+                          "GEOMETRYCOLLECTION(POINT(90 90),GEOMETRYCOLLECTION())", (90.0, 90.0) ] do
+                        match centroid 3857L text with
+                        | VGeometry { Srid = 3857; Shape = GPoint(actualX, actualY) } ->
+                            Expect.isLessThan (abs (actualX - x)) 1e-12 text
+                            Expect.isLessThan (abs (actualY - y)) 1e-12 text
+                        | result -> failtestf "expected a projected point from %s, got %A" text result
+
+                    Expect.equal (centroid 0L "GEOMETRYCOLLECTION(GEOMETRYCOLLECTION())") VNull "an empty collection returns NULL"
+                    Expect.equal (call "ST_Centroid" [ VNull ]) VNull "NULL propagates"
+                    match centroid 0L "MULTIPOINT(-1e308 0,-1e308 0,1e308 0)" with
+                    | VGeometry point ->
+                        Expect.equal (Convert.ToHexString(geometryToMySqlBinary point))
+                            "000000000101000000000000000000F0FF0000000000000000" "point-sum overflow retains the MySQL binary value"
+                    | result -> failtestf "expected a point on overflow, got %A" result
+
+                    for srid, text, code in
+                        [ 0L, "POLYGON((1 1,2 2,3 3,1 1))", 3037
+                          0L, "GEOMETRYCOLLECTION(LINESTRING(0 0,5 5),POLYGON((1 1,2 2,3 3,1 1)))", 3037
+                          4326L, "POINT(2 4)", 3618
+                          4326L, "GEOMETRYCOLLECTION()", 3618 ] do
+                        Expect.throwsC (fun () -> centroid srid text |> ignore) (function
+                            | Fsdb.Functions.SqlError(actual, _) -> Expect.equal actual code text
+                            | error -> failtestf "expected SQL error %d, got %A" code error)
+
                 testCase "MySQL spatial geohash encodes and decodes coordinates and points"
                 <| fun _ ->
                     let encode x y length = call "ST_GeoHash" [ VDouble x; VDouble y; VInt length ]

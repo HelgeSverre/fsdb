@@ -12071,6 +12071,12 @@ and private describeQueryColumnDescriptorsInScope
 
                 let (|GeohashType|_|) functionName = Functions.tryGeohashResultType functionName registry
 
+                let (|DeclaredGeometry|_|) (functionName: string) =
+                    match functionName.ToUpperInvariant() with
+                    | "ST_MAKEENVELOPE" when Functions.isUnmodifiedBuiltinScalar functionName registry -> Some Polygon
+                    | "ST_CENTROID" when Functions.isUnmodifiedBuiltinScalar functionName registry -> Some Point
+                    | _ -> None
+
                 let columnForExpression name expression =
                     match expression, tryColumnDefForExpr context expression with
                     | _, Some column -> directProjection name column |> describeColumn
@@ -12084,9 +12090,8 @@ and private describeQueryColumnDescriptorsInScope
                             | _ -> None, None
                         let column = computedColumn name ty nullable (if nullable then None else defaultValue) collation
                         { describeColumn column with WireMetadata = metadata }
-                    | FuncCall(functionName, _), None when equalsIgnoreCase functionName "ST_MAKEENVELOPE"
-                                                          && Functions.isUnmodifiedBuiltinScalar functionName registry ->
-                        { describeColumn (computedColumn name (TGeometry Polygon) true None None) with
+                    | FuncCall(DeclaredGeometry kind, _), None ->
+                        { describeColumn (computedColumn name (TGeometry kind) true None None) with
                             WireMetadata = metadataOfExpr context expression }
                     | _, None ->
                         let concatColumn =

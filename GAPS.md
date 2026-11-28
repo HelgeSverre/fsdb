@@ -668,6 +668,11 @@ systems, including holes and polar rings. The audited result types and
 diagnostics match MySQL. Geographic rounding differences remain on
 some small polygons.
 
+[`ST_Centroid`](torture/findings/2026-11-28-spatial-centroid.md) returns a
+nullable point in the input's Cartesian or projected SRS. Collections
+use only their highest-dimensional members. The audited cases include
+polygon holes, degenerate linework, binary inputs, and prepared metadata.
+
 [Spatial geohash functions](torture/findings/2026-11-28-spatial-geohash.md)
 encode longitude and latitude or points and decode hashes into coordinates
 or a point with an explicit SRID. Prepared statements distinguish the two

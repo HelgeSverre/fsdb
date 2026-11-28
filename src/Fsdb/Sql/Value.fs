@@ -849,7 +849,7 @@ let private pointInMultiLine point lines =
     else
         Exterior
 
-let rec private atomicShapes = function
+let rec internal atomicShapes = function
     | GEmpty -> []
     | (GPoint _ | GLineString _ | GPolygon _) as shape -> [ shape ]
     | GMultiPoint points -> points |> List.map GPoint

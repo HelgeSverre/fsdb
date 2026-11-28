@@ -6861,6 +6861,32 @@ let private geometryAreaFn: Scalar =
             raise (SqlError(3516, $"POLYGON/MULTIPOLYGON value is a geometry of unexpected type {kind} in st_area."))
     | _ -> nativeParameterCountError "ST_Area"
 
+let private geometryCentroidFn: Scalar =
+    let invalid () = raise (SqlError(3037, "Invalid GIS data provided to function st_centroid."))
+
+    function
+    | [ VNull ] -> VNull
+    | [ value ] ->
+        let geometry =
+            match value with
+            | VGeometry _ -> legacyGeometryArgument "st_centroid" value
+            | _ ->
+                match stringBytes value |> tryGeometryFromMySqlBinaryWithByteOrder with
+                | Some struct (_, true) -> raise (SqlError(3055, "Geometry byte string must be little endian."))
+                | Some struct (geometry, false) -> geometry
+                | None -> invalid ()
+        requireWellFormedGisGeometry "st_centroid" geometry
+        let referenceSystem = spatialReferenceSystem "st_centroid" geometry.Srid
+        match centroid referenceSystem geometry.Shape with
+        | Ok(Some(x, y)) ->
+            VGeometry { Srid = geometry.Srid; Shape = GPoint(x, y) }
+        | Ok None -> VNull
+        | Error CentroidError.InvalidRing -> invalid ()
+        | Error CentroidError.Geographic ->
+            let kind = gisGeometryTypeName geometry.Shape
+            raise (SqlError(3618, $"st_centroid({kind}) has not been implemented for geographic spatial reference systems."))
+    | _ -> nativeParameterCountError "ST_Centroid"
+
 let private geometryLengthFn: Scalar =
     let convertUnit unit distance =
         distance / linearUnitMetres unit
@@ -7565,6 +7591,7 @@ let private registerSpatialBuiltins registry =
     |> registerScalarWithSignature "ST_SIMPLIFY" [ geometry; spatialDouble ] geometryResult geometrySimplifyFn
     |> registerScalar "ST_DISTANCE_SPHERE" geometryDistanceSphereFn
     |> registerScalarWithSignature "ST_AREA" [ geometry ] spatialDouble geometryAreaFn
+    |> registerScalarWithSignature "ST_CENTROID" [ geometryParameter ] pointResult geometryCentroidFn
     |> registerScalar "ST_LENGTH" geometryLengthFn
     |> registerScalar "ST_LINEINTERPOLATEPOINT" (geometryLineInterpolateFn "ST_LineInterpolatePoint" FractionPoint)
     |> registerScalar "ST_LINEINTERPOLATEPOINTS" (geometryLineInterpolateFn "ST_LineInterpolatePoints" FractionPoints)

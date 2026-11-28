@@ -3521,6 +3521,20 @@ let tests =
                   Expect.equal (result.Flags &&& NotNullFlag) 0us "area accepts NULL"
               | other -> failtestf "expected one parameter, got %A" other
 
+          testCase "ST_Centroid prepares a binary geometry argument and nullable point result"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              match prepareStatement "SELECT ST_Centroid(?) AS center" with
+              | Result.Ok(statement, 1) ->
+                  let parameters, columns = preparedMetadata session statement 1
+                  let argument = List.exactlyOne parameters
+                  let result = (List.exactlyOne columns).Metadata
+                  let descriptor metadata =
+                      metadata.TypeId, metadata.CollationId, metadata.ColumnLength, metadata.Flags, metadata.Decimals
+                  Expect.equal (descriptor argument) (TypeGeometry, Some 63us, 16777216u, BinaryFlag, 31uy) "geometry parameter"
+                  Expect.equal (descriptor result) (TypeGeometry, Some 63us, UInt32.MaxValue, BinaryFlag, 0uy) "point result"
+              | other -> failtestf "expected one parameter, got %A" other
+
           testCase "MySQL spatial geohash prepares both overloads and all decoders"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

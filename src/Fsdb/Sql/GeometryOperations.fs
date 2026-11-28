@@ -799,6 +799,102 @@ let internal polygonalArea referenceSystem shape =
     | GMultiPolygon polygons -> Some(List.sumBy polygonArea polygons)
     | _ -> None
 
+[<RequireQualifiedAccess>]
+type internal CentroidError = InvalidRing | Geographic
+
+// MySQL determines winding at the leftmost, then lowest vertex. A zero
+// turn there denotes a spike even when the rest of the ring has area.
+let private orientCentroidRing counterclockwise ring =
+    let vertices = List.toArray ring
+    let last = vertices.Length - 2
+    let corner =
+        seq { 0 .. last }
+        |> Seq.minBy (fun index ->
+            Limits.checkQueryCancellation index
+            vertices.[index])
+    let x, y = vertices.[corner]
+    let mutable before = if corner = 0 then last else corner - 1
+    let mutable after = corner + 1
+    while before > 0 && vertices.[before] = (x, y) do
+        before <- before - 1
+    while after <= last && vertices.[after] = (x, y) do
+        after <- after + 1
+    let u, v = vertices.[before]
+    let p, q = vertices.[after]
+    let turn = (x - u) * (q - y) - (p - x) * (y - v)
+    if turn = 0.0 then None
+    elif (turn > 0.0) = counterclockwise then Some ring
+    else Some(List.rev ring)
+
+let internal centroid referenceSystem shape =
+    let geographic = referenceSystem.SemiMajorAxis.IsSome
+
+    let firstVertex paths = paths |> List.head |> List.head
+
+    let weightedCenter moment weightScale (x, y) paths =
+        let translate (u, v) = u - x, v - y
+        let weight, sumX, sumY =
+            paths
+            |> Seq.collect Seq.pairwise
+            |> Seq.indexed
+            |> Seq.fold (fun (weight, sumX, sumY) (index, (first, second)) ->
+                Limits.checkQueryCancellation index
+                let (u, v) as first = translate first
+                let (p, q) as second = translate second
+                let contribution, factor = moment first second
+                weight + contribution, sumX + (u + p) * factor, sumY + (v + q) * factor) (0.0, 0.0, 0.0)
+        let divisor = weightScale * weight
+        if abs weight <= Math.BitIncrement(1.0) - 1.0 || not (Double.IsFinite divisor) then firstVertex paths
+        else x + sumX / divisor, y + sumY / divisor
+
+    let lineMoment (x, y) (u, v) =
+        let distance = planarPointDistance (x, y) (u, v)
+        distance, distance / 2.0
+
+    let areaMoment (x, y) (u, v) =
+        let areaTwice = x * v - u * y
+        areaTwice, areaTwice
+
+    let areaCenter polygons =
+        let oriented = polygons |> List.collect (List.mapi (fun index ring -> orientCentroidRing (index = 0) ring))
+        match tryAllSome oriented with
+        | None -> Error CentroidError.InvalidRing
+        | Some _ when geographic -> Error CentroidError.Geographic
+        | Some rings ->
+            // Translating the polygon avoids cancellation in the signed
+            // areas of small triangles far from the coordinate origin.
+            Ok(Some(weightedCenter areaMoment 3.0 (firstVertex rings) rings))
+
+    let rec compute = function
+        | GPolygon rings -> areaCenter [ rings ]
+        | GMultiPolygon polygons -> areaCenter polygons
+        | _ when geographic -> Error CentroidError.Geographic
+        | GEmpty -> Ok None
+        | GPoint(x, y) -> Ok(Some(x, y))
+        | GMultiPoint points ->
+            let sumX, sumY =
+                points
+                |> Seq.indexed
+                |> Seq.fold (fun (sumX, sumY) (index, (u, v)) ->
+                    Limits.checkQueryCancellation index
+                    sumX + u, sumY + v) (0.0, 0.0)
+            let count = float points.Length
+            Ok(Some(sumX / count, sumY / count))
+        | GLineString points -> Ok(Some(weightedCenter lineMoment 1.0 (0.0, 0.0) [ points ]))
+        | GMultiLineString lines -> Ok(Some(weightedCenter lineMoment 1.0 (0.0, 0.0) lines))
+        | GGeometryCollection members ->
+            let shapes = atomicShapes (GGeometryCollection members)
+            match shapes |> List.choose (function GPolygon rings -> Some rings | _ -> None) with
+            | _ :: _ as polygons -> compute (GMultiPolygon polygons)
+            | [] ->
+                match shapes |> List.choose (function GLineString points -> Some points | _ -> None) with
+                | _ :: _ as lines -> compute (GMultiLineString lines)
+                | [] ->
+                    match shapes |> List.choose (function GPoint(x, y) -> Some(x, y) | _ -> None) with
+                    | _ :: _ as points -> compute (GMultiPoint points)
+                    | [] -> Ok None
+    compute shape
+
 let internal normalizePolygonWinding referenceSystem geometry =
     let orient =
         if referenceSystem.SemiMajorAxis.IsSome then orientGeographicPolygonRings referenceSystem
