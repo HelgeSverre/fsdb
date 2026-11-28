@@ -1079,7 +1079,10 @@ sources read current rows under REPEATABLE READ and protect visited
 primary gaps. [Temporary-table overlays](torture/findings/2026-11-27-repeatable-read-after-write-refresh.md#temporary-table-source-overlays)
 preserve session-local sources and keep writes to permanent destinations
 inside the transaction for the audited INSERT and REPLACE SELECT forms.
-Broader access plans, joined mutations, and prepared or EXPLAIN paths still differ.
+[Joined updates and deletes](torture/findings/2026-11-27-repeatable-read-after-write-refresh.md#joined-updates-deletes-and-writable-views)
+also reject rebuilt layouts and forced probes through new keys in the audited
+plans, including writes through mergeable views. Broader access plans,
+joined write scheduling, and prepared or EXPLAIN paths still differ.
 [Point UPDATE and DELETE](torture/findings/2026-11-27-current-point-writes.md)
 can seek an exact unique key absent from the transaction's old write
 view. The audited writes wait for a pending key or its current row and

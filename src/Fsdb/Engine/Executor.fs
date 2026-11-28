@@ -33116,6 +33116,76 @@ let validatePreparedBindings store registry schema statement =
             | Some error -> Error error
             | None -> Ok()))
 
+let private mutationReadDefinitionError store registry dbName makeQuery =
+    let rec check seen store registry dbName query =
+        let locking = { Strength = UpdateLock; Tables = []; Wait = WaitForLocks }
+        let lockingQuery = { query with Locking = [ locking ] }
+        match snapshotLayoutReadError store registry dbName lockingQuery None with
+        | Some error -> Some error
+        | None ->
+            let impossible = impossibleReadCondition store registry dbName
+            if zeroLimitWithoutOffset query.Limit query.Offset || (query.Where |> Option.exists impossible) then None
+            else
+                let sources =
+                    Option.toList query.From
+                    @ (query.Joins |> List.choose (fun join ->
+                        if join.Kind = LeftJoin && impossible join.On then None else Some join.Table))
+                sources |> List.collect FromItem.leaves |> List.tryPick (function
+                    | FromTable source when source.Database.IsSome || not ((currentCteScope ()).ContainsKey(source.Table.ToLowerInvariant())) ->
+                        let schema = source.Database |> Option.defaultValue dbName
+                        let key = schema.ToLowerInvariant(), source.Table.ToLowerInvariant()
+                        if Set.contains key seen || seen.Count >= Limits.maxViewMetadataNesting then None
+                        else
+                            match tryStoredView store schema source.Table with
+                            | Some view ->
+                                match parseStoredViewStatement view with
+                                | Ok(Select definition as statement) ->
+                                    let permanent = storeForStoredView store
+                                    registryForView permanent registry view statement
+                                    |> Result.toOption
+                                    |> Option.bind (fun registry -> check (Set.add key seen) permanent registry schema definition)
+                                | _ -> None
+                            | None when not source.IndexHints.IsEmpty && not (isTemporaryTable store schema source.Table) ->
+                                tableSnapshot store schema source.Table
+                                |> Result.toOption
+                                |> Option.bind (fun table ->
+                                    let unavailable = Storage.lockingReadUnavailableIndexes store schema source.Table table
+                                    if unavailable.IsEmpty then None
+                                    else
+                                        tryPhysicalAccessInTableWith CandidateNarrowing store registry table source query.Where
+                                        |> Option.map (physicalAccessKeyNames >> List.filter (isForcedIndex IndexJoin source))
+                                        |> Option.bind (snapshotIndexReadError store registry dbName { table with UnavailableReadIndexes = unavailable } source lockingQuery None))
+                            | None -> None
+                    | _ -> None)
+
+    if Storage.hasConsistentReadView store then check Set.empty store registry dbName (makeQuery ()) else None
+
+let private rewrittenMutationReadError store registry dbName statement =
+    let check from joins where orderBy limit expressions =
+        mutationReadDefinitionError store registry dbName (fun () ->
+            { mutationSourceQuery (Some from) joins [] (expressions ()) with
+                Where = where
+                OrderBy = orderBy
+                Limit = limit })
+
+    match statement with
+    | Update update when update.Ctes.IsEmpty ->
+        check (FromTable update.From) update.Joins update.Where update.OrderBy update.Limit
+            (fun () -> update.Assignments |> List.map (fun assignment -> assignment.Value))
+    | Delete delete when delete.Ctes.IsEmpty ->
+        check delete.From delete.Joins delete.Where delete.OrderBy delete.Limit (fun () -> [])
+    | _ -> None
+
+let internal viewUpdateOpensUnavailableDefinition store registry dbName = function
+    | Update ({ Ctes = []; Joins = [] } as update) when Storage.hasConsistentReadView store ->
+        let database = update.From.Database |> Option.defaultValue dbName
+        withStatementViewMerge store dbName (Update update) (fun () ->
+            tryUpdatableView store database update.From.Table
+            |> Option.bind (fun view -> rewriteStandaloneViewUpdate view update |> Result.toOption)
+            |> Option.bind (fun (rewritten, _) -> rewrittenMutationReadError store registry dbName (Update rewritten))
+            |> Option.exists (function Err(1412, _) -> true | _ -> false))
+    | _ -> false
+
 let private validateViewBindings store registry schema functionDatabase statement =
     validateBindings store registry schema functionDatabase statement
 
@@ -36370,7 +36440,17 @@ let rec private executeAsWithViewSources
                               @ viewSources.Conditions
                           CallerSubqueries = callerSubqueries
                           InsertTarget = publishInsert |> Option.map (fun _ -> store) }
-                    let result = executeAsWithViewSources scope executionStore authorized dbName ids foundRows currentAccount statement
+                    let result =
+                        let definitionError =
+                            // A standalone view binds all sources through its saved definition.
+                            // In a joined statement the caller can also supply temporary sources.
+                            if executionStore.TableShadows.IsEmpty
+                               || (originalUpdate |> Option.exists (fun update -> update.Joins.IsEmpty)) then
+                                rewrittenMutationReadError store authorized dbName statement
+                            else None
+                        match definitionError with
+                        | Some error -> ids, error
+                        | None -> executeAsWithViewSources scope executionStore authorized dbName ids foundRows currentAccount statement
                     match snd result, publishInsert with
                     | Affected _, Some publish -> publish store
                     | _ -> ()
@@ -38665,8 +38745,15 @@ let rec private executeAsWithViewSources
                     | Some tableRef when col.Generated.IsSome -> Error(toMySqlError (GeneratedColumnAssignment(col.Name, tableRef.Table)))
                     | Some _ -> Ok(srcIdx, colIdx, v)
 
-                match updateStmt.Assignments |> traverse (resolveAssignment >> Result.bind guardAssignable) with
-                | Error(code, message) -> ids, Err(code, message)
+                let resolved =
+                    updateStmt.Assignments |> traverse (resolveAssignment >> Result.bind guardAssignable)
+                    |> Result.mapError (fun (code, message) -> Err(code, message))
+                    |> Result.bind (fun assignments ->
+                        match rewrittenMutationReadError snapshot registry dbName (Update updateStmt) with
+                        | Some error -> Error error
+                        | None -> Ok assignments)
+                match resolved with
+                | Error error -> ids, error
                 | Ok resolvedAssignments ->
                     let check =
                         match conditionStore, updateStmt.Where with
@@ -39023,15 +39110,20 @@ let rec private executeAsWithViewSources
                 contextFactory store registry dbName (columnIndexOf (combinedColumns |> List.collect snd)) qualifiers None
                 >> joinOutputScope qualifiers (Some deleteStmt.From) deleteStmt.Joins
 
-            match
+            let targets =
                 deleteStmt.Targets
                 |> traverse (fun t ->
                     match Map.tryFind (t.ToLowerInvariant()) sourceIndex with
                     | Some i when sources.[i].PhysicalTable.IsSome -> Ok i
                     | Some _ -> Error(nonUpdatableTarget "DELETE" t)
                     | None -> Error(1109, sprintf "Unknown table '%s' in MULTI DELETE" t))
-            with
-            | Error(code, message) -> ids, Err(code, message)
+                |> Result.mapError (fun (code, message) -> Err(code, message))
+                |> Result.bind (fun targets ->
+                    match rewrittenMutationReadError store registry dbName (Delete deleteStmt) with
+                    | Some error -> Error error
+                    | None -> Ok targets)
+            match targets with
+            | Error error -> ids, error
             | Ok targetIndices ->
                 let check = whereMatches ctxFor deleteStmt.Where
                 let targetIndices = List.distinct targetIndices

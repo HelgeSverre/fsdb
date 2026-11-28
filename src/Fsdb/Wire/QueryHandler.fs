@@ -2980,7 +2980,9 @@ let private prepareTransactionWrite (temporaryCatalog: Catalog option) (statemen
     let registry = registryFor session
     match session.Tx with
     | None -> session
-    | Some transaction when temporaryCatalog.IsNone && Executor.skipsViewWriteLocks transaction.Snapshot registry dbName statement -> session
+    | Some transaction when temporaryCatalog.IsNone
+                            && (Executor.skipsViewWriteLocks transaction.Snapshot registry dbName statement
+                                || Executor.viewUpdateOpensUnavailableDefinition transaction.Snapshot registry dbName statement) -> session
     | Some transaction ->
         let timeout = lockWaitTimeout session
         let claimReadPartners = temporaryCatalog.IsNone
@@ -3622,13 +3624,16 @@ let private tableDefinitionChanged before after database table =
         |> Result.toOption |> Option.map _.SchemaRevision
     revision before <> revision after
 
-let private bindCurrentMutationTarget (session: Session) (transaction: Transaction) database table =
-    if tableDefinitionChanged transaction.Snapshot session.Store database table then
+let private bindCurrentMutationTables (session: Session) (transaction: Transaction) tables =
+    if tables |> List.exists (fun (database, table) -> tableDefinitionChanged transaction.Snapshot session.Store database table) then
         let baseCatalog, snapshot = rebaseTransactionSnapshot session transaction
         { session with Tx = Some { transaction with BaseCatalog = baseCatalog; Snapshot = snapshot } }
     else session
 
-let private bindMutationReadView (session: Session) statement =
+let private bindCurrentMutationTarget session transaction database table =
+    bindCurrentMutationTables session transaction [ database, table ]
+
+let private bindMutationReadView accesses (session: Session) statement =
     let unchanged session = session, Ok(Executor.MutationScan statement)
     match session.Tx with
     | Some transaction when transaction.Isolation = RepeatableRead
@@ -3636,10 +3641,16 @@ let private bindMutationReadView (session: Session) statement =
                             && not (insideFunctionOrTrigger session) ->
         let bindCurrentDefinition = bindCurrentMutationTarget session transaction
         let dbName = session.Database |> Option.defaultValue defaultDatabase
+        let bindDependencies () =
+            accesses
+            |> List.map (fun (access: TableLocks.Access) -> access.Database, access.Table)
+            |> bindCurrentMutationTables session transaction
         match Executor.tryDirectMutationRead statement with
         | Some read ->
             let database = read.Source.Database |> Option.defaultValue dbName
-            let bound = bindCurrentDefinition database read.Source.Table
+            let bound =
+                if Executor.viewExists session.Store database read.Source.Table then bindDependencies ()
+                else bindCurrentDefinition database read.Source.Table
             bound, Executor.planMutationReadView (safeUpdatesEnabled bound) (Session.currentStore bound) (registryFor bound) dbName read statement
         | None ->
             match statement with
@@ -3650,6 +3661,7 @@ let private bindMutationReadView (session: Session) statement =
             | ReplaceSet(table, _) ->
                 let database, name = splitQualified dbName table
                 bindCurrentDefinition database name |> unchanged
+            | Update _ | Delete _ -> bindDependencies () |> unchanged
             | _ -> unchanged session
     | _ -> unchanged session
 
@@ -4016,7 +4028,7 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
                 let started = if insideFunctionOrTrigger session then session else startTransactionStatement session
                 let executed, result =
                     try
-                        match bindMutationReadView started stmt with
+                        match bindMutationReadView accesses started stmt with
                         | _, Error error -> started, error
                         | bound, Ok(Executor.EmptyMutationScan statement) ->
                             bound |> syncTransactionView |> execute statement

@@ -17110,6 +17110,44 @@ let tests =
               run reader "SELECT v FROM local_dst" (ResultSet([ "v" ], [])) |> ignore
               run writer "SELECT v FROM dst" (ResultSet([ "v" ], [])) |> ignore
 
+          testCase "joined and updatable view writes respect unavailable layouts"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let writer = run (create 1 store) "CREATE TABLE src(id INT PRIMARY KEY,k INT,v INT)" (Affected 0UL)
+              let writer = run writer "CREATE TABLE dst(id INT PRIMARY KEY,v INT)" (Affected 0UL)
+              let writer = run writer "INSERT INTO src VALUES(1,10,100)" (Affected 1UL)
+              let writer = run writer "INSERT INTO dst VALUES(1,11)" (Affected 1UL)
+              let writer = run writer "CREATE ALGORITHM=MERGE VIEW direct AS SELECT id,k,v FROM src WHERE id>0" (Affected 0UL)
+              let writer = run writer "CREATE ALGORITHM=MERGE VIEW joined AS SELECT d.id,d.v AS dest_v,s.v AS src_v FROM dst d JOIN src s ON d.id=s.id" (Affected 0UL)
+              let reader = run (create 2 store) "SET innodb_lock_wait_timeout=1" (Affected 0UL)
+              let reader = run reader "START TRANSACTION WITH CONSISTENT SNAPSHOT" (Affected 0UL)
+              let writer = run writer "UPDATE src SET v=300 WHERE id=1" (Affected 1UL)
+              let writer = run writer "ALTER TABLE src ADD INDEX ix(k), ALGORITHM=COPY" (Affected 1UL)
+              let writer = run writer "START TRANSACTION" (Affected 0UL)
+              let writer = run writer "UPDATE src SET v=400 WHERE id=1" (Affected 1UL)
+              let unavailable = Err(1412, "Table definition has changed, please retry transaction")
+              let reader = run reader "UPDATE joined SET dest_v=src_v WHERE id=1" unavailable
+              let reader = run reader "UPDATE direct SET v=v+1 WHERE id=1" unavailable
+              let reader = run reader "DELETE d FROM dst d JOIN direct s ON d.id=s.id WHERE d.id=1" unavailable
+              let writer = run writer "ROLLBACK" (Affected 0UL)
+              let reader = run reader "UPDATE joined SET dest_v=src_v WHERE id=999" unavailable
+              let reader = run reader "UPDATE dst d JOIN src FORCE INDEX(ix) ON d.id=src.id SET d.v=src.v WHERE FALSE" (Affected 0UL)
+              let reader = run reader "SELECT v FROM dst" (ResultSet([ "v" ], [ [ Some "11" ] ]))
+              let reader = run reader "UPDATE dst d LEFT JOIN src ON FALSE SET d.v=src.v WHERE d.id=1" (Affected 1UL)
+              let reader = run reader "SELECT v FROM dst" (ResultSet([ "v" ], [ [ None ] ]))
+              let reader = run reader "ROLLBACK" (Affected 0UL)
+
+              let reader = run reader "START TRANSACTION WITH CONSISTENT SNAPSHOT" (Affected 0UL)
+              run writer "ALTER TABLE src ADD INDEX iy(k), ALGORITHM=INPLACE" (Affected 0UL) |> ignore
+              let reader = run reader "UPDATE dst d JOIN src s FORCE INDEX(iy) ON d.id=s.id SET d.v=s.v WHERE s.k=10" unavailable
+              let reader = run reader "DELETE d FROM dst d JOIN src s FORCE INDEX(iy) ON d.id=s.id WHERE s.k=10" unavailable
+              let reader = run reader "UPDATE dst d JOIN src s IGNORE INDEX(iy) ON d.id=s.id SET d.v=s.v WHERE s.k=10" (Affected 1UL)
+              run reader "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "transaction access modes, chaining, and SET CHARACTER SET are enforced"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

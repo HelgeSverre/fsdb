@@ -185,7 +185,30 @@ write scan. Column binding and safe-update errors retain their precedence.
 
 The comparison includes ordered UPDATE with LIMIT, DELETE with a single
 source and an explicit target, and clustered writes using USE or IGNORE
-hints. Joined writes remain open.
+hints.
+
+### Joined updates, deletes, and writable views
+
+Under REPEATABLE READ, joined UPDATE and DELETE bind current definitions
+for the physical tables they open. The audited joins return 1412 after a
+COPY rebuild, including primary-key misses, writes through mergeable
+views, and statements that read a stored view as a join partner. A false
+WHERE or a false ON condition on the right side of a LEFT JOIN can omit
+the affected read. A forced probe through a secondary key added INPLACE
+also returns 1412. READ COMMITTED can use the available table and key.
+
+For the audited standalone view updates, the layout error takes precedence
+over waiting for the rebuilt row. Missing columns and invalid index hints
+retain their existing errors. An INVOKER view still reports a grant failure
+first, with the same 1142 versus MySQL 1356 difference as the no-DDL control.
+Ordinary joined UPDATE and DELETE can
+still skip waits on locked partners, including primary probes and
+`IGNORE INDEX` scans. The reproduced cases span READ COMMITTED,
+REPEATABLE READ, and SERIALIZABLE. Multi-target UPDATE assignment ordering
+also differs. The audited MySQL statements process targets in written source
+order. An immediate target exposes its changes to later targets, while a
+buffered target does not. The optimizer can choose a different immediate
+target when the query uses a different index.
 
 ### Duplicate-key writes
 
