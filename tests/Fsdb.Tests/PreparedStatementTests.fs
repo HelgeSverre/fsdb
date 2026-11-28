@@ -3505,6 +3505,18 @@ let tests =
                       "spatial parameter families"
               | other -> failtestf "expected a parsed statement with 7 params, got %A" other
 
+          testCase "ST_Area prepares a geometry parameter and a nullable DOUBLE result"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              match prepareStatement "SELECT ST_Area(?) AS measured" with
+              | Result.Ok(statement, 1) ->
+                  let parameters, columns = preparedMetadata session statement 1
+                  Expect.equal (parameters |> List.map _.TypeId) [ TypeGeometry ] "geometry argument"
+                  let result = (List.exactlyOne columns).Metadata
+                  Expect.equal (result.TypeId, result.ColumnLength, result.Decimals) (TypeDouble, 23u, 31uy) "area result"
+                  Expect.equal (result.Flags &&& NotNullFlag) 0us "area accepts NULL"
+              | other -> failtestf "expected one parameter, got %A" other
+
           testCase "prepared comparison parameters retain their dynamic type"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

@@ -2157,6 +2157,52 @@ let tests =
                         | Fsdb.Functions.SqlError(3882, _) -> ()
                         | error -> failtestf "expected missing-unit error, got %A" error)
 
+                testCase "ST_Area measures planar and geodetic polygon rings"
+                <| fun _ ->
+                    let area text srid =
+                        let geometry =
+                            if srid = 0L then call "ST_GeomFromText" [ VString text ]
+                            else call "ST_GeomFromText" [ VString text; VInt srid ]
+                        call "ST_Area" [ geometry ]
+
+                    let withHole = "POLYGON((0 0,10 0,10 20,0 20,0 0),(1 1,3 1,3 3,1 3,1 1))"
+                    Expect.equal (area withHole 0L) (VDouble 196.0) "a same-winding hole is subtracted"
+                    Expect.equal (area withHole 3857L) (VDouble 196.0) "projected coordinates use Cartesian area"
+                    Expect.equal (area "MULTIPOLYGON(((0 0,4 0,4 4,0 4,0 0)),((6 6,8 6,8 8,6 8,6 6)))" 0L)
+                        (VDouble 20.0) "areas add across a multipolygon"
+
+                    for text, expected, tolerance in
+                        [ "POLYGON((0 0,0 1,1 1,1 0,0 0))", 12308778368.75034, 0.02
+                          "POLYGON((0 179,0 -179,1 -179,1 179,0 179))", 24619443710.338505, 0.02
+                          "POLYGON((86 -135,86 -45,86 45,86 135,86 -135))", 399528653827.0, 0.15
+                          "POLYGON((60 11,60 11.00004,60.00006 11.00004,60.00006 11,60 11))", 14.936983800271788, 0.001
+                          ("POLYGON((31.24193057326865 -79.15063812794283,31.38350391500911 -74.43152673659397,"
+                           + "36.19699753418496 -75.75287792617165,35.39474859765565 -80.14165152012609,"
+                           + "31.24193057326865 -79.15063812794283))"), 216075839442.07318, 0.2 ] do
+                        match area text 4326L with
+                        | VDouble value -> Expect.isLessThan (abs (value - expected)) tolerance text
+                        | value -> failtestf "expected square meters for %s, got %A" text value
+
+                    Expect.equal (call "ST_Area" [ VNull ]) VNull "NULL area"
+                    for text, kind in [ "POINT(0 0)", "POINT"; "GEOMETRYCOLLECTION()", "GEOMCOLLECTION" ] do
+                        Expect.throwsC (fun () -> area text 0L |> ignore) (function
+                            | Fsdb.Functions.SqlError(3516, message) ->
+                                Expect.equal message $"POLYGON/MULTIPOLYGON value is a geometry of unexpected type {kind} in st_area." text
+                            | error -> failtestf "expected a geometry type error, got %A" error)
+
+                    match call "ST_GeomFromText" [ VString withHole ] with
+                    | VGeometry polygon ->
+                        Expect.equal (call "ST_Area" [VBytes(geometryToMySqlBinary polygon)]) (VDouble 196.0) "binary polygon input"
+                    | value -> failtestf "expected a polygon, got %A" value
+
+                    for arguments, code in
+                        [ [VString "bad"], 3037
+                          [VBinaryLiteral(Convert.FromHexString "E7030000")], 3548
+                          [VNull; VNull], 1582 ] do
+                        Expect.throwsC (fun () -> call "ST_Area" arguments |> ignore) (function
+                            | Fsdb.Functions.SqlError(actual, _) -> Expect.equal actual code "area diagnostic"
+                            | error -> failtestf "expected SQL error %d, got %A" code error)
+
                 testCase "ST_IsValid distinguishes simple planar geometry from invalid topology"
                 <| fun _ ->
                     let geometry text = call "ST_GeomFromText" [ VString text ]

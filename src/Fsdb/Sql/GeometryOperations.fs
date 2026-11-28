@@ -92,9 +92,12 @@ let private simplifyPath squaredTolerance (points: (float * float) array) =
         | [ first; second ] when sameCartesianPosition first second -> [ first ]
         | simplified -> simplified
 
+// The trapezoidal sum is positive for counter-clockwise rings.
+let private planarRingAreaTwice ring =
+    ring |> List.pairwise |> List.sumBy (fun ((x, y), (u, v)) -> (x + u) * (v - y))
+
 let private planarRingAreaSign ring =
-    // The trapezoidal sum is positive for counter-clockwise rings.
-    let area = ring |> List.pairwise |> List.sumBy (fun ((x, y), (u, v)) -> (x + u) * (v - y))
+    let area = planarRingAreaTwice ring
     if area > 0.0 then 1 elif area < 0.0 then -1 else 0
 
 let internal simplifyPlanar tolerance (geometry: Geometry) =
@@ -242,7 +245,7 @@ let internal geographicPointDistance referenceSystem (firstLatitude, firstLongit
         (mysqlRadians firstLatitude, mysqlRadians firstLongitude)
         (mysqlRadians secondLatitude, mysqlRadians secondLongitude)
 
-let private geographicAzimuths flattening (struct (sin1, cos1)) (struct (sin2, cos2)) (struct (sinLongitude, cosLongitude)) =
+let private geographicAzimuthsUsing subtractProduct flattening (struct (sin1, cos1)) (struct (sin2, cos2)) (struct (sinLongitude, cosLongitude)) =
     // Boost's optimized Andoyer inverse contracts this sum. Near a polar
     // vertex the extra bit keeps a short, nonzero segment's azimuth intact.
     let cosineDistance = max -1.0 (min 1.0 (Math.FusedMultiplyAdd(sin1, sin2, cos1 * cos2 * cosLongitude)))
@@ -258,9 +261,7 @@ let private geographicAzimuths flattening (struct (sin1, cos1)) (struct (sin2, c
             if abs cos2 < 1e-15 then
                 (if sin2 < 0.0 then Math.PI else 0.0), 0.0
             else
-                // Boost's multiply/subtract contracts to one rounding step on
-                // our native oracle; the sign matters for nearly coincident points.
-                let denominator = Math.FusedMultiplyAdd(cos1, sin2 / cos2, -(sin1 * cosLongitude))
+                let denominator = subtractProduct cos1 (sin2 / cos2) (sin1 * cosLongitude)
                 let angle = atan2 sinLongitude denominator
                 angle, flattening / 2.0 * cos1 * cos1 * sin (2.0 * angle)
 
@@ -268,7 +269,7 @@ let private geographicAzimuths flattening (struct (sin1, cos1)) (struct (sin2, c
             if abs cos1 < 1e-15 then
                 (if sin1 < 0.0 then Math.PI else 0.0), 0.0
             else
-                let denominator = Math.FusedMultiplyAdd(cos2, sin1 / cos1, -(sin2 * cosLongitude))
+                let denominator = subtractProduct cos2 (sin1 / cos1) (sin2 * cosLongitude)
                 let angle = atan2 sinLongitude denominator
                 angle, flattening / 2.0 * cos2 * cos2 * sin (2.0 * angle)
 
@@ -287,19 +288,25 @@ let private geographicAzimuths flattening (struct (sin1, cos1)) (struct (sin2, c
             |> clamp secondAngle reverseCorrection
         forward, reverse
 
-/// Boost's default geographic line interpolation uses Andoyer for the initial
-/// azimuth and first-order Thomas for the direct point. Keep this paired with
-/// geographicPointDistance, which supplies the distance along each segment.
-let private geographicSegmentAzimuthsFromRadians flattening latitude1 latitude2 longitudeDelta =
-    geographicAzimuths flattening
+// The line strategies retain the native oracle's contracted denominator.
+let private fusedSubtractProduct factor value subtract =
+    Math.FusedMultiplyAdd(factor, value, -subtract)
+
+let private geographicAzimuthsFromRadians subtractProduct flattening latitude1 latitude2 longitudeDelta =
+    geographicAzimuthsUsing subtractProduct flattening
         (struct (sin latitude1, cos latitude1))
         (struct (sin latitude2, cos latitude2))
         (struct (sin longitudeDelta, cos longitudeDelta))
 
+/// Geographic line interpolation pairs the Andoyer azimuth with the
+/// segment distance and the first-order Thomas direct point.
+let private geographicSegmentAzimuthsFromRadians =
+    geographicAzimuthsFromRadians fusedSubtractProduct
+
 let private geographicTurnAzimuth flattening (latitude1, longitude1) (latitude2, longitude2) =
     // Paired trigonometry matches the native side strategy's rounding.
     // A single bit can keep a short, nonzero segment's azimuth intact.
-    geographicAzimuths flattening
+    geographicAzimuthsUsing fusedSubtractProduct flattening
         (Math.SinCos latitude1)
         (Math.SinCos latitude2)
         (Math.SinCos(longitude2 - longitude1))
@@ -690,6 +697,107 @@ let private orientGeographicPolygonRings referenceSystem =
         if (hole && area > 0.0) || (not hole && area < 0.0) then List.rev ring else ring
 
     List.mapi (fun index ring -> orient (index > 0) ring)
+
+/// The first-order Andoyer strategy integrates an ellipsoidal correction
+/// along each edge and adjusts the spherical excess for pole crossings.
+let private geographicRingArea referenceSystem semiMajor inverseFlattening =
+    let semiMinor = semiMajor * (1.0 - 1.0 / inverseFlattening)
+    let flattening = (semiMajor - semiMinor) / semiMajor
+    let radiusRatio = semiMinor / semiMajor
+    let eccentricitySquared = 1.0 - radiusRatio * radiusRatio
+    let eccentricity = sqrt eccentricitySquared
+    let secondEccentricitySquared = eccentricitySquared / (1.0 - eccentricitySquared)
+    let majorSquared = semiMajor * semiMajor
+    let authalicRadiusSquared =
+        if boostGeoEqual eccentricitySquared 0.0 then majorSquared
+        else majorSquared / 2.0 * (1.0 + (1.0 - eccentricitySquared) * Math.Atanh(eccentricity) / eccentricity)
+    let thirdFlattening = flattening / (2.0 - flattening)
+    let shortEdge = (2.0 * semiMajor + semiMinor) / 3.0 / 638.0
+    // The pinned area strategy rounds both products before subtraction.
+    let areaAzimuths = geographicAzimuthsFromRadians (fun factor value subtract -> factor * value - subtract) flattening
+
+    let correction latitude1 latitude2 azimuth1 azimuth2 =
+        let reducedLatitude latitude =
+            let tangent = tan latitude * (1.0 - flattening)
+            let cosine = cos (atan tangent)
+            tangent * cosine, cosine
+        let sine1, cosine1 = reducedLatitude latitude1
+        let sine2, cosine2 = reducedLatitude latitude2
+        let sinEquatorialAzimuth = sin azimuth1 * cosine1
+        let cosEquatorialAzimuthSquared = max 0.0 (1.0 - sinEquatorialAzimuth * sinEquatorialAzimuth)
+        let scale = sqrt (1.0 + secondEccentricitySquared * cosEquatorialAzimuthSquared)
+        let epsilon = (scale - 1.0) / (scale + 1.0)
+        let first = (10.0 - 4.0 * thirdFlattening) / 15.0 - epsilon / 5.0
+        let third = epsilon / 45.0
+        let integral sineBeta cosineBeta azimuth =
+            let x = cos azimuth * cosineBeta
+            let cosine = x / Double.Hypot(x, sineBeta)
+            // The first-order series has the first and third cosine harmonics.
+            first + cosine * (first + third * (4.0 * cosine * cosine - 3.0))
+        let integralDelta = integral sine2 cosine2 azimuth2 - integral sine1 cosine1 azimuth1
+        sqrt cosEquatorialAzimuthSquared * sinEquatorialAzimuth * integralDelta
+
+    let period = 2.0 * Math.PI
+    let positive longitude = longitude - floor (longitude / period) * period
+    let step (excess, ellipsoidal, crossings) (first, second) =
+        let latitude1, longitude1 = first
+        let latitude2, longitude2 = second
+        if boostGeoEqual longitude1 longitude2 then excess, ellipsoidal, crossings
+        else
+            let delta = longitudeDistanceRadians longitude1 longitude2
+            let halfTurn = abs delta = Math.PI
+            let firstPositive, secondPositive = positive longitude1, positive longitude2
+            let low, high = min firstPositive secondPositive, max firstPositive secondPositive
+            let crossed = halfTurn || (high > Math.PI && low < Math.PI && high - low > Math.PI)
+            let crossings = crossings + (if crossed then 1 else 0)
+            if boostGeoEqual latitude1 0.0 && boostGeoEqual latitude2 0.0 then excess, ellipsoidal, crossings
+            else
+                let azimuth1, azimuth2 = areaAzimuths latitude1 latitude2 (longitude2 - longitude1)
+                let pole latitude = abs latitude = Math.PI / 2.0
+                let spherical =
+                    if halfTurn then Math.PI
+                    elif not (pole latitude1 || pole latitude2) && geographicPointDistanceRadians referenceSystem first second < shortEdge then
+                        let t1, t2 = tan (latitude1 / 2.0), tan (latitude2 / 2.0)
+                        2.0 * atan ((t1 + t2) / (1.0 + t1 * t2) * tan (delta / 2.0))
+                    else azimuth2 - azimuth1
+                excess + spherical, ellipsoidal + correction latitude1 latitude2 azimuth1 azimuth2, crossings
+
+    fun ring ->
+        let excess, correction, crossings =
+            ring |> List.map geographicPointRadians |> List.pairwise |> List.fold step (0.0, 0.0, 0)
+        let sphericalArea = authalicRadiusSquared * excess
+        let correctionArea = eccentricitySquared * majorSquared * correction
+        // A large correction signals loss of precision in the edge azimuths.
+        let area =
+            if abs (correctionArea / sphericalArea) > 0.01 then sphericalArea
+            else sphericalArea + correctionArea
+        if crossings % 2 = 0 then area
+        else
+            let polar = period * authalicRadiusSquared * float (1 + crossings / 2) - abs area
+            if area > 0.0 then -polar else polar
+
+let internal polygonalArea referenceSystem shape =
+    let signedRingArea =
+        match referenceSystem.SemiMajorAxis, referenceSystem.InverseFlattening with
+        | Some major, Some inverseFlattening -> geographicRingArea referenceSystem major inverseFlattening
+        | _ -> fun ring -> -(planarRingAreaTwice ring) / 2.0
+
+    let ringArea isHole ring =
+        // MySQL stores counterclockwise exteriors, then walks the ring in
+        // reverse for area. Reversing the result's sign loses direction-
+        // dependent rounding in the geographic edge integration.
+        let measured = signedRingArea (List.rev ring)
+        if (isHole && measured > 0.0) || (not isHole && measured < 0.0) then signedRingArea ring
+        else measured
+
+    let polygonArea = function
+        | [] -> 0.0
+        | exterior :: holes -> ringArea false exterior + (holes |> List.sumBy (ringArea true))
+
+    match shape with
+    | GPolygon rings -> Some(polygonArea rings)
+    | GMultiPolygon polygons -> Some(List.sumBy polygonArea polygons)
+    | _ -> None
 
 let internal normalizePolygonWinding referenceSystem geometry =
     let orient =

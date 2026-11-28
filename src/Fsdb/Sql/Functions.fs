@@ -6602,6 +6602,21 @@ let private geometryDistanceSphereFn: Scalar =
     | [ first; second; radius ] -> distance first second (Some radius)
     | _ -> nativeParameterCountError "st_distance_sphere"
 
+let private geometryAreaFn: Scalar =
+    function
+    | [ VNull ] -> VNull
+    | [ value ] ->
+        let geometry = gisStringGeometryArgument "st_area" value
+        let referenceSystem = spatialReferenceSystem "st_area" geometry.Srid
+        requireWellFormedGisGeometry "st_area" geometry
+        match polygonalArea referenceSystem geometry.Shape with
+        | Some area when Double.IsFinite area -> VDouble area
+        | Some _ -> raise (SqlError(1690, "Result value is out of range in 'st_area'"))
+        | None ->
+            let kind = gisGeometryTypeName geometry.Shape
+            raise (SqlError(3516, $"POLYGON/MULTIPOLYGON value is a geometry of unexpected type {kind} in st_area."))
+    | _ -> nativeParameterCountError "ST_Area"
+
 let private geometryLengthFn: Scalar =
     let convertUnit unit distance =
         distance / linearUnitMetres unit
@@ -7292,6 +7307,7 @@ let private registerSpatialBuiltins registry =
     |> registerScalarWithSignature "ST_HAUSDORFFDISTANCE" [ geometry; geometry; geometry ] spatialDouble geometryHausdorffDistanceFn
     |> registerScalarWithSignature "ST_SIMPLIFY" [ geometry; spatialDouble ] geometryResult geometrySimplifyFn
     |> registerScalar "ST_DISTANCE_SPHERE" geometryDistanceSphereFn
+    |> registerScalarWithSignature "ST_AREA" [ geometry ] spatialDouble geometryAreaFn
     |> registerScalar "ST_LENGTH" geometryLengthFn
     |> registerScalar "ST_LINEINTERPOLATEPOINT" (geometryLineInterpolateFn "ST_LineInterpolatePoint" FractionPoint)
     |> registerScalar "ST_LINEINTERPOLATEPOINTS" (geometryLineInterpolateFn "ST_LineInterpolatePoints" FractionPoints)
