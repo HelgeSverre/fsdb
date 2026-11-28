@@ -16950,6 +16950,11 @@ and private impossibleReadCondition store registry dbName =
             |> Option.exists (fun value -> truthy value <> Some true)
     impossible
 
+and private readDefinitionOrBindingError store registry dbName select outer =
+    match describeQueryColumnDescriptorsInScope store registry dbName (QueryBody(PlainSelect select)) outer (fun _ -> Ok()) with
+    | Error(InvalidDescription error) -> error
+    | _ -> changedReadDefinition
+
 and private snapshotLayoutReadError
     (store: Store)
     (registry: Registry)
@@ -17025,11 +17030,7 @@ and private snapshotLayoutReadError
             && (sources |> List.exists (fun (reference, table, unavailable) ->
                 unavailable && not (select.Joins.IsEmpty && emptyIndexRange reference table)))
 
-    if needsUnavailableLayout then
-        match describeQueryColumnDescriptorsInScope store registry dbName (QueryBody(PlainSelect select)) outer (fun _ -> Ok()) with
-        | Error(InvalidDescription error) -> Some error
-        | _ -> Some changedReadDefinition
-    else None
+    if needsUnavailableLayout then Some(readDefinitionOrBindingError store registry dbName select outer) else None
 
 and private runUnmergedSelectStmt
     output
@@ -17463,14 +17464,18 @@ and private joinSortInput store registry dbName (select: SelectStmt) whereExpres
 
             if List.exists requiresIntermediate keys then IntermediateRows else StoredRows
 
+and private predicateCannotMatch store registry dbName = function
+    | None -> false
+    | Some predicate ->
+        let context = contextFactory store registry dbName Map.empty Map.empty None [||]
+        not ((possibleConditionTruths context predicate).Contains(Some true))
+
 and private snapshotIndexReadError store registry dbName (table: Table) tref (select: SelectStmt) outer names =
     let unavailable = names |> List.filter (Storage.readIndexUnavailable table)
     if unavailable.IsEmpty || metadataProbe.Value || planningProbe.Value
        || (not select.CalculateFoundRows && zeroLimitWithoutOffset select.Limit select.Offset) then None
     else
-        let context = contextFactory store registry dbName Map.empty Map.empty None [||]
-        let impossible = select.Where |> Option.exists (fun predicate ->
-            not ((possibleConditionTruths context predicate).Contains(Some true)))
+        let impossible = predicateCannotMatch store registry dbName select.Where
         let impossibleIndexRange =
             let bounds = lazy (rangeLookupBounds BareOrQualifiedColumn store registry table tref select.Where)
             unavailable |> List.forall (fun name ->
@@ -17480,10 +17485,7 @@ and private snapshotIndexReadError store registry dbName (table: Table) tref (se
                 |> Option.exists (fun first ->
                     first.Transform.IsNone && numericKeyRangeIsEmpty table first.Name bounds))
         if impossible || impossibleIndexRange then None
-        else
-            match describeQueryColumnDescriptorsInScope store registry dbName (QueryBody(PlainSelect select)) outer (fun _ -> Ok()) with
-            | Error(InvalidDescription error) -> Some error
-            | _ -> Some changedReadDefinition
+        else Some(readDefinitionOrBindingError store registry dbName select outer)
 
 and private snapshotIndexCovers (table: Table) (select: SelectStmt) name =
     let indexed =
@@ -40884,10 +40886,6 @@ let internal planMutationReadView safeUpdates store registry dbName (read: Direc
 
             validate ()
             |> Result.bind (fun () ->
-                let impossiblePredicate () =
-                    read.Predicate |> Option.exists (fun predicate ->
-                        let context = contextFactory store registry dbName Map.empty Map.empty None [||]
-                        not ((possibleConditionTruths context predicate).Contains(Some true)))
                 let unavailable (name: string) = Set.contains (name.ToLowerInvariant()) unavailableNames
                 let forcedNew scope name = unavailable name && isForcedIndex scope source name
                 let impossibleRange () =
@@ -40913,7 +40911,7 @@ let internal planMutationReadView safeUpdates store registry dbName (read: Direc
                             |> Option.exists (fun plan -> forcedNew IndexOrderBy plan.KeyName)
                     filterAccess || orderedAccess
 
-                if zeroLimitWithoutOffset read.Limit None || impossiblePredicate () || impossibleRange () then
+                if zeroLimitWithoutOffset read.Limit None || predicateCannotMatch store registry dbName read.Predicate || impossibleRange () then
                     Ok(EmptyMutationScan statement)
                 elif unavailableLayout || (not source.IndexHints.IsEmpty && opensUnavailableIndex ()) then Error changedReadDefinition
                 else

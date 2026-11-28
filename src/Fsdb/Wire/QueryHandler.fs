@@ -3616,14 +3616,17 @@ let private safeUpdatesEnabled session =
     | Some("1" | "ON") -> true
     | _ -> false
 
-let private bindCurrentMutationTarget (session: Session) (transaction: Transaction) database table =
+let private tableDefinitionChanged before after database table =
     let revision store =
         Storage.tableSnapshot store database table
         |> Result.toOption |> Option.map _.SchemaRevision
-    if revision transaction.Snapshot = revision session.Store then session
-    else
+    revision before <> revision after
+
+let private bindCurrentMutationTarget (session: Session) (transaction: Transaction) database table =
+    if tableDefinitionChanged transaction.Snapshot session.Store database table then
         let baseCatalog, snapshot = rebaseTransactionSnapshot session transaction
         { session with Tx = Some { transaction with BaseCatalog = baseCatalog; Snapshot = snapshot } }
+    else session
 
 let private bindMutationReadView (session: Session) statement =
     let unchanged session = session, Ok(Executor.MutationScan statement)
@@ -3670,21 +3673,36 @@ let private usesLockingInsertSources transaction statement =
     (transaction.Isolation = RepeatableRead || transaction.Isolation = Serializable)
     && isInsertSourceStatement statement
 
-let private withInsertSourceReadView session refresh body =
-    let primarySourceRead (store: Store) registry dbName (select: SelectStmt) =
-        match select.From with
-        | Some(FromTable source) ->
-            let key = CatalogOverlay.tableKey (source.Database |> Option.defaultValue dbName) source.Table
-            if store.TableShadows.ContainsKey key then None
-            else
-                Executor.tryPrimaryRead true WaitForLocks store registry dbName select
-                |> Option.map (fun prepared ->
-                    let current, selected, _ = openPrimaryRead session refresh ShareLock store source prepared
-                    current, selected)
-        | _ -> None
+let private prepareInsertSourcePrimaryRead session refresh (store: Store) registry dbName (select: SelectStmt) =
+    match select.From with
+    | Some(FromTable source) ->
+        let key = CatalogOverlay.tableKey (source.Database |> Option.defaultValue dbName) source.Table
+        if store.TableShadows.ContainsKey key then None
+        else
+            Executor.tryPrimaryRead true WaitForLocks store registry dbName select
+            |> Option.map (fun prepared ->
+                let current, selected, _ = openPrimaryRead session refresh ShareLock store source prepared
+                current, selected)
+    | _ -> None
+
+let private withStatementLockingReadView session refresh preparePrimary releaseOffset body =
     Executor.withLiveLockingReadStore session.Store refresh (lockWaitTimeout session) (fun () ->
-        Executor.withInsertSourceLocks (Some primarySourceRead) (fun () ->
-            Executor.withLockingReadOffsetRelease false body))
+        Executor.withInsertSourceLocks preparePrimary (fun () ->
+            Executor.withLockingReadOffsetRelease releaseOffset body))
+
+let private withInsertSourceReadView session refresh body =
+    let preparePrimary = prepareInsertSourcePrimaryRead session refresh
+    withStatementLockingReadView session refresh (Some preparePrimary) false body
+
+let private withTransactionLockingReads (session: Session) statement body =
+    let refresh transaction () = rebaseTransactionSnapshot session transaction |> snd
+    match session.Tx with
+    | Some transaction when usesLockingInsertSources transaction statement ->
+        withInsertSourceReadView session (refresh transaction) body
+    | Some transaction when statementContainsLockingRead statement ->
+        let releaseOffset = transaction.Isolation = ReadCommitted || transaction.Isolation = ReadUncommitted
+        withStatementLockingReadView session (refresh transaction) None releaseOffset body
+    | _ -> body ()
 
 let private executeParsedStatement readOverlay accesses (session: Session) (stmt: Statement) : Session * QueryResult =
     let stmt = withSqlSelectLimit session stmt
@@ -3738,16 +3756,6 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
         let originalStatement = stmt
         let stmt = statement
         let store = Session.currentStore session
-        let lockingReadView () =
-            match session.Tx with
-            | Some transaction ->
-                let insertSourceLocks = usesLockingInsertSources transaction stmt
-                let releaseOffset = transaction.Isolation = ReadCommitted || transaction.Isolation = ReadUncommitted
-                if insertSourceLocks || statementContainsLockingRead stmt then
-                    Some((fun () -> rebaseTransactionSnapshot session transaction |> snd), releaseOffset, insertSourceLocks)
-                else None
-            | _ -> None
-
         match access with
         | Error(code, msg) -> session, Err(code, msg)
         | Ok() ->
@@ -3874,11 +3882,8 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
                                                 let planningStore =
                                                     if (not select.Locking.IsEmpty || (readSelect.OrderBy.IsEmpty && readSelect.Limit.IsSome))
                                                        && readSelect.Joins.IsEmpty && readSelect.Ctes.IsEmpty then
-                                                        let revision catalog =
-                                                            Storage.tableSnapshot catalog database source.Table
-                                                            |> Result.toOption |> Option.map _.SchemaRevision
                                                         // Current index definitions determine whether a clustered read is appropriate.
-                                                        if revision store <> revision session.Store then refresh () else store
+                                                        if tableDefinitionChanged store session.Store database source.Table then refresh () else store
                                                     else store
                                                 Executor.tryPrimaryRead protectGaps wait planningStore registry dbName readSelect
                                                 |> Option.map (fun prepared ->
@@ -3956,14 +3961,7 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
 
         let evaluateWithLockingView () =
             try
-                withSelectDeadline (fun () ->
-                    match lockingReadView () with
-                    | Some(current, _, true) -> withInsertSourceReadView session current evaluate
-                    | Some(current, releaseOffset, false) ->
-                        Executor.withLiveLockingReadStore session.Store current (lockWaitTimeout session) (fun () ->
-                            Executor.withInsertSourceLocks None (fun () ->
-                                Executor.withLockingReadOffsetRelease releaseOffset evaluate))
-                    | None -> evaluate ())
+                withSelectDeadline (fun () -> withTransactionLockingReads session stmt evaluate)
             with
             | Limits.SelectTimeoutExpired ->
                 session.LastInsertId, session.LastGeneratedId,
