@@ -944,6 +944,28 @@ let tests =
                         Expect.isTrue (hasCorner -14.0 -25.0) "the right exterior survives"
                     | actual -> failtestf "expected two geographic symmetric difference polygons, got %A" actual
 
+                testCase "geographic polygon union keeps rounded shared endpoints out of the interior"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let a =
+                        geometry "POLYGON((-174.950936486117 -71.792240468218,-171.950936486117 -71.692240468218,-172.550936486117 -68.792240468218,-175.450936486117 -70.092240468218,-174.950936486117 -71.792240468218))"
+                    let b =
+                        geometry "POLYGON((-173.550936486117 -70.492240468218,-170.950936486117 -71.942240468218,-171.850936486117 -69.192240468218,-173.650936486117 -69.592240468218,-173.550936486117 -70.492240468218))"
+                    let ab = call "ST_Difference" [ a; b ]
+                    let ba = call "ST_Difference" [ b; a ]
+
+                    for first, second in [ ab, ba; ba, ab ] do
+                        let union = call "ST_Union" [ first; second ]
+                        Expect.equal (call "ST_IsValid" [ union ]) (VInt 1L) "the lobes meet at valid shared endpoints"
+                        match union with
+                        | VGeometry { Srid = 4326; Shape = GMultiPolygon [ [ _ ]; [ _ ] ] } ->
+                            match call "ST_Area" [ union ] with
+                            | VDouble value ->
+                                Expect.isTrue (abs (value - 28938118985.0) <= 1.0) "both geodesic lobes match MySQL's area"
+                            | value -> failtestf "expected a geographic area, got %A" value
+                        | value -> failtestf "expected two geographic lobes, got %A" value
+
                 testCase "geographic polygon unions dissolve intersecting boundaries"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"

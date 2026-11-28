@@ -3571,8 +3571,9 @@ type private GeographicPolygonFragment =
 let private undirectedGeographicSegment (start, endpoint) =
     min start endpoint, max start endpoint
 
-let private splitGeographicPolygonEdges referenceSystem flattening clockwise includePointTurn polygons =
+let private splitGeographicPolygonEdges referenceSystem flattening kind clockwise includePointTurn polygons =
     let pointTurns = ResizeArray()
+    let roundedContacts = ResizeArray()
     let edges =
         polygons
         |> List.mapi (fun polygon rings -> List.map (fun ring -> polygon, ring) rings)
@@ -3591,6 +3592,14 @@ let private splitGeographicPolygonEdges referenceSystem flattening clockwise inc
         |> List.concat
         |> List.toArray
 
+    let roundedEndpointPairs (a, b) (c, d) =
+        let withRadians point = point, geographicPointRadians point
+        let secondEndpoints = [ withRadians c; withRadians d ]
+        [ for first, firstRadians in [ withRadians a; withRadians b ] do
+              for second, secondRadians in secondEndpoints do
+                  if equalGeographicCoordinates firstRadians secondRadians then
+                      yield first, second ]
+
     for index in 0 .. edges.Length - 1 do
         let first = edges.[index]
         for other in index + 1 .. edges.Length - 1 do
@@ -3599,17 +3608,25 @@ let private splitGeographicPolygonEdges referenceSystem flattening clockwise inc
                 let cuts =
                     match geographicSharedSegmentEndpoints referenceSystem first.Segment second.Segment with
                     | [] ->
-                        // The point result visits the original ring direction
-                        // independently of the areal traversal.
-                        includePointTurn |> Option.iter (fun accept ->
-                            if accept first.Polygon second.Polygon then
-                                tryGeographicCrossingPoint normalizedLongitudeRadians referenceSystem first.Segment second.Segment
-                                |> Option.iter pointTurns.Add)
-                        let directed (edge: GeographicPolygonEdge) =
-                            let start, endpoint = edge.Segment
-                            if clockwise edge.Polygon then endpoint, start else start, endpoint
-                        tryGeographicCrossingPoint normalizedLongitudeRadians referenceSystem (directed first) (directed second)
-                        |> Option.toList
+                        let alreadyMeet =
+                            if kind = OverlayKind.Union then roundedEndpointPairs first.Segment second.Segment else []
+                        if not alreadyMeet.IsEmpty then
+                            // An endpoint contact can yield a false interior
+                            // crossing if it is passed to the geodesic solver.
+                            roundedContacts.AddRange alreadyMeet
+                            []
+                        else
+                            // The point result visits the original ring direction
+                            // independently of the areal traversal.
+                            includePointTurn |> Option.iter (fun accept ->
+                                if accept first.Polygon second.Polygon then
+                                    tryGeographicCrossingPoint normalizedLongitudeRadians referenceSystem first.Segment second.Segment
+                                    |> Option.iter pointTurns.Add)
+                            let directed (edge: GeographicPolygonEdge) =
+                                let start, endpoint = edge.Segment
+                                if clockwise edge.Polygon then endpoint, start else start, endpoint
+                            tryGeographicCrossingPoint normalizedLongitudeRadians referenceSystem (directed first) (directed second)
+                            |> Option.toList
                     | shared -> shared
                 first.Cuts.AddRange cuts
                 second.Cuts.AddRange cuts
@@ -3635,7 +3652,7 @@ let private splitGeographicPolygonEdges referenceSystem flattening clockwise inc
                   Edge = edge.Segment
                   Segment = segment
                   StartsEdge = index = 0 }))
-    fragments, List.ofSeq pointTurns
+    fragments, List.ofSeq pointTurns, List.ofSeq roundedContacts
 
 let private geographicBoundaryRings flattening fragments =
     let edges = List.toArray fragments
@@ -3706,6 +3723,24 @@ let private prepareGeographicOverlayPolygons referenceSystem =
 let private supportsGeographicPolygonOverlay polygons =
     polygons |> List.forall (List.forall (List.pairwise >> List.forall supportedGeographicOverlaySegment))
 
+let private useSharedGeographicEndpoints contacts rings =
+    if List.isEmpty contacts then rings
+    else
+        // Traverse contacts in coordinate order so the representative is stable
+        // across operand order. Compare with it directly to avoid chained rounding.
+        let _, aliases =
+            contacts
+            |> List.collect (fun (first, second) -> [ first; second ])
+            |> Set.ofList
+            |> Seq.fold (fun (representatives, aliases) point ->
+                let radians = geographicPointRadians point
+                match representatives |> List.tryFind (snd >> equalGeographicCoordinates radians) with
+                | Some(representative, _) -> representatives, Map.add point representative aliases
+                | None -> (point, radians) :: representatives, aliases)
+                ([], Map.empty)
+        let sharedEndpoint point = Map.tryFind point aliases |> Option.defaultValue point
+        rings |> List.map (List.map sharedEndpoint >> geographicRingWithoutRepeatedNeighbors)
+
 let private tryGeographicPolygonUnion referenceSystem polygons =
     let orient = orientGeographicPolygonRings referenceSystem
     match polygons with
@@ -3717,7 +3752,7 @@ let private tryGeographicPolygonUnion referenceSystem polygons =
         let indexedPolygons = List.indexed polygons
         if not (supportsGeographicPolygonOverlay polygons) then None
         else
-            let fragments, _ = splitGeographicPolygonEdges referenceSystem flattening (fun _ -> true) None polygons
+            let fragments, _, contacts = splitGeographicPolygonEdges referenceSystem flattening OverlayKind.Union (fun _ -> true) None polygons
             fragments
             |> List.groupBy (_.Segment >> undirectedGeographicSegment)
             |> List.choose (fun (_, coincident) ->
@@ -3733,6 +3768,7 @@ let private tryGeographicPolygonUnion referenceSystem polygons =
                     then None
                     else Some segment)
             |> geographicBoundaryRings flattening
+            |> Option.map (useSharedGeographicEndpoints contacts)
             |> Option.bind (assembleGeographicPolygons referenceSystem)
 
 let private geographicAreaShape = function
@@ -3836,9 +3872,9 @@ let private tryGeographicPolygonBoundaryOverlay referenceSystem kind srid left r
 
         let pointOutput =
             if intersection then Some(fun a b -> belongsToLeft a <> belongsToLeft b) else None
-        let fragments, pointTurns =
+        let fragments, pointTurns, _ =
             let clockwise index = kind <> OverlayKind.Difference || belongsToLeft index
-            splitGeographicPolygonEdges referenceSystem flattening clockwise pointOutput polygons
+            splitGeographicPolygonEdges referenceSystem flattening kind clockwise pointOutput polygons
         let classified =
             fragments
             |> List.groupBy (_.Segment >> undirectedGeographicSegment)

@@ -85,17 +85,46 @@ SELECT ST_GeometryType(g), ROUND(ST_Area(g)) FROM (SELECT ST_Union(@ba,@ab) AS g
 | B minus A | POLYGON, 22,506,879,148 | POLYGON, 22,506,879,148 |
 | XOR A, B | POLYGON, 22,506,879,148 | MULTIPOLYGON, 87,095,135,715 |
 | XOR B, A | MULTIPOLYGON, 87,095,135,715 | MULTIPOLYGON, 87,095,135,715 |
-| Union AB, BA | POLYGON, 110,776,053,411 | Error 1235 |
-| Union BA, AB | POLYGON, 110,776,053,411 | Error 1235 |
+| Union AB, BA | POLYGON, 110,776,053,411 | MULTIPOLYGON, 87,095,135,715 |
+| Union BA, AB | POLYGON, 110,776,053,411 | MULTIPOLYGON, 87,095,135,715 |
 
 Across the 36 pairs, Fsdb matched MySQL on type and rounded area within
 1 m² for all 72 directed differences and 44 of 72 symmetric differences.
 The pinned Linux MySQL explicit unions matched the corresponding symmetric
-differences in 63 of 72 cases. Fsdb's explicit unions returned error 1235
-in ten cases. Native macOS MySQL 8.4.11 and the pinned Linux build agreed
-in both operand orders for the four pairs where swapping operands changed
-the result. Their symmetric differences differed in both directions for
-11 other pairs.
+differences in 63 of 72 cases. Native macOS MySQL 8.4.11 and the pinned Linux
+build agreed in both operand orders for the four pairs where swapping
+operands changed the result. Their symmetric differences differed in both
+directions for 11 other pairs.
+
+On macOS, Fsdb initially returned error 1235 for ten explicit unions. In
+the fixture above, two endpoints from opposite subtractions were equal within Boost's
+radian tolerance, and the geodesic solver introduced a false interior
+crossing. The union now recognizes rounded endpoint contacts before solving
+for a crossing and gives both output rings the same coordinate at the
+contact. All ten previously rejected outputs now pass `ST_IsValid` in both
+engines, including a round trip through MySQL. Three of the ten also match
+MySQL on type and area, raising the explicit union total from 43 to 46 of
+72. The other seven still differ in type or area. For one of the recovered
+orders, MySQL's own union output fails its validity check.
+[Boost geographic endpoint handling](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/strategies/geographic/intersection.hpp)
+
+An ARM64 Linux Fsdb replay reduced explicit union errors from 14 to two.
+All 12 recovered results passed Fsdb's validity check. Type and area
+matches against pinned MySQL rose from 45 to 46 of 72.
+
+A separate run varied offsets around geographic rectangle contacts at four
+latitudes and checked both operand orders. Of 160 explicit unions, matches
+on type, rounded area, and validity rose from 92 to 98. In the six changed
+cases, the type and area stayed the same and the result became valid,
+matching MySQL. The 82 direct union controls retained their type and area.
+
+Feeding both engines the same intermediate WKT still reproduces the
+explicit union mismatch in the equatorial fixture above, even when MySQL
+generated the directed differences. For the polar fixture
+`-72/-175/2`, MySQL produces two lobes from its own serialized differences
+and one lobe from Fsdb's, while Fsdb produces two lobes from either. The
+directed differences can agree on type and area while their vertex
+coordinates still affect a later union.
 
 MySQL delegates polygon symmetric difference to Boost Geometry, which
 unions the two intermediate multipolygons with their solver coordinates.
@@ -112,5 +141,14 @@ rings as traversed, so only the new ring survives. In reverse, the larger
 input ring is eligible for selection because its turns remain unfinalized,
 and Boost returns it alongside the new ring. A parity implementation
 needs to keep the intermediate coordinates and follow the union's turn
-traversal and ring selection.
+traversal and ring selection. The four raw equatorial cuts from Fsdb on
+macOS matched the pinned Linux Boost replay bit for bit. Two change when
+converted to degrees and back, as do 29 of the 144 cuts across the sample.
+Raw Fsdb cuts matched 141 of 144 native macOS Boost cuts on macOS. On
+ARM64 Linux, they matched 138 of 144 with GCC contraction enabled and 88
+of 144 with it disabled. The pinned MySQL behavior follows the replay
+with contraction disabled. A scratch build using separate multiplication
+and addition in the crossing solver and its azimuth calculation matched
+all 144 uncontracted Linux cuts. That comparison covered the raw solver
+output. Full SQL overlay parity also requires the union traversal.
 [Boost overlay traversal and ring selection](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/overlay/overlay.hpp)
