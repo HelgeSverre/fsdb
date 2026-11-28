@@ -1129,7 +1129,11 @@ let private geographicLatitudeOrderedSegment (start, endpoint) =
     let start, endpoint = if fst start > fst endpoint then endpoint, start else start, endpoint
     geographicPointRadians start, geographicPointRadians endpoint
 
-let private tryGeographicSegmentCrossingWith separateProducts referenceSystem first second =
+type private GeographicCrossingRounding =
+    | ContractedCrossing
+    | LinuxOverlayCrossing
+
+let private tryGeographicSegmentCrossingWith rounding referenceSystem first second =
     let firstStart, firstEnd = first
     let secondStart, secondEnd = second
     if geographicSegmentsShareEndpoint first second then None
@@ -1144,14 +1148,15 @@ let private tryGeographicSegmentCrossingWith separateProducts referenceSystem fi
            || side secondAzimuth c a * side secondAzimuth c b >= 0 then None
         else
             let multiplyAdd, firstBearing, secondBearing =
-                if separateProducts then
+                match rounding with
+                | LinuxOverlayCrossing ->
                     // A paired line/area turn can change ownership when the
                     // initial bearing or spherical guess rounds differently.
                     let bearing first last =
                         geographicSegmentAzimuthsUsing (geographicAzimuthsFromRadians separateSubtractProduct)
                             flattening first last |> fst
                     separateMultiplyAdd, bearing a b, bearing c d
-                else Math.FusedMultiplyAdd, firstAzimuth, secondAzimuth
+                | ContractedCrossing -> Math.FusedMultiplyAdd, firstAzimuth, secondAzimuth
             GeographicIntersection.intersect multiplyAdd flattening a b firstBearing c d secondBearing
             |> Option.filter (fun point ->
                 let inside start endpoint baseline =
@@ -1164,7 +1169,7 @@ let private tryGeographicSegmentCrossingWith separateProducts referenceSystem fi
                     directedDistance >= 0.0 && directedDistance <= length
                 inside a b firstAzimuth && inside c d secondAzimuth)
 
-let private tryGeographicSegmentCrossing = tryGeographicSegmentCrossingWith false
+let private tryGeographicSegmentCrossing = tryGeographicSegmentCrossingWith ContractedCrossing
 
 let private geographicSegmentsProperlyCross referenceSystem first second =
     tryGeographicSegmentCrossing referenceSystem first second |> Option.isSome
@@ -3174,8 +3179,9 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
         let distance = geographicPointDistance referenceSystem start
         // MySQL retains the solver's longitude in area overlay results,
         // even when a cut just beyond the antimeridian uses an extra turn.
+        let rounding = if usesPinnedLinuxGeographicOverlayRounding then LinuxOverlayCrossing else ContractedCrossing
         let crossing boundary =
-            tryGeographicSegmentCrossingWith usesPinnedLinuxGeographicOverlayRounding referenceSystem segment boundary
+            tryGeographicSegmentCrossingWith rounding referenceSystem segment boundary
             |> Option.filter (fun _ -> not (geographicTurnRejectsRoundedEndpoint referenceSystem segment boundary))
             |> Option.map (fun ((latitude, longitude) as radians) ->
                 { Degrees = latitude / mysqlRadians 1.0, longitude / mysqlRadians 1.0

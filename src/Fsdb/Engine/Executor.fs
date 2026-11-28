@@ -4441,6 +4441,14 @@ type private EvalContext =
       /// instead of a projection.
       Clause: Clause }
 
+type private CorrelatedTopOrderBindings =
+    { Source: CorrelatedProbeSource
+      Outer: EvalContext
+      Predicate: Expr
+      Terms: IndexOrderTerm list option
+      Pins: (PointEquality * Expr option) list
+      LeadingTimestampRange: bool }
+
 type private JoinEvaluationScope =
     { QueryOuter: EvalContext option
       LateralOuter: EvalContext option }
@@ -12989,9 +12997,9 @@ and private exactWhereIntegerColumn context column =
     |> Option.filter (fun (_, definition) -> isExactIntegerIndexType definition.Type)
 
 and private isExactWhereComparison context =
-    let rec signedOperand = function
-        | BinOp((Add | Sub), left, right) -> signedOperand left && signedOperand right
-        | Cast(operand, target) -> (signedIntegerTypeBounds target).IsSome && signedOperand operand
+    let rec exactIntegerOperand = function
+        | BinOp((Add | Sub), left, right) -> exactIntegerOperand left && exactIntegerOperand right
+        | Cast(operand, target) -> (signedIntegerTypeBounds target).IsSome && exactIntegerOperand operand
         | (Col _ | QualifiedCol _) as column ->
             tryColumnDefForExpr context column |> Option.exists (fun definition -> (integerTypeBounds definition.Type).IsSome)
         | LiteralValue(VUInt _) -> true
@@ -12999,8 +13007,8 @@ and private isExactWhereComparison context =
 
     function
     | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), left, right) ->
-        ((exactWhereIntegerColumn context left).IsSome && signedOperand right)
-        || ((exactWhereIntegerColumn context right).IsSome && signedOperand left)
+        ((exactWhereIntegerColumn context left).IsSome && exactIntegerOperand right)
+        || ((exactWhereIntegerColumn context right).IsSome && exactIntegerOperand left)
     | _ -> false
 
 and private elidedWhereTruth context where =
@@ -13013,10 +13021,14 @@ and private elidedWhereTruth context where =
     let contradictoryEqualities = function
         | Some(BinOp(And, _, _) as expression) ->
             let terms = conjuncts expression
-            let literalKey column = function
-                | LiteralValue(VInt value) -> exactWhereIntegerColumn context column |> Option.map (fun (position, _) -> position, bigint value)
-                | LiteralValue(VUInt value) -> exactWhereIntegerColumn context column |> Option.map (fun (position, _) -> position, bigint value)
-                | _ -> None
+            let literalKey column expression =
+                let literal =
+                    match expression with
+                    | LiteralValue(VInt value) -> Some(bigint value)
+                    | LiteralValue(VUInt value) -> Some(bigint value)
+                    | _ -> None
+                literal |> Option.bind (fun value ->
+                    exactWhereIntegerColumn context column |> Option.map (fun (position, _) -> position, value))
             let equalities =
                 terms |> List.choose (function
                     | BinOp(Eq, left, right) -> literalKey left right |> Option.orElseWith (fun () -> literalKey right left)
@@ -22667,7 +22679,7 @@ and private tryIndexOrder
                 tryIndexPrefixOrder StoredBounds IndexOrderBy store registry dbName tref select.Where orderedColumns Set.empty []
                 |> Option.bind planLookup))
 
-and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull (select: SelectStmt) (outer: EvalContext option) readOuter =
+and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull (select: SelectStmt) (outer: EvalContext option) readOuter : CorrelatedTopOrderBindings option =
     let directProjection (projection: Projection) =
         match projection.Expression with
         | Col _ | QualifiedCol _ | Star _ -> true
@@ -22832,10 +22844,6 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
             if not (List.forall safeClause clauses) then None
             else
                 let pins = clauses |> List.choose snd
-                let correlatedPins =
-                    pins |> List.choose (fun (pin, reference) ->
-                        reference |> Option.map (fun expression -> pin.Column.ToLowerInvariant(), expression))
-
                 let safeOrder (term: IndexOrderTerm) =
                     term.Transform.IsNone
                     && (innerColumn term.Column |> Option.exists (fun column ->
@@ -22853,8 +22861,14 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
                         terms |> Option.exists (function
                             | first :: _ -> hasCorrelatedTimestampRange first.Column
                             | [] -> false)
-                    if correlatedPins.IsEmpty && not timestampRange then None
-                    else Some(source, context, predicate, terms, pins, correlatedPins, timestampRange))
+                    if not timestampRange && not (pins |> List.exists (snd >> Option.isSome)) then None
+                    else
+                        Some { Source = source
+                               Outer = context
+                               Predicate = predicate
+                               Terms = terms
+                               Pins = pins
+                               LeadingTimestampRange = timestampRange })
 
 and private planCorrelatedTopOrder store registry dbName fromItem (select: SelectStmt) outer readOuter bindPredicate =
     let scopedSource =
@@ -22879,26 +22893,29 @@ and private planCorrelatedTopOrder store registry dbName fromItem (select: Selec
             // A NULL equality probe can only reject rows. Recheck the actual
             // predicate on nullable keys rather than scanning the projection.
             bindCorrelatedTopOrder registry tref columns projected.IsSome select outer readOuter
-            |> Option.bind (fun (source, context, predicate, terms, pins, references, timestampRange) ->
-                let bound = bindPredicate source context pins predicate
-                let pins = List.map fst pins
+            |> Option.bind (fun bindings ->
+                let bound = bindPredicate bindings.Source bindings.Outer bindings.Pins bindings.Predicate
+                let pins = List.map fst bindings.Pins
+                let references =
+                    bindings.Pins |> List.choose (fun (pin, reference) ->
+                        reference |> Option.map (fun expression -> pin.Column.ToLowerInvariant(), expression))
                 let plan tref predicate terms pins references =
                     { TableRef = tref
                       Predicate = predicate
                       Terms = terms
                       Pins = pins
                       References = references
-                      LeadingTimestampRange = timestampRange
+                      LeadingTimestampRange = bindings.LeadingTimestampRange
                       Projection = projected }
 
                 match projected with
-                | None -> Some(plan tref (Some bound) terms pins references)
+                | None -> Some(plan tref (Some bound) bindings.Terms pins references)
                 | Some(projection, _) ->
                     let physicalRef = projection.PhysicalTableRef
                     let qualifier = physicalRef.Alias |> Option.defaultValue physicalRef.Table
                     let column name = tryPhysicalProjectionColumn projection name |> Option.map _.Name
                     let rebaseColumn expr =
-                        tryCorrelatedInnerColumn source expr |> Option.bind column |> Option.map (fun name -> QualifiedCol(qualifier, name))
+                        tryCorrelatedInnerColumn bindings.Source expr |> Option.bind column |> Option.map (fun name -> QualifiedCol(qualifier, name))
 
                     let physicalConjuncts =
                         conjuncts bound
@@ -22912,10 +22929,10 @@ and private planCorrelatedTopOrder store registry dbName fromItem (select: Selec
                     let physicalReferences =
                         references |> List.choose (fun (name, expr) -> column name |> Option.map (fun physical -> physical.ToLowerInvariant(), expr))
                     let physicalTerms =
-                        terms
+                        bindings.Terms
                         |> Option.bind (List.map (fun term -> column term.Column |> Option.map (fun name -> { term with Column = name })) >> tryAllSome)
 
-                    if physicalReferences.IsEmpty && (not timestampRange || physicalTerms.IsNone) then None
+                    if physicalReferences.IsEmpty && (not bindings.LeadingTimestampRange || physicalTerms.IsNone) then None
                     else Some(plan physicalRef (combineConjuncts physicalConjuncts) physicalTerms physicalPins physicalReferences)))
 
 and private correlatedOrderAccesses store dbName (plan: CorrelatedTopOrderPlan) =
@@ -41516,6 +41533,12 @@ let private primaryDependencyKeys store (table: Table) =
 
 let private plainJoinQualifier (source: TableRef) = source.Alias |> Option.defaultValue source.Table
 
+type private PlainJoinPartners =
+    { Target: TableRef * Table
+      Partner: TableRef * Table
+      Join: Join
+      Predicate: Expr option }
+
 let private tryPlainJoinPartners store dbName statement =
     let operands from (join: Join) =
         match join.Table, join.Kind with
@@ -41526,19 +41549,21 @@ let private tryPlainJoinPartners store dbName statement =
             Option.map2 (fun left right -> left, right) (resolve from) (resolve right)
         | _ -> None
 
-    let choose ((left, leftTable), (right, rightTable)) (join: Join) isTarget =
+    let choose (leftSource, rightSource) (join: Join) isTarget =
+        let left, leftTable = leftSource
+        let right, rightTable = rightSource
         let leftTarget = isTarget left leftTable rightTable
         let rightTarget = isTarget right rightTable leftTable
         let separateTables = MutationTargets.physicalTableKey dbName left <> MutationTargets.physicalTableKey dbName right
         if not separateTables || equalsIgnoreCase (plainJoinQualifier left) (plainJoinQualifier right) then None
-        elif leftTarget && not rightTarget then Some((left, leftTable), (right, rightTable))
-        elif rightTarget && not leftTarget && join.Kind <> LeftJoin then Some((right, rightTable), (left, leftTable))
+        elif leftTarget && not rightTarget then Some(leftSource, rightSource)
+        elif rightTarget && not leftTarget && join.Kind <> LeftJoin then Some(rightSource, leftSource)
         else None
 
     let forJoin from join where isTarget =
         operands from join
         |> Option.bind (fun sources -> choose sources join isTarget)
-        |> Option.map (fun partners -> partners, join, where)
+        |> Option.map (fun (target, partner) -> { Target = target; Partner = partner; Join = join; Predicate = where })
 
     match statement with
     | Update ({ Ctes = []; From = from; Joins = [ join ]; OrderBy = []; Limit = None } as update) ->
@@ -41563,15 +41588,17 @@ let internal plainJoinReadClaims pendingConnection store registry dbName stateme
         match Storage.primaryKeyColumns table with
         | [ name ] -> resolveColumn table.Columns name |> Result.toOption |> Option.map (fun index -> name, index)
         | _ -> None
-    let plan (partners, (join: Join), where) =
-        let (targetRef, (target: Table)), (partnerRef, (partner: Table)) = partners
+    let plan (partners: PlainJoinPartners) =
+        let targetRef, target = partners.Target
+        let partnerRef, partner = partners.Partner
+        let join = partners.Join
         let columnTypes =
             [ targetRef, target; partnerRef, partner ]
             |> List.collect (fun (source, table) ->
                 table.Columns |> List.map (fun column -> mutationColumnKey (plainJoinQualifier source, column.Name), column.Type))
             |> Map.ofList
         let targetOwner, partnerOwner = plainJoinQualifier targetRef, plainJoinQualifier partnerRef
-        let predicates = optionalConjuncts where
+        let predicates = optionalConjuncts partners.Predicate
         let local owner =
             predicates
             |> List.filter (Expression.exists (function QualifiedCol(alias, _) -> equalsIgnoreCase owner alias | _ -> false))
