@@ -18,12 +18,14 @@ type private BoundColumn =
 type private ParameterTreatment =
     | DescribeOnly
     | CoerceNumeric
+    | RecognizeNumericStrings
     | InheritType
     | ValidateUnsignedInteger
     | AssignToColumn
 
 type private ParameterBinding =
     | CoerceNumericAs of ColumnMetadata
+    | NumericStringType of ColumnMetadata
     | InheritedType of ColumnMetadata
     | UnsignedIntegerOnly
     | ColumnAssignment
@@ -101,7 +103,7 @@ let private jsonMutationFunctions =
 let private integerFunctions =
     set [ "FROM_DAYS"; "MAKEDATE"; "PERIOD_ADD"; "PERIOD_DIFF" ]
 
-let private functionParameterMetadata (registry: Registry) (name: string) index =
+let private functionParameterMetadata (registry: Registry) (name: string) arity index =
     match Functions.lookupScalarParametersNormalized name registry with
     | Some parameters -> parameters |> List.tryItem index |> Option.orElse (Some generic)
     | None when Set.contains name floatingPointFunctions ->
@@ -134,6 +136,8 @@ let private functionParameterMetadata (registry: Registry) (name: string) index 
         Some signedInteger
     | None when name = "ST_BUFFER_STRATEGY" ->
         Some(if index = 0 then generic else floatingPoint)
+    | None when name = "ST_GEOHASH" && Functions.isUnmodifiedBuiltinScalar name registry ->
+        Some(if arity = 2 && index = 0 then geometry else signedInteger)
     | None when Set.contains name jsonMutationFunctions && index % 2 = 0 ->
         Some json
     | None when Set.contains name jsonFirstArgument && index = 0 ->
@@ -248,6 +252,7 @@ let private inferParameters
                 match treatment with
                 | DescribeOnly -> bindings.[index]
                 | CoerceNumeric -> Some(CoerceNumericAs metadata)
+                | RecognizeNumericStrings -> Some(NumericStringType metadata)
                 | InheritType -> Some(InheritedType metadata)
                 | ValidateUnsignedInteger -> Some UnsignedIntegerOnly
                 | AssignToColumn -> Some ColumnAssignment
@@ -348,10 +353,21 @@ let private inferParameters
             inferExpected (inferred left |> Option.orElse (Some floatingPoint)) right
         | FuncCall(name, values) ->
             let name = name.ToUpperInvariant()
+            let arity = List.length values
+            let geohash = Functions.tryGeohashResultType name registry |> Option.isSome
+            let treatment = if geohash then RecognizeNumericStrings else CoerceNumeric
+            let describe (metadata: ColumnMetadata) =
+                if geohash && metadata.TypeId = TypeVarString then
+                    let settings = store.ExecutionSettings
+                    let width = Charset.maxBytes settings.ConnectionCharset |> Option.defaultValue 4
+                    let collationId = Collation.idAndSortlen |> Map.tryFind settings.ConnectionCollation.Name |> Option.map (fst >> uint16)
+                    { metadata with ColumnLength = uint32 (65535 / width * width); CollationId = collationId }
+                else metadata
 
             values
             |> List.iteri (fun index value ->
-                inferConverted (functionParameterMetadata registry name index) value)
+                let metadata = functionParameterMetadata registry name arity index |> Option.map describe
+                inferExpression scope metadata treatment value)
         | Case(subject, branches, fallback) ->
             subject |> Option.iter inferUnknown
 
@@ -734,6 +750,10 @@ let internal bindParameters source store registry schema schemaChanged refreshVa
         |> List.map (fun (binding, expected, value) ->
             match binding with
             | Some UnsignedIntegerOnly -> value
+            | Some(NumericStringType metadata) ->
+                match value with
+                | VString text when family metadata <> Other -> convertedNumericString metadata text |> Option.defaultValue value
+                | _ -> value
             | _ -> convert binding expected value)
     let reprepare =
         schemaChanged
@@ -760,6 +780,7 @@ let internal bindParameters source store registry schema schemaChanged refreshVa
     let bind binding definition expected value =
         match binding with
         | Some ColumnAssignment -> Ok value
+        | Some(NumericStringType _) -> Ok value
         | Some UnsignedIntegerOnly ->
             match value with
             | VInt number when number >= 0L -> Ok value
@@ -816,7 +837,7 @@ let internal bindParameters source store registry schema schemaChanged refreshVa
                 | Ok value ->
                     let expression =
                         match binding, value, family expected with
-                        | Some(UnsignedIntegerOnly | ColumnAssignment), _, _ -> Lit value
+                        | Some(UnsignedIntegerOnly | ColumnAssignment | NumericStringType _), _, _ -> Lit value
                         | _, _, (CalendarDate | ClockTime | CalendarTime)
                             when value = VNull || family (metadataOfValue value) = family expected ->
                             Cast(Lit value, parameterType expected)

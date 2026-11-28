@@ -3517,6 +3517,42 @@ let tests =
                   Expect.equal (result.Flags &&& NotNullFlag) 0us "area accepts NULL"
               | other -> failtestf "expected one parameter, got %A" other
 
+          testCase "MySQL spatial geohash prepares both overloads and all decoders"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT ST_GeoHash(?,?), ST_GeoHash(?,?,?), ST_LatFromGeoHash(?), ST_LongFromGeoHash(?), ST_PointFromGeoHash(?,?)"
+              match prepareStatement sql with
+              | Result.Ok(statement, 9) ->
+                  let parameters, columns = preparedMetadata session statement 9
+                  Expect.equal (parameters |> List.map _.TypeId)
+                      [ TypeGeometry; TypeLongLong; TypeLongLong; TypeLongLong; TypeLongLong
+                        TypeVarString; TypeVarString; TypeVarString; TypeLongLong ]
+                      "the encoding overload chooses argument types by arity"
+                  Expect.equal (columns |> List.map (fun column -> column.Metadata.TypeId, column.Metadata.ColumnLength))
+                      [ TypeVarString, 400u; TypeVarString, 400u; TypeDouble, 23u; TypeDouble, 23u; TypeGeometry, UInt32.MaxValue ]
+                      "encoding returns a bounded string, while decoding returns coordinates or a geometry"
+              | other -> failtestf "expected nine parameters, got %A" other
+
+              let sql = "SELECT ST_GeoHash(?,?,?) AS hash"
+              match prepareStatementForSession session sql with
+              | Ok(ast, 3) ->
+                  let prepared = createPreparedStatement session sql ast 3
+                  let values length = [ VString "0.2foo"; VString "-25.0tail"; VString length ]
+                  match executePrepared session prepared (values "7junk") with
+                  | executed, ResultSet(_, [ [ Some "k581u8c" ] ]) ->
+                      match handle executed "SHOW WARNINGS" |> snd with
+                      | ResultSet(_, rows) ->
+                          Expect.equal (rows |> List.map List.last)
+                              [ Some "Truncated incorrect DOUBLE value: '0.2foo'"
+                                Some "Truncated incorrect DOUBLE value: '-25.0tail'"
+                                Some "Truncated incorrect INTEGER value: '7junk'" ]
+                              "the encoder reads the coordinate prefixes as doubles"
+                      | other -> failtestf "expected conversion warnings, got %A" other
+                  | _, other -> failtestf "expected a hash from coordinate prefixes, got %A" other
+                  TestSupport.Sql.expectError 3064 (executePrepared session prepared (values "7.7") |> snd)
+                      "a decimal parameter value fails the length type check"
+              | other -> failtestf "expected the encoder statement to prepare, got %A" other
+
           testCase "prepared comparison parameters retain their dynamic type"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

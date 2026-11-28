@@ -668,6 +668,11 @@ systems, including holes and polar rings. The audited result types and
 diagnostics match MySQL. Geographic rounding differences remain on
 some small polygons.
 
+[Spatial geohash functions](torture/findings/2026-11-28-spatial-geohash.md)
+encode longitude and latitude or points and decode hashes into coordinates
+or a point with an explicit SRID. Prepared statements distinguish the two
+encoding signatures.
+
 [`ST_Collect`](torture/findings/2026-11-27-spatial-collect.md) supports
 grouped and window aggregation, including `DISTINCT` spatial equality.
 Unions of geometry and bare NULL retain geometry values for downstream

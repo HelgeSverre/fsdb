@@ -5535,6 +5535,21 @@ let tests =
                   (run "CREATE TABLE point_envelope AS SELECT ST_MakeEnvelope(POINT(1,2),POINT(1,2)) AS shape")
                   "a point cannot be inserted into the inferred polygon column"
 
+          testCase "MySQL spatial geohash retains column types when materialized"
+          <| fun _ ->
+              let run = queryFixture [ "USE fsdb"; "SET NAMES latin1" ]
+              Expect.equal
+                  (run "CREATE TABLE geohashes AS SELECT ST_GeoHash(0,0,12) AS hash, ST_PointFromGeoHash('s',0) AS position, ST_LongFromGeoHash('s') AS longitude")
+                  (Affected 1UL) "materialize all return types"
+              match run "SELECT DATA_TYPE, IS_NULLABLE, CHARACTER_MAXIMUM_LENGTH, CHARACTER_SET_NAME, COLUMN_DEFAULT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fsdb' AND TABLE_NAME='geohashes' ORDER BY ORDINAL_POSITION" with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows
+                      [ [ Some "varchar"; Some "NO"; Some "100"; Some "latin1"; Some "" ]
+                        [ Some "point"; Some "NO"; None; None; None ]
+                        [ Some "double"; Some "NO"; None; None; Some "0" ] ]
+                      "schema uses the connection character set and preserves the geometry subtype"
+              | other -> failtestf "expected geohash column definitions, got %A" other
+
           testCase "materialized relations enforce the declared ST_MakeEnvelope subtype"
           <| fun _ ->
               let shape = "ST_MakeEnvelope(POINT(id,0),POINT(id,0))"

@@ -2203,6 +2203,37 @@ let tests =
                             | Fsdb.Functions.SqlError(actual, _) -> Expect.equal actual code "area diagnostic"
                             | error -> failtestf "expected SQL error %d, got %A" code error)
 
+                testCase "MySQL spatial geohash encodes and decodes coordinates and points"
+                <| fun _ ->
+                    let encode x y length = call "ST_GeoHash" [ VDouble x; VDouble y; VInt length ]
+                    Expect.equal (encode 0.0 0.0 8L) (VString "s0000000") "the midpoint goes into the upper half"
+                    Expect.equal (encode 22.5 22.5 100L) (VString "s") "an exact cell center stops encoding"
+                    Expect.equal (encode -180.0 -90.0 15L) (VString(String.replicate 15 "0")) "lower world boundary"
+                    Expect.equal (encode 180.0 90.0 15L) (VString(String.replicate 15 "z")) "upper world boundary"
+
+                    let point = call "ST_GeomFromText" [ VString "POINT(51.5 -0.1)"; VInt 4326L ]
+                    Expect.equal (call "ST_GeoHash" [ point; VInt 12L ]) (VString "gcpuvxr1jzfd") "encode a WGS 84 point"
+                    let hash = VString "U4PRUYDQQVJ"
+                    Expect.equal (call "ST_LatFromGeoHash" [ hash ]) (VDouble 57.64911) "case-insensitive latitude"
+                    Expect.equal (call "ST_LongFromGeoHash" [ hash ]) (VDouble 10.40744) "case-insensitive longitude"
+                    Expect.equal (call "ST_LongFromGeoHash" [ VString "0" ]) (VDouble -158.0) "round near the cell center"
+                    let decoded srid = call "ST_PointFromGeoHash" [ hash; srid ]
+                    Expect.equal (call "ST_AsText" [ decoded (VInt 4326L) ]) (VString "POINT(57.64911 10.40744)") "WGS 84 axis order"
+                    Expect.equal (call "ST_AsText" [ decoded (VString "3857") ]) (VString "POINT(10.40744 57.64911)") "projected SRID labels the point"
+                    Expect.equal (call "ST_LatFromGeoHash" [ VNull ]) VNull "NULL input"
+
+                    let projected = call "ST_GeomFromText" [ VString "POINT(1 1)"; VInt 3857L ]
+                    for name, args, code in
+                        [ "ST_GeoHash", [ VDouble 181.0; VDouble 91.0; VInt 0L ], 1690
+                          "ST_GeoHash", [ projected; VInt 6L ], 3682
+                          "ST_GeoHash", [ VInt 5L; VInt 5L ], 3064
+                          "ST_LatFromGeoHash", [ VInt 123L ], 3064
+                          "ST_LongFromGeoHash", [ VString "s " ], 1411
+                          "ST_PointFromGeoHash", [ VString "s"; VInt 4294967295L ], 3548 ] do
+                        Expect.throwsC (fun () -> call name args |> ignore) (function
+                            | Fsdb.Functions.SqlError(actual, _) -> Expect.equal actual code name
+                            | error -> failtestf "expected SQL error %d, got %A" code error)
+
                 testCase "ST_IsValid distinguishes simple planar geometry from invalid topology"
                 <| fun _ ->
                     let geometry text = call "ST_GeomFromText" [ VString text ]

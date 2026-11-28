@@ -8966,6 +8966,10 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | None when name.Contains('.', System.StringComparison.Ordinal) -> None
         | None -> Functions.lookupScalarMetadata (ctx.DbName + "." + name) ctx.Registry
 
+    let (|GeohashResult|_|) name =
+        Functions.tryGeohashResultType name ctx.Registry
+        |> Option.bind (fun ty -> Functions.lookupScalarMetadata name ctx.Registry |> Option.map (fun metadata -> ty, metadata))
+
     match expr with
     | Lit VNull -> None
     | Lit(VInt _) ->
@@ -9232,6 +9236,18 @@ and private metadataOfExprCore (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         geometry
         |> Option.map (fun metadata ->
             { metadata with ColumnLength = System.UInt32.MaxValue; Flags = BinaryFlag; Decimals = 0uy })
+    | FuncCall(GeohashResult(ty, metadata), arguments) ->
+        let flags =
+            if arguments |> List.forall (fun argument -> metadataOfExpr ctx argument |> Option.exists (hasMetadataFlag NotNullFlag)) then
+                metadata.Flags ||| NotNullFlag
+            else metadata.Flags
+        match ty with
+        | TVarchar length ->
+            let settings = ctx.Store.ExecutionSettings
+            let width = Charset.maxBytes settings.ConnectionCharset |> Option.defaultValue 4
+            Some { metadata with Flags = flags; ColumnLength = uint32 (length * width)
+                                 CollationId = metadataCollationId settings.ConnectionCollation.Name }
+        | _ -> Some { metadata with Flags = flags }
     | FuncCall(RegisteredScalarResult metadata, _) -> Some metadata
     | FuncCall(name, args) ->
         match name.ToUpperInvariant(), args with
@@ -11780,9 +11796,21 @@ and private describeQueryColumnDescriptorsInScope
                     contextFactory store registry dbName columnIndex qualifiers outer (probeRow columns)
                     |> withMergedColumns (mergedColumnExpressions scope.LogicalColumns)
 
+                let (|GeohashType|_|) functionName = Functions.tryGeohashResultType functionName registry
+
                 let columnForExpression name expression =
                     match expression, tryColumnDefForExpr context expression with
                     | _, Some column -> directProjection name column |> describeColumn
+                    | FuncCall(GeohashType ty, _), None ->
+                        let metadata = metadataOfExpr context expression
+                        let nullable = not (metadata |> Option.exists (hasMetadataFlag NotNullFlag))
+                        let defaultValue, collation =
+                            match ty with
+                            | TVarchar _ -> Some(DConst(VString "")), Some context.Store.ExecutionSettings.ConnectionCollation.Name
+                            | TDouble _ -> Some(DConst(VInt 0L)), None
+                            | _ -> None, None
+                        let column = computedColumn name ty nullable (if nullable then None else defaultValue) collation
+                        { describeColumn column with WireMetadata = metadata }
                     | FuncCall(functionName, _), None when equalsIgnoreCase functionName "ST_MAKEENVELOPE"
                                                           && Functions.isUnmodifiedBuiltinScalar functionName registry ->
                         { describeColumn (computedColumn name (TGeometry Polygon) true None None) with
@@ -31516,8 +31544,9 @@ let private statementExpressionMetadata includeGeometry store registry schema st
         |> Option.map (List.map (Option.filter (fun metadata ->
             metadata.TypeId = TypeNewDecimal || metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat || metadata.TypeId = TypeLongLong
             || (isIntegerMetadata metadata && hasMetadataFlag BinaryFlag metadata)
+            || (includeGeometry && metadata.TypeId = TypeVarString && metadata.Decimals = 31uy && metadata.CollationId.IsSome)
             // Explicit GEOMETRY function descriptors can omit the stored-column BLOB flag.
-            || (includeGeometry && metadata.TypeId = TypeGeometry && metadata.Flags = BinaryFlag))))
+            || (includeGeometry && metadata.TypeId = TypeGeometry && (metadata.Flags &&& ~~~NotNullFlag) = BinaryFlag))))
     | Union(first, rest, _, _, _) ->
         first :: (rest |> List.map snd)
         |> List.map (fun select ->
@@ -34934,7 +34963,15 @@ let rec private executeAsWithViewSources
                 | ResultSet(names, _), metadata, rows, collations ->
                     let columns = deriveColumns names collations metadata
                     let columns =
-                        if metadata |> List.exists (fun column -> column.TypeId = TypeGeometry) then
+                        let geohashProjections =
+                            match query with
+                            | Select select when sameLength select.Projections columns ->
+                                select.Projections |> List.map (fun projection ->
+                                    match projection.Expression with
+                                    | FuncCall(name, _) -> Functions.tryGeohashResultType name registry |> Option.isSome
+                                    | _ -> false)
+                            | _ -> List.replicate columns.Length false
+                        if List.contains true geohashProjections || (metadata |> List.exists (fun column -> column.TypeId = TypeGeometry)) then
                             let body =
                                 match query with
                                 | Select select -> Some(PlainSelect select)
@@ -34942,7 +34979,9 @@ let rec private executeAsWithViewSources
                                 | _ -> None
                             match body |> Option.bind (QueryBody >> describeQueryColumns store registry dbName) with
                             | Some declared when sameLength columns declared ->
-                                List.map2 withDeclaredGeometryType columns declared
+                                List.map3 (fun geohash column definition ->
+                                    if geohash then definition
+                                    else withDeclaredGeometryType column definition) geohashProjections columns declared
                             | _ -> columns
                         else columns
                     let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store

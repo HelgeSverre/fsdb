@@ -3759,12 +3759,12 @@ let private spaceFn: Scalar =
         if k > Limits.maxAllowedPacket then VNull else VString(String(' ', k))
     | _ -> VNull
 
+let private integerArgumentPrefix = Regex(@"^[\t-\r ]*[+-]?[0-9]+", RegexOptions.CultureInvariant)
+
 /// CHAR() assembles each integer as its shortest big-endian byte sequence.
 /// NULL arguments contribute no bytes.
-let private charIntegerPrefix = Regex(@"^[\t-\r ]*[+-]?[0-9]+", RegexOptions.CultureInvariant)
-
 let private charTextWord (text: string) (diagnostic: string) =
-    let matched = charIntegerPrefix.Match text
+    let matched = integerArgumentPrefix.Match text
     let prefix = matched.Value.Trim()
     let trailing = matched.Success && not (String.IsNullOrWhiteSpace(text.Substring matched.Length))
     let word, overflow =
@@ -6394,6 +6394,197 @@ let private pointConstructorFn: Scalar = function
         else VGeometry { Srid = 0; Shape = GPoint(first, second) }
     | _ -> nativeParameterCountError "point"
 
+let private geohashAlphabet = "0123456789bcdefghjkmnpqrstuvwxyz"
+let private maxGeohashLength = 100
+
+let private encodeGeohash longitude latitude (maxLength: int) =
+    let mutable west, east = -180.0, 180.0
+    let mutable south, north = -90.0, 90.0
+    let mutable longitudeBit = true
+    let mutable centered = false
+    let hash = StringBuilder(maxLength)
+    let halve target (lower, upper) =
+        let middle = (lower + upper) / 2.0
+        if target < middle then struct (lower, middle, 0)
+        else struct (middle, upper, 1)
+
+    while hash.Length < maxLength && not centered do
+        let mutable digit = 0
+        for _ in 1 .. 5 do
+            let bit =
+                if longitudeBit then
+                    let struct (lower, upper, value) = halve longitude (west, east)
+                    west <- lower
+                    east <- upper
+                    value
+                else
+                    let struct (lower, upper, value) = halve latitude (south, north)
+                    south <- lower
+                    north <- upper
+                    value
+            digit <- (digit <<< 1) ||| bit
+            longitudeBit <- not longitudeBit
+        hash.Append(geohashAlphabet.[digit]) |> ignore
+        centered <- longitude = (west + east) / 2.0 && latitude = (south + north) / 2.0
+    hash.ToString()
+
+let private roundGeohashCenter center accuracy =
+    let mutable width = 2.0 * accuracy
+    let mutable digits = 0
+    while width <= 0.1 && digits <= 15 do
+        digits <- digits + 1
+        width <- width * 10.0
+
+    let lower, upper = center - accuracy, center + accuracy
+    let outside value = value < lower || value > upper
+    let mutable rounded = roundDoubleAt center digits
+    while outside rounded && digits < 15 do
+        digits <- digits + 1
+        rounded <- roundDoubleAt center digits
+    (if outside rounded then center else rounded) + 0.0
+
+let private decodeGeohash (hash: string) =
+    let mutable longitude, latitude = 0.0, 0.0
+    let mutable longitudeAccuracy, latitudeAccuracy = 180.0, 90.0
+    let mutable longitudeBit = true
+    let mutable valid = hash.Length > 0
+    let mutable position = 0
+    while valid && position < hash.Length && longitudeAccuracy > 0.0 && latitudeAccuracy > 0.0 do
+        let c = hash.[position]
+        let digit = if Char.IsAscii c then geohashAlphabet.IndexOf(Char.ToLowerInvariant c) else -1
+        valid <- digit >= 0
+        if valid then
+            for bit in 4 .. -1 .. 0 do
+                let direction = if digit &&& (1 <<< bit) = 0 then -1.0 else 1.0
+                if longitudeBit then
+                    longitudeAccuracy <- longitudeAccuracy / 2.0
+                    longitude <- longitude + direction * longitudeAccuracy
+                else
+                    latitudeAccuracy <- latitudeAccuracy / 2.0
+                    latitude <- latitude + direction * latitudeAccuracy
+                longitudeBit <- not longitudeBit
+            position <- position + 1
+
+    if valid then Some(roundGeohashCenter longitude longitudeAccuracy, roundGeohashCenter latitude latitudeAccuracy)
+    else None
+
+let private geohashArgumentTypeError name argument =
+    raise (SqlError(3064, $"Incorrect type for argument {argument} in function {name}."))
+
+let private geohashRangeError name argument =
+    raise (SqlError(1690, $"{argument} value is out of range in '{name}'"))
+
+let private isGeohashText = function
+    | VString _ -> true
+    | VEncodedString(charset, _) -> charset <> "binary"
+    | _ -> false
+
+let private requireGeohashType name argument accepts value =
+    if value <> VNull && not (accepts value) then geohashArgumentTypeError name argument
+
+let private geohashText name = function
+    | VString text -> text
+    | VEncodedString(charset, bytes) when charset <> "binary" -> Charset.decodeBytes charset bytes
+    | _ -> geohashArgumentTypeError name "geohash"
+
+let private isGeohashInteger = function
+    | VInt _ | VUInt _ -> true
+    | value -> isGeohashText value
+
+let private geohashInteger name argument = function
+    | VInt number -> number
+    | VUInt number -> int64 number
+    | value when isGeohashText value ->
+        let text = req value
+        let matched = integerArgumentPrefix.Match text
+        match Int64.TryParse(matched.Value, NumberStyles.Integer, CultureInfo.InvariantCulture) with
+        | true, number ->
+            if not (String.IsNullOrWhiteSpace(text.Substring matched.Length)) then Diagnostics.numericConversion "INTEGER" text
+            number
+        | _ ->
+            Diagnostics.numericConversion "INTEGER" text
+            if not matched.Success then 0L
+            elif matched.Value.TrimStart().StartsWith('-') then Int64.MinValue
+            else Int64.MaxValue
+    | _ -> geohashArgumentTypeError name argument
+
+let private geometryGeohashFn: Scalar =
+    let name = "st_geohash"
+    let encode longitude latitude length =
+        if not (Double.IsFinite longitude) || longitude < -180.0 || longitude > 180.0 then geohashRangeError name "longitude"
+        if not (Double.IsFinite latitude) || latitude < -90.0 || latitude > 90.0 then geohashRangeError name "latitude"
+        if length < 1L || length > int64 maxGeohashLength then geohashRangeError name "max geohash length"
+        VString(encodeGeohash longitude latitude (int length))
+
+    let isCoordinate = function
+        | VInt _ | VUInt _ | VDecimal _ | VDouble _ -> true
+        | value -> isGeohashText value
+
+    let isGeometry = function VGeometry _ | VBytes _ | VBinaryLiteral _ -> true | _ -> false
+    let readLength = function VNull -> 0L | value -> geohashInteger name "geohash max length" value
+
+    function
+    | [ value; length ] ->
+        requireGeohashType name "point" isGeometry value
+        requireGeohashType name "geohash max length" isGeohashInteger length
+        let parsedLength = readLength length
+        if value = VNull || length = VNull then VNull
+        else
+            let geometry =
+                match value with
+                | VGeometry geometry -> geometry
+                | VBytes bytes | VBinaryLiteral bytes ->
+                    tryGeometryFromMySqlBinary bytes
+                    |> Option.map GeometryCoordinates.swapMySqlGeographicAxes
+                    |> Option.defaultWith (fun () -> raise (SqlError(3037, $"Invalid GIS data provided to function {name}.")))
+                | _ -> geohashArgumentTypeError name "point"
+
+            match geometry.Shape with
+            | GPoint(x, y) ->
+                spatialReferenceSystem name geometry.Srid |> ignore
+                match geometry.Srid with
+                | 0 -> encode x y parsedLength
+                | 4326 -> encode y x parsedLength
+                | _ -> raise (SqlError(3682, $"Function {name} is only defined for SRID 0 and SRID 4326."))
+            | _ -> geohashArgumentTypeError name "point"
+    | [ longitude; latitude; length ] ->
+        requireGeohashType name "longitude" isCoordinate longitude
+        requireGeohashType name "latitude" isCoordinate latitude
+        requireGeohashType name "geohash max length" isGeohashInteger length
+        let longitudeValue = geometryNumericArgument longitude
+        let latitudeValue = geometryNumericArgument latitude
+        let lengthValue = readLength length
+        if longitude = VNull || latitude = VNull || length = VNull then VNull
+        else encode longitudeValue latitudeValue lengthValue
+    | _ -> nativeParameterCountError name
+
+let private geohashCoordinates name hash =
+    let text = geohashText name hash
+    decodeGeohash text
+    |> Option.defaultWith (fun () ->
+        let nul = text.IndexOf('\u0000')
+        let display = if nul < 0 then text else text.Substring(0, nul)
+        raise (SqlError(1411, $"Incorrect geohash value: '{display}' for function {name}")))
+
+let private geohashCoordinateFn name select: Scalar = function
+    | [ VNull ] -> VNull
+    | [ hash ] -> geohashCoordinates name hash |> select |> VDouble
+    | _ -> nativeParameterCountError name
+
+let private pointFromGeohashFn: Scalar = function
+    | [ hash; srid ] ->
+        let name = "st_pointfromgeohash"
+        requireGeohashType name "geohash" isGeohashText hash
+        let sridValue = if srid = VNull then 0L else geohashInteger name "SRID" srid
+        if sridValue < 0L || sridValue > int64 UInt32.MaxValue then geohashRangeError name "SRID"
+        if hash = VNull || srid = VNull then VNull
+        else
+            let referenceSystem = spatialReferenceSystem name (int sridValue)
+            let longitude, latitude = geohashCoordinates name hash
+            let point = if referenceSystem.SemiMajorAxis.IsSome then GPoint(latitude, longitude) else GPoint(longitude, latitude)
+            VGeometry { Srid = referenceSystem.Srid; Shape = point }
+    | _ -> nativeParameterCountError "st_pointfromgeohash"
+
 type private PointCoordinate = XCoordinate | YCoordinate | LatitudeCoordinate | LongitudeCoordinate
 
 let private pointCoordinateFunctions =
@@ -7256,6 +7447,9 @@ let private registerSpatialBuiltins registry =
     let geometryParameter = { geometry with CollationId = Some Collation.binaryId }
     let spatialDouble =
         { ColumnWire.parameterMetadataOfType(TDouble false) with CollationId = Some Collation.binaryId }
+    let geohashTextParameter = ColumnWire.parameterMetadataOfType(TVarchar 16383)
+    let geohashSridParameter = ColumnWire.parameterMetadataOfType(TBigInt false)
+    let geohashResult = { geohashTextParameter with ColumnLength = uint32 (maxGeohashLength * 4) }
     let validityResult =
         { ColumnWire.parameterMetadataOfType(TBigInt false) with ColumnLength = 1u; CollationId = Some Collation.binaryId }
     let registerPointCoordinates current =
@@ -7267,6 +7461,13 @@ let private registerSpatialBuiltins registry =
     |> registerGeometryConstructors geometryFromTextFn wktGeometryConstructors
     |> registerGeometryConstructors geometryFromWkbFn wkbGeometryConstructors
     |> registerScalarWithSignature "POINT" [ spatialDouble; spatialDouble ] pointResult pointConstructorFn
+    |> registerScalarWithMetadata "ST_GEOHASH" geohashResult geometryGeohashFn
+    |> registerScalarWithSignature "ST_LATFROMGEOHASH" [ geohashTextParameter ] spatialDouble (geohashCoordinateFn "ST_LATFROMGEOHASH" snd)
+    |> registerResultCollation "ST_LATFROMGEOHASH" (FixedCollation("binary", 5))
+    |> registerScalarWithSignature "ST_LONGFROMGEOHASH" [ geohashTextParameter ] spatialDouble (geohashCoordinateFn "ST_LONGFROMGEOHASH" fst)
+    |> registerResultCollation "ST_LONGFROMGEOHASH" (FixedCollation("binary", 5))
+    |> registerScalarWithSignature "ST_POINTFROMGEOHASH" [ geohashTextParameter; geohashSridParameter ] pointResult pointFromGeohashFn
+    |> registerResultCollation "ST_POINTFROMGEOHASH" binaryResult
     |> registerScalar "ST_ASTEXT" (geometryToTextFn "ST_AsText")
     |> registerScalar "ST_ASWKT" (geometryToTextFn "ST_AsWKT")
     |> registerScalar "ASTEXT" (geometryToTextFn "AsText")
@@ -7645,3 +7846,10 @@ let internal isUnmodifiedBuiltinScalar (name: string) (registry: Registry) =
     match lookup name builtins, lookup name registry with
     | Some builtin, Some current -> obj.ReferenceEquals(builtin, current)
     | _ -> false
+
+let internal tryGeohashResultType (name: string) registry =
+    match name.ToUpperInvariant() with
+    | "ST_GEOHASH" when isUnmodifiedBuiltinScalar name registry -> Some(TVarchar maxGeohashLength)
+    | "ST_POINTFROMGEOHASH" when isUnmodifiedBuiltinScalar name registry -> Some(TGeometry Point)
+    | "ST_LATFROMGEOHASH" | "ST_LONGFROMGEOHASH" when isUnmodifiedBuiltinScalar name registry -> Some(TDouble false)
+    | _ -> None
