@@ -32,6 +32,7 @@ let private equalityPreference estimate =
     | IndexRange, _ -> 3
 
 let private equalityScanFloor = 64
+let internal preferScanForSmallSecondaryRead tableRows = tableRows < equalityScanFloor
 let private hashJoinFloor = 64
 let private intersectionProbeFloor = 256
 let private intersectionReduction = 8L

@@ -126,3 +126,19 @@ both a covering projection and a projection including `payload` named
 the new key in static `EXPLAIN`. The covering read returned 1412, while
 `EXPLAIN ANALYZE` showed that the noncovering read used a clustered scan and
 returned the row. The same distinction held for missing keys in the fixture.
+
+### Secondary index lifetimes in consistent SELECTs
+
+The read view now tracks index identities separately from names. Renaming
+an inherited key preserves its pinned data. Reusing the old name for a
+different key creates a separate identity. Supported single-source SELECT
+plans check visibility when they select a B-tree for an equality probe,
+range, ordered read, or forced covering scan. A qualifying clustered scan
+can still return an old row, including when a newly created key exists.
+
+The pinned MySQL comparison includes matching and missing keys, covering
+and noncovering projections, forced and ignored keys, no-scan conditions,
+and both a 24-row table and a 256-row table. Planning data for a new key
+is built from pinned rows and reused for later reads of that definition.
+Broader join and expression index opens, locking reads, mutation, and
+prepared or EXPLAIN paths remain open.

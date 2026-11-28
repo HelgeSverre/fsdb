@@ -16779,6 +16779,38 @@ let tests =
               let reader = run reader "COMMIT" (Affected 0UL)
               run reader "SELECT n FROM after_rename WHERE id=1" (ResultSet([ "n" ], [ [ Some "20" ] ])) |> ignore
 
+          testCase "repeatable reads distinguish a newly opened secondary index from an inherited index"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let writer = run (create 1 store) "CREATE TABLE t(id INT PRIMARY KEY, k INT, payload INT, KEY old_key(k))" (Affected 0UL)
+              let writer = run writer "INSERT INTO t VALUES(1,10,100),(2,20,200)" (Affected 2UL)
+              let reader = run (create 2 store) "START TRANSACTION WITH CONSISTENT SNAPSHOT" (Affected 0UL)
+              let writer = run writer "UPDATE t SET payload=300 WHERE id=1" (Affected 1UL)
+              run writer "ALTER TABLE t RENAME INDEX old_key TO inherited, ADD INDEX old_key(payload), ALGORITHM=INPLACE"
+                  (Affected 0UL) |> ignore
+              let unavailable = Err(1412, "Table definition has changed, please retry transaction")
+              let reader = run reader "SELECT id FROM t FORCE INDEX(old_key) WHERE payload=999" unavailable
+              let reader = run reader "SELECT id FROM t FORCE INDEX(old_key) WHERE payload=100" unavailable
+              let reader = run reader "SELECT id FROM t FORCE INDEX(old_key) WHERE FALSE" (ResultSet([ "id" ], []))
+              let reader = run reader "SELECT id FROM t FORCE INDEX(old_key) ORDER BY payload LIMIT 0" (ResultSet([ "id" ], []))
+              let reader = run reader "SELECT id FROM t FORCE INDEX(old_key) ORDER BY payload LIMIT 0 OFFSET 1" unavailable
+              let reader = run reader "SELECT COUNT(*) FROM t FORCE INDEX(old_key)" unavailable
+              let reader = run reader "SELECT EXISTS(SELECT 1 FROM t FORCE INDEX(old_key) WHERE payload=999)" unavailable
+              let reader = run reader "SELECT k FROM t FORCE INDEX(old_key) ORDER BY id" (ResultSet([ "k" ], [ [ Some "10" ]; [ Some "20" ] ]))
+              let reader = run reader "SELECT payload FROM t FORCE INDEX(inherited) WHERE k=10" (ResultSet([ "payload" ], [ [ Some "100" ] ]))
+              let reader = run reader "SELECT payload FROM t IGNORE INDEX(old_key) WHERE id=1" (ResultSet([ "payload" ], [ [ Some "100" ] ]))
+              let reader = run reader "COMMIT" (Affected 0UL)
+              let reader = run reader "SELECT payload FROM t WHERE id=1" (ResultSet([ "payload" ], [ [ Some "300" ] ]))
+              let reader = run reader "START TRANSACTION WITH CONSISTENT SNAPSHOT" (Affected 0UL)
+              run writer "ALTER TABLE t ALTER INDEX inherited INVISIBLE" (Affected 0UL) |> ignore
+              let reader = run reader "SELECT payload FROM t FORCE INDEX(inherited) WHERE k=10"
+                               (Err(1176, "Key 'inherited' doesn't exist in table 't'"))
+              run reader "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "transaction access modes, chaining, and SET CHARACTER SET are enforced"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

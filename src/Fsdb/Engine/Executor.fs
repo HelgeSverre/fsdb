@@ -8371,7 +8371,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | Exists select ->
         let ctx = expressionSubqueryContext ctx select
         let indexed =
-            if Set.isEmpty ctx.Store.UnavailableReadLayouts then
+            if Set.isEmpty ctx.Store.UnavailableReadLayouts && not ctx.Store.HasUnavailableReadIndexes then
                 tryCorrelatedExists ctx select |> Option.orElseWith (fun () -> tryDecorrelatedExists ctx select)
             else None
         match indexed with
@@ -8388,7 +8388,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | Subquery select ->
         let ctx = expressionSubqueryContext ctx select
         let shortcut =
-            if Set.isEmpty ctx.Store.UnavailableReadLayouts then
+            if Set.isEmpty ctx.Store.UnavailableReadLayouts && not ctx.Store.HasUnavailableReadIndexes then
                 tryMissingCorrelatedAggregateArgument ctx select
                 |> Option.orElseWith (fun () -> tryCorrelatedCount ctx select)
                 |> Option.orElseWith (fun () -> tryFoldCorrelatedRangeAggregate ctx select)
@@ -10325,7 +10325,8 @@ and private runExpressionSubquery
 
     match memo.TryGetValue cacheKey with
     // A metadata-only result must not satisfy a later physical read of a changed table.
-    | _ when (metadataProbe.Value || planningProbe.Value) && not (Set.isEmpty ctx.Store.UnavailableReadLayouts) -> execute (Some ctx)
+    | _ when (metadataProbe.Value || planningProbe.Value)
+             && (ctx.Store.HasUnavailableReadIndexes || not (Set.isEmpty ctx.Store.UnavailableReadLayouts)) -> execute (Some ctx)
     | true, MemoizedSubquery result -> result
     | true, UnmemoizedSubquery -> execute (Some ctx)
     | _ when isStatementStableSelect ctx.Store ctx.Registry ctx.DbName emptySubqueryScope cacheKey ->
@@ -11348,7 +11349,7 @@ and private validateUnindexedRelationHints tableRef tableName =
 
 and private validateTableIndexHints (tableRef: TableRef) (table: Table) : Result<unit, QueryResult> =
     let known name =
-        (table.Indexes |> List.exists (fun index -> equalsIgnoreCase index.Name name))
+        (table.Indexes |> List.exists (fun index -> index.Visible && equalsIgnoreCase index.Name name))
         || (equalsIgnoreCase name "PRIMARY" && not (Storage.primaryKeyColumns table).IsEmpty)
 
     validateIndexHintNames tableRef (tableRef.Alias |> Option.defaultValue table.OriginalName) known
@@ -17329,6 +17330,51 @@ and private joinSortInput store registry dbName (select: SelectStmt) whereExpres
 
             if List.exists requiresIntermediate keys then IntermediateRows else StoredRows
 
+and private snapshotIndexReadError store registry dbName (table: Table) tref (select: SelectStmt) outer names =
+    let unavailable = names |> List.filter (Storage.readIndexUnavailable table)
+    if unavailable.IsEmpty || metadataProbe.Value || planningProbe.Value
+       || (not select.CalculateFoundRows && zeroLimitWithoutOffset select.Limit select.Offset) then None
+    else
+        let context = contextFactory store registry dbName Map.empty Map.empty None [||]
+        let impossible = select.Where |> Option.exists (fun predicate ->
+            not ((possibleConditionTruths context predicate).Contains(Some true)))
+        let impossibleIndexRange =
+            let bounds = lazy (rangeLookupBounds BareOrQualifiedColumn store registry table tref select.Where)
+            unavailable |> List.forall (fun name ->
+                table.Indexes
+                |> List.tryFind (fun index -> equalsIgnoreCase name index.Name)
+                |> Option.bind (fun index -> List.tryHead index.KeyColumns)
+                |> Option.exists (fun first ->
+                    first.Transform.IsNone && isDirectNumericIndexColumn table (first.Name, None)
+                    && (bounds.Value |> List.exists (fun bound ->
+                        match bound.Lower, bound.Upper with
+                        | Some(VInt lower, lowerInclusive), Some(VInt upper, upperInclusive)
+                            when equalsIgnoreCase bound.Column first.Name ->
+                            lower > upper || (lower = upper && not (lowerInclusive && upperInclusive))
+                        | _ -> false))))
+        if impossible || impossibleIndexRange then None
+        else
+            match describeQueryColumnDescriptorsInScope store registry dbName (QueryBody(PlainSelect select)) outer (fun _ -> Ok()) with
+            | Error(InvalidDescription error) -> Some error
+            | _ -> Some(Err(1412, "Table definition has changed, please retry transaction"))
+
+and private snapshotIndexCovers (table: Table) (select: SelectStmt) name =
+    let indexed =
+        table.Indexes |> List.tryFind (fun index -> equalsIgnoreCase index.Name name)
+        |> Option.map (fun index -> index.KeyColumns |> List.choose (fun part ->
+            if part.PrefixLength.IsNone && part.Transform.IsNone then Some part.Name else None))
+        |> Option.defaultValue []
+    let covered = (primaryKeyColumns table @ indexed) |> List.map (fun name -> name.ToLowerInvariant()) |> Set.ofList
+    let expressions =
+        (select.Projections |> List.map _.Expression) @ Option.toList select.Where
+        @ (select.OrderBy |> List.map fst) @ select.GroupBy @ Option.toList select.Having
+    expressions |> List.forall (function
+        | NamedFunction "COUNT" [ Star None ] -> true
+        | expression -> not (Expression.exists (function
+            | Col name | QualifiedCol(_, name) -> not (Set.contains (name.ToLowerInvariant()) covered)
+            | Star _ -> table.Columns |> List.exists (fun column -> not (Set.contains (column.Name.ToLowerInvariant()) covered))
+            | _ -> false) expression))
+
 and private runUnlockedSelectStmt
     output
     (store: Store)
@@ -17512,18 +17558,39 @@ and private runUnlockedSelectStmt
             match tryVirtualScan tref with
             | Some(columns, rows) -> runArbitrary columns rows None select
             | None ->
-                match tryGroupIndexOrder store registry dbName tref select with
-                | Some plan -> runResolved (ContiguousGroupRows plan.Groups) plan.Columns plan.Rows None select
+                let physicalTable = physicalFastPathTable store dbName tref
+                let hasUnavailableIndexes = physicalTable |> Option.exists (fun table -> not table.UnavailableReadIndexes.IsEmpty)
+                let forced scope name =
+                    indexHintsFor scope tref |> List.exists (fun hint ->
+                        hint.Kind = ForceIndex && hint.Indexes |> List.exists (equalsIgnoreCase name))
+                let withIndexes names read =
+                    let error =
+                        if not hasUnavailableIndexes then None
+                        else physicalTable |> Option.bind (fun table -> snapshotIndexReadError store registry dbName table tref select outer names)
+                    match error with
+                    | Some error -> error, [], []
+                    | None -> read ()
+                let viableOrder scope (plan: IndexOrderPlan) =
+                    physicalTable |> Option.forall (fun table ->
+                        not (Storage.readIndexUnavailable table plan.KeyName)
+                        || forced scope plan.KeyName || snapshotIndexCovers table select plan.KeyName)
+                match tryGroupIndexOrder store registry dbName tref select |> Option.filter (viableOrder IndexGroupBy) with
+                | Some plan -> withIndexes [ plan.KeyName ] (fun () -> runResolved (ContiguousGroupRows plan.Groups) plan.Columns plan.Rows None select)
                 | None ->
-                    match tryIndexedSemiJoin store registry dbName select tref with
+                    match (if hasUnavailableIndexes then Ok None else tryIndexedSemiJoin store registry dbName select tref) with
                     | Error error -> error, [], []
                     | Ok(Some(columns, rows, narrowed)) -> runArbitrary columns rows None narrowed
                     | Ok None ->
-                        let physicalTable = physicalFastPathTable store dbName tref
                         let physicalCandidates =
                             physicalTable
                             |> Option.map (fun table ->
-                                physicalAccessCandidatesInTableWith CostedRead store registry table tref select.Where)
+                                physicalAccessCandidatesInTableWith CostedRead store registry table tref select.Where
+                                |> List.filter (fun access ->
+                                    table.UnavailableReadIndexes.IsEmpty
+                                    || not (QueryPlanner.preferScanForSmallSecondaryRead table.RowsArray.Count)
+                                    || (physicalAccessKeyNames access |> List.forall (fun name ->
+                                        not (Storage.readIndexUnavailable table name) || forced IndexJoin name
+                                        || (match access with IndexMergeAccess _ -> false | _ -> snapshotIndexCovers table select name)))))
                             |> Option.defaultValue []
 
                         let coveredSelect access =
@@ -17546,48 +17613,63 @@ and private runUnlockedSelectStmt
                             physicalAccessRows access
 
                         let orderedPrefix =
-                            tryCorrelatedTopOrder store registry dbName fromItem select outer
+                            (if hasUnavailableIndexes then None else tryCorrelatedTopOrder store registry dbName fromItem select outer)
                             |> Option.map (fun (columns, rows, ordered) ->
-                                columns, rows, (if ordered then { select with OrderBy = [] } else select))
+                                [], columns, rows, (if ordered then { select with OrderBy = [] } else select))
                             |> Option.orElseWith (fun () ->
                                 tryEqualityPrefixOrder store registry dbName tref select equalityAccess
-                                |> Option.map (fun plan ->
+                                |> Option.filter (viableOrder IndexOrderBy) |> Option.map (fun plan ->
                                     let covered = coveredSelect (equalityAccess |> Option.map EqualityAccess)
-                                    plan.Columns, plan.Rows, { covered with OrderBy = [] }))
+                                    [ plan.KeyName ], plan.Columns, plan.Rows, { covered with OrderBy = [] }))
 
                         match orderedPrefix with
-                        | Some(columns, rows, planned) ->
-                            runArbitrary columns rows None planned
+                        | Some(names, columns, rows, planned) ->
+                            withIndexes names (fun () -> runArbitrary columns rows None planned)
                         | None ->
-                            let indexOrder = tryIndexOrder store registry dbName tref select
+                            let indexOrder = tryIndexOrder store registry dbName tref select |> Option.filter (viableOrder IndexOrderBy)
                             let earlyPhysicalAccess = choosePhysicalAccessBeforeIndexOrder indexOrder physicalCandidates
 
-                            match earlyPhysicalAccess |> Option.map physicalRowsWithWarnings with
-                            | Some(columns, rows) -> runArbitrary columns (rows |> Seq.map snd) None (coveredSelect earlyPhysicalAccess)
+                            match earlyPhysicalAccess with
+                            | Some access -> withIndexes (physicalAccessKeyNames access) (fun () ->
+                                let columns, rows = physicalRowsWithWarnings access
+                                runArbitrary columns (rows |> Seq.map snd) None (coveredSelect earlyPhysicalAccess))
                             | None ->
                                 let projectedLookup =
-                                    tryCorrelatedSourceLookup store registry dbName fromItem select outer
-                                    |> Option.orElseWith (fun () ->
-                                        tryProjectedPhysicalLiteralLookup store registry dbName fromItem select.Where
-                                        |> Option.map (fun (columns, rows) -> columns, rows, select))
+                                    if hasUnavailableIndexes then None
+                                    else
+                                        tryCorrelatedSourceLookup store registry dbName fromItem select outer
+                                        |> Option.orElseWith (fun () ->
+                                            tryProjectedPhysicalLiteralLookup store registry dbName fromItem select.Where
+                                            |> Option.map (fun (columns, rows) -> columns, rows, select))
 
                                 match projectedLookup with
                                 | Some(columns, rows, planned) -> runArbitrary columns rows None planned
                                 | None ->
                                     match indexOrder with
-                                    | Some plan -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] }
+                                    | Some plan -> withIndexes [ plan.KeyName ] (fun () -> runArbitrary plan.Columns plan.Rows None { select with OrderBy = [] })
                                     | None ->
-                                        let resolved =
-                                            physicalAccess
-                                            |> Option.map (physicalRowsWithWarnings >> fun (columns, rows) -> Ok(columns, rows |> List.map snd))
-                                            |> Option.orElseWith (fun () ->
-                                                tryInformationSchemaNarrow store registry dbName tref select.Where
-                                                |> Option.map Ok)
-                                            |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
+                                        let fullScanIndex () =
+                                            if not hasUnavailableIndexes then []
+                                            else
+                                                match physicalTable with
+                                                | Some table ->
+                                                    match table.Indexes |> List.filter (fun index -> index.Kind = BTree && forced IndexJoin index.Name) with
+                                                    | [ index ] when snapshotIndexCovers table select index.Name -> [ index.Name ]
+                                                    | _ -> []
+                                                | None -> []
+                                        let names = physicalAccess |> Option.map physicalAccessKeyNames |> Option.defaultWith fullScanIndex
+                                        withIndexes names (fun () ->
+                                            let resolved =
+                                                physicalAccess
+                                                |> Option.map (physicalRowsWithWarnings >> fun (columns, rows) -> Ok(columns, rows |> List.map snd))
+                                                |> Option.orElseWith (fun () ->
+                                                    tryInformationSchemaNarrow store registry dbName tref select.Where
+                                                    |> Option.map Ok)
+                                                |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
 
-                                        match resolved with
-                                        | Error e -> e, [], []
-                                        | Ok(columns, rows) -> runArbitrary columns rows None (coveredSelect physicalAccess)
+                                            match resolved with
+                                            | Error e -> e, [], []
+                                            | Ok(columns, rows) -> runArbitrary columns rows None (coveredSelect physicalAccess))
         | FromTable tref, _ ->
             let rangeLookup =
                 if select.Limit.IsSome && select.OrderBy.IsEmpty then

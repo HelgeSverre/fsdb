@@ -279,6 +279,9 @@ type Table =
       SchemaRevision: int64
       /// The physical row layout keeps its identity across metadata-only DDL.
       ReadLayoutRevision: int64
+      ReadIndexRevisions: Map<string, int64>
+      /// Indexes used for planning but absent from the statement's pinned read view.
+      UnavailableReadIndexes: Set<string>
       Columns: ColumnDef list
       /// Published pages are immutable so captured catalog roots remain
       /// valid while a write copies only the pages it changes.
@@ -325,6 +328,12 @@ let mutable private readLayoutRevision = 0L
 let private nextSchemaRevision () = Interlocked.Increment(&schemaRevision)
 
 let internal newReadLayoutRevision () = Interlocked.Increment(&readLayoutRevision)
+
+let internal newReadIndexRevisions (indexes: IndexDef list) =
+    indexes |> List.map (fun index -> index.Name.ToLowerInvariant(), newReadLayoutRevision ()) |> Map.ofList
+
+let internal readIndexUnavailable (table: Table) (name: string) =
+    not table.UnavailableReadIndexes.IsEmpty && Set.contains (name.ToLowerInvariant()) table.UnavailableReadIndexes
 
 let private isPrimaryIndex (index: IndexDef) =
     String.Equals(index.Name, "PRIMARY", StringComparison.OrdinalIgnoreCase)
@@ -663,6 +672,7 @@ type Store =
       ConsistentReadViews: ConcurrentDictionary<int64, Catalog>
       /// Current table definitions whose rows cannot be opened by this statement's read view.
       UnavailableReadLayouts: Set<int64>
+      HasUnavailableReadIndexes: bool
       /// Transaction snapshots share identity reservation state so concurrent
       /// inserts cannot assign the same value from an older table root.
       AutoIncrementCounters: ConcurrentDictionary<string, AutoIncrementCounter>
@@ -1008,6 +1018,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       KeyLocks = store.KeyLocks
       ConsistentReadViews = store.ConsistentReadViews
       UnavailableReadLayouts = store.UnavailableReadLayouts
+      HasUnavailableReadIndexes = store.HasUnavailableReadIndexes
       AutoIncrementCounters = store.AutoIncrementCounters
       AccountResources = store.AccountResources
       PreparedXas = store.PreparedXas
@@ -4097,6 +4108,63 @@ let private overlayConsistentRows (pinned: Table) (baseline: Table) (working: Ta
                 SecondaryOrder = rebuildSecondaryOrder visible }
             |> publishRowsWithDocumentRules (documentRulesFrom working sourceRowIds) pinned)
 
+let private buildReadIndexBinding (pinned: Table) (current: Table) =
+    let bound =
+        { pinned with
+            OriginalName = current.OriginalName
+            Columns = current.Columns
+            Indexes = current.Indexes
+            ReadIndexRevisions = current.ReadIndexRevisions }
+
+    if pinned.Indexes = current.Indexes && pinned.ReadIndexRevisions = current.ReadIndexRevisions then bound
+    else
+        let previousNames =
+            pinned.Indexes |> List.choose (fun index ->
+                pinned.ReadIndexRevisions |> Map.tryFind (index.Name.ToLowerInvariant())
+                |> Option.map (fun revision -> revision, index.Name)) |> Map.ofList
+        let inherited, added =
+            current.Indexes |> List.fold (fun (inherited, added) index ->
+                let source =
+                    current.ReadIndexRevisions |> Map.tryFind (index.Name.ToLowerInvariant())
+                    |> Option.bind (fun revision -> Map.tryFind revision previousNames)
+                match source with
+                | Some name -> (index.Name, name) :: inherited, added
+                | None -> inherited, index :: added) ([], [])
+        let previousExplicit = pinned.Indexes |> List.map _.Name |> Set.ofList
+        let inheritNamed previous =
+            let synthetic = previous |> Map.filter (fun name _ -> not (Set.contains name previousExplicit))
+            inherited |> List.fold (fun indexes (name, source) ->
+                match Map.tryFind source previous with
+                | Some entries -> Map.add name entries indexes
+                | None -> indexes) synthetic
+        let addedBtrees = added |> List.filter (fun index ->
+            index.Kind = BTree && (index.KeyColumns |> List.forall (fun column -> column.Transform.IsNone)))
+        let addPlanningEntries build inherited =
+            if addedBtrees.IsEmpty then inherited
+            else
+                // The costing and ordering paths need real key distributions.
+                // Build candidates from the pinned rows so no newer rows enter the read view.
+                build { bound with Indexes = addedBtrees }
+                |> Map.fold (fun indexes name value ->
+                    if addedBtrees |> List.exists (fun index -> index.Name = name) then Map.add name value indexes else indexes) inherited
+        withoutIndexExpressionDiagnostics (fun () ->
+            { bound with
+                UnavailableReadIndexes = added |> List.map (fun index -> index.Name.ToLowerInvariant()) |> Set.ofList
+                UniqueIndex = addPlanningEntries rebuildUniqueIndex (inheritNamed pinned.UniqueIndex)
+                SecondaryIndex = addPlanningEntries rebuildSecondaryIndex (inheritNamed pinned.SecondaryIndex)
+                SecondaryOrder = addPlanningEntries rebuildSecondaryOrder (inheritNamed pinned.SecondaryOrder)
+                SpatialIndexes = inheritNamed pinned.SpatialIndexes
+                FullTextIndexes = inheritNamed pinned.FullTextIndexes })
+
+let private readIndexBindings = Runtime.CompilerServices.ConditionalWeakTable<Table, ConcurrentDictionary<int64, Lazy<Table>>>()
+
+let private bindReadIndexes (pinned: Table) (current: Table) =
+    if pinned.Indexes = current.Indexes && pinned.ReadIndexRevisions = current.ReadIndexRevisions then
+        buildReadIndexBinding pinned current
+    else
+        let bindings = readIndexBindings.GetValue(pinned, fun _ -> ConcurrentDictionary())
+        bindings.GetOrAdd(current.SchemaRevision, fun _ -> lazy (buildReadIndexBinding pinned current)).Value
+
 /// The write base can advance independently of the committed read view.
 /// Overlay only this transaction's changes on that read view.
 let internal consistentReadSnapshot (working: Store) (writeBase: Catalog) (live: Store) accessedTables =
@@ -4148,12 +4216,12 @@ let internal consistentReadSnapshot (working: Store) (writeBase: Catalog) (live:
 
         if unchanged && definitionChanges.IsEmpty then working
         else
-            let visible, unavailable =
+            let visible, unavailable, hasUnavailableIndexes =
                 definitionChanges
-                |> List.fold (fun (visible, unavailable) (database, name, original, current) ->
+                |> List.fold (fun (visible, unavailable, hasUnavailableIndexes) (database, name, original, current) ->
                     let db = tryCatalogDatabase database visible |> Option.defaultValue Map.empty
                     match current with
-                    | None -> setCatalogDatabase database (Map.remove name db) visible, unavailable
+                    | None -> setCatalogDatabase database (Map.remove name db) visible, unavailable, hasUnavailableIndexes
                     | Some current ->
                         let readTable =
                             match original with
@@ -4162,8 +4230,9 @@ let internal consistentReadSnapshot (working: Store) (writeBase: Catalog) (live:
                         match readTable with
                         | Some readTable ->
                             // A rename keeps its pinned rows, even if the definition moved to another name.
-                            let bound = { readTable with OriginalName = current.OriginalName; Columns = current.Columns }
-                            setCatalogDatabase database (Map.add name bound db) visible, unavailable
+                            let bound = bindReadIndexes readTable current
+                            setCatalogDatabase database (Map.add name bound db) visible, unavailable,
+                            hasUnavailableIndexes || not bound.UnavailableReadIndexes.IsEmpty
                         | None ->
                             let definition =
                                 { current with
@@ -4174,12 +4243,13 @@ let internal consistentReadSnapshot (working: Store) (writeBase: Catalog) (live:
                                     SpatialIndexes = Map.empty
                                     FullTextIndexes = Map.empty }
                             setCatalogDatabase database (Map.add name definition db) visible,
-                            Set.add current.ReadLayoutRevision unavailable)
-                    (visible.Value, Set.empty)
+                            Set.add current.ReadLayoutRevision unavailable, hasUnavailableIndexes)
+                    (visible.Value, Set.empty, false)
 
             { transactionSnapshotFromCatalog working visible with
                 ExecutionSettings = working.ExecutionSettings
-                UnavailableReadLayouts = unavailable }
+                UnavailableReadLayouts = unavailable
+                HasUnavailableReadIndexes = hasUnavailableIndexes }
 
 let private foreignKeyStorageValue (column: ColumnDef) value =
     match column.Type, value with
@@ -5687,6 +5757,8 @@ let private sysTableWithIndexes (name: string) (columns: ColumnDef list) (indexe
         { OriginalName = name
           SchemaRevision = nextSchemaRevision ()
           ReadLayoutRevision = newReadLayoutRevision ()
+          ReadIndexRevisions = newReadIndexRevisions indexes
+          UnavailableReadIndexes = Set.empty
           Columns = columns
           RowsArray = RowStore.ofSeq rows
           NextAutoId = 1L
@@ -6103,6 +6175,7 @@ let create () : Store =
       KeyLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
       ConsistentReadViews = ConcurrentDictionary()
       UnavailableReadLayouts = Set.empty
+      HasUnavailableReadIndexes = false
       AutoIncrementCounters = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
       LockWaits =
         { SyncRoot = obj ()
@@ -10346,6 +10419,8 @@ let createTableSeeded
                                             { OriginalName = tableName
                                               SchemaRevision = nextSchemaRevision ()
                                               ReadLayoutRevision = newReadLayoutRevision ()
+                                              ReadIndexRevisions = newReadIndexRevisions indexes
+                                              UnavailableReadIndexes = Set.empty
                                               Columns = columns
                                               RowsArray = RowStore.empty
                                               NextAutoId = autoIncrementSeed |> Option.defaultValue 1L
@@ -11290,23 +11365,44 @@ let private rebuildsReadLayout before after = function
     | ChangeColumn(oldName, column, _) -> not (columnChangePreservesDataLayout before after oldName column.Name)
     | _ -> false
 
+let private renameIndexSources sources = function
+    | RenameIndex(oldName, newName) ->
+        let oldName, newName = oldName.ToLowerInvariant(), newName.ToLowerInvariant()
+        let source = Map.tryFind oldName sources
+        sources |> Map.remove oldName |> Map.change newName (fun _ -> source)
+    | _ -> sources
+
+let private inheritReadIndexRevisions actions (before: Table) (after: Table) =
+    let signature (table: Table) (index: IndexDef) =
+        let keyPart (part: IndexColumn) =
+            let position = table.Columns |> List.tryFindIndex (fun column ->
+                String.Equals(column.Name, part.Name, StringComparison.OrdinalIgnoreCase))
+            position, part.PrefixLength, part.Transform, part.Direction
+        index.Kind, index.Unique, List.map keyPart index.KeyColumns
+    let sources =
+        before.Indexes |> List.choose (fun index ->
+            let name = index.Name.ToLowerInvariant()
+            Map.tryFind name before.ReadIndexRevisions |> Option.map (fun revision -> name, (signature before index, revision)))
+        |> Map.ofList
+    let sources = List.fold renameIndexSources sources actions
+    after.Indexes |> List.map (fun index ->
+        let name = index.Name.ToLowerInvariant()
+        let revision =
+            match Map.tryFind name sources with
+            | Some(previous, revision) when previous = signature after index -> revision
+            | _ -> newReadLayoutRevision ()
+        name, revision) |> Map.ofList
+
 let private reindexAfterAlter size lengths settings actions preserveFullText before after =
     if not preserveFullText then
         reindexTableWithFullTextSettings size lengths settings after
     else
-        let renameSource sources = function
-            | RenameIndex(oldName, newName) ->
-                let oldName, newName = oldName.ToLowerInvariant(), newName.ToLowerInvariant()
-                let source = sources |> Map.tryFind oldName
-                sources |> Map.remove oldName |> Map.change newName (fun _ -> source)
-            | _ -> sources
-
         // A same-definition DROP/ADD in one ALTER retains the original index.
         let originalSources =
             fullTextKeyGroups before
             |> List.map (fun group -> group.Name.ToLowerInvariant(), group)
             |> Map.ofList
-        let sources = List.fold renameSource originalSources actions
+        let sources = List.fold renameIndexSources originalSources actions
 
         let tokenizerAtSize = function
             | FullText.Words _ -> FullText.Words lengths
@@ -11787,7 +11883,10 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                         retargetAlterForeignKeyColumns catalog (tableAddress dbName origKey) finalTable actions)
                     |> Result.map (fun (catalog, finalTable) ->
                         let db = tryCatalogDatabase dbName catalog |> Option.get
-                        let finalTable = { finalTable with SchemaRevision = nextSchemaRevision () }
+                        let finalTable =
+                            { finalTable with
+                                SchemaRevision = nextSchemaRevision ()
+                                ReadIndexRevisions = inheritReadIndexRevisions actions table finalTable }
                         let database = Map.remove origKey db |> Map.add finalKey (reindexAfterAlter store.NgramTokenSize store.FullTextWordLengths (fullTextStopwordSettings store) actions preserveFullText table finalTable)
                         let updatedCatalog = setCatalogDatabase dbName database catalog
                         invalidateAutoIncrementCounter store dbName origKey

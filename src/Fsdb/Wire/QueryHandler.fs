@@ -4471,7 +4471,8 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
             let visible = CatalogOverlay.merge permanent.Catalog session.TemporaryCatalog
             { Storage.beginTransactionSnapshotFromCatalog statementStore visible with
                 ExecutionSettings = statementStore.ExecutionSettings
-                UnavailableReadLayouts = permanent.UnavailableReadLayouts })
+                UnavailableReadLayouts = permanent.UnavailableReadLayouts
+                HasUnavailableReadIndexes = permanent.HasUnavailableReadIndexes })
     // The overlay executes without its own transaction, but permanent writes
     // still share the outer transaction's lock owner and catalog refresh.
     let rebaseOverlayInsert =
