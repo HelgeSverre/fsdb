@@ -116,4 +116,30 @@ materialized reference.
 A separate joined query still differs. When a sort follows a join between
 merged and materialized references, MySQL's audited plan streams the joined
 rows into a sort and compares the merged reference's session-local values.
-Fsdb compares that reference's stored UTC instants.
+Fsdb compares that reference's stored UTC instants. The same split appears
+with ordinary tables. A sort on the first nonconstant table uses UTC,
+while sorting rows from multiple tables after the join can use local time.
+
+### Window sorts across the repeated hour
+
+MySQL 8.4.11 sorts the input of the first ordered single-source window
+by the stored UTC value. The window's peer comparison uses the displayed
+local timestamp. For two rows in the first occurrence of `01:30:00.20`
+and one in the second, `ROW_NUMBER()` with an explicit tie-breaker follows
+UTC order while `DENSE_RANK()` on the timestamp alone gives all three rows
+rank 1 when they are adjacent. Later windows that need a new sort see the
+local timestamp. Windows sharing the first sort retain its input order.
+
+A final `ORDER BY` after an ordered or partitioned window uses local time.
+The secondary key can therefore move the later instant ahead of the first
+two rows without changing their window results. With unordered,
+unpartitioned windows MySQL can sort the base input before evaluating the
+window and the final order remains in UTC.
+
+The audited `ROW_NUMBER()`, `DENSE_RANK()`, final sort aliases and ordinals,
+and shared and inherited window sorts match. In an interleaved fall-back
+fixture, timestamp partition keys and finite temporal `RANGE` bounds still
+differ. Adjacent UTC rows can move backward in local time, affecting which
+rows a partition or frame retains. An unordered `ROW_NUMBER()` can also
+number rows in a different sequence when MySQL sorts the input before
+evaluating the window. [MySQL 8.4.11 window planning](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_select.cc#L4519-L4617).

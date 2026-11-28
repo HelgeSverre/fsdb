@@ -127,6 +127,35 @@ let tests =
                    + "(SELECT /*+ NO_MERGE(x) */ x.id FROM e x WHERE x.instant=p.wall ORDER BY x.instant,x.id LIMIT 1) FROM picks p")
                   [ "2"; "1" ]
 
+          testCase "TIMESTAMP sort after a window uses the repeated local time"
+          <| fun _ ->
+              let session =
+                  [ "SET time_zone='+00:00'"
+                    "CREATE TABLE events (id INT PRIMARY KEY, instant TIMESTAMP(2), ordinal INT)"
+                    "INSERT INTO events VALUES (12,'2024-11-03 05:30:00.20',2),(13,'2024-11-03 05:30:00.20',1),(22,'2024-11-03 06:30:00.20',4)"
+                    "SET time_zone='Fsdb/Test_Eastern'" ]
+                  |> List.fold execute (populatedSession ())
+
+              let check sql expected =
+                  match handle session sql |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows (expected |> List.map (List.map Some)) sql
+                  | other -> failtestf "Expected rows for %s, got %A" sql other
+
+              check "SELECT id FROM events ORDER BY instant,ordinal DESC,id" [ [ "12" ]; [ "13" ]; [ "22" ] ]
+              let expected = [ [ "22"; "3" ]; [ "12"; "1" ]; [ "13"; "2" ] ]
+              check "SELECT id,ROW_NUMBER() OVER(ORDER BY id) FROM events ORDER BY instant,ordinal DESC,id" expected
+              check ("SELECT id,ROW_NUMBER() OVER(ORDER BY instant,ordinal DESC,id) "
+                     + "FROM events ORDER BY instant,ordinal DESC,id") expected
+              check "SELECT id,ROW_NUMBER() OVER(ORDER BY id),instant AS stamp FROM events ORDER BY 3,ordinal DESC,id LIMIT 1"
+                  [ [ "22"; "3"; "2024-11-03 01:30:00.20" ] ]
+              check "SELECT id,DENSE_RANK() OVER(ORDER BY instant) FROM events ORDER BY id"
+                  [ [ "12"; "1" ]; [ "13"; "1" ]; [ "22"; "1" ] ]
+              check "SELECT id,COUNT(*) OVER() FROM events ORDER BY instant,ordinal DESC,id"
+                  [ [ "12"; "3" ]; [ "13"; "3" ]; [ "22"; "3" ] ]
+              check ("SELECT id,ROW_NUMBER() OVER(ORDER BY id),ROW_NUMBER() OVER(by_stamp) FROM events "
+                     + "WINDOW by_stamp AS (ORDER BY instant,ordinal DESC,id) ORDER BY id")
+                  [ [ "12"; "1"; "1" ]; [ "13"; "2"; "2" ]; [ "22"; "3"; "3" ] ]
+
           testCase "correlated TIMESTAMP ranges seek ordered keys across a repeated local hour"
           <| fun _ ->
               let session =

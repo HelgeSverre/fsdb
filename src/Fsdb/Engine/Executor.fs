@@ -4587,6 +4587,13 @@ let private storedTimestampAt (row: Value[]) index =
 let private storedTimestampForExpr ctx expr =
     timestampColumnPosition ctx expr |> Option.bind (storedTimestampAt ctx.Row)
 
+type private SortInput = StoredRows | IntermediateRows
+
+let private storedTimestampSortKey input ctx expr =
+    match input with
+    | StoredRows -> storedTimestampForExpr ctx expr
+    | IntermediateRows -> None
+
 let rec private tryProjectionAlias (ctx: EvalContext) (name: string) =
     match unqualifiedColumn ctx (name.ToLowerInvariant()) with
     | UnboundColumn when (tryRoutineVariable name).IsNone ->
@@ -11217,9 +11224,9 @@ and private tryDecorrelatedExists (outer: EvalContext) (select: SelectStmt) : Re
     else
         None
 
-and private evalOrderKey (ctx: EvalContext) (expr: Expr) : Result<Value * Collation.Collation option, EvalError> =
+and private evalOrderKey input (ctx: EvalContext) (expr: Expr) : Result<Value * Collation.Collation option, EvalError> =
     let orderCtx = { ctx with Clause = OrderClause }
-    match storedTimestampForExpr orderCtx expr with
+    match storedTimestampSortKey input orderCtx expr with
     | Some value -> Ok(value, None)
     | None -> evalExpr orderCtx expr |> Result.map (orderValueForExpr orderCtx expr)
 
@@ -17020,13 +17027,13 @@ and private runUnlockedSelectStmt
                   rewritten |> Result.map (fun select -> prepared, select)) with
         | Error error -> error, [], []
         | Ok(prepared, rewritten) ->
-            runSelect output store registry dbName prepared.Columns (qualifierRanges prepared.Sources) prepared.Rows ArbitraryGroupRows rewritten outer
+            runSelect output StoredRows store registry dbName prepared.Columns (qualifierRanges prepared.Sources) prepared.Rows ArbitraryGroupRows rewritten outer
     | Some(FromItem.Grouped(source, joins)) ->
         runUnlockedSelectStmt output store registry dbName { select with From = Some source; Joins = joins @ select.Joins } outer
     | _ when not matchNodes.IsEmpty -> runFullTextSelect output store registry dbName select matchNodes outer
     | None ->
         countExaminedRow ()
-        runSelect output store registry dbName [] Map.empty [ [||] ] ArbitraryGroupRows select outer
+        runSelect output StoredRows store registry dbName [] Map.empty [ [||] ] ArbitraryGroupRows select outer
     | Some(FromItem.Qualified baseQualifier as fromItem) ->
         let runResolved
             groupInputOrder
@@ -17099,7 +17106,7 @@ and private runUnlockedSelectStmt
                         match rewritten with
                         | Error error -> error, [], []
                         | Ok select ->
-                            runSelect output store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows groupInputOrder select outer
+                            runSelect output StoredRows store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows groupInputOrder select outer
 
         let runArbitrary columns (rows: Value[] seq) physicalTable resolvedSelect =
             runResolved ArbitraryGroupRows columns rows physicalTable resolvedSelect
@@ -23144,7 +23151,7 @@ and private evalAggregateUsing<'row>
                 | v ->
                     let keys =
                         if distinct && orderKeys.IsEmpty then Ok [ orderValueForExpr ctx innerExpr v ]
-                        else orderKeys |> traverse (fst >> evalOrderKey ctx)
+                        else orderKeys |> traverse (fst >> evalOrderKey StoredRows ctx)
                     keys |> Result.map (fun keys -> Some(v, collationKeyOf ctx innerExpr v, keys)))
 
         rows
@@ -23482,6 +23489,7 @@ and private resolveHavingRef
 
 /// ORDER BY uses MySQL's projection-alias-first name resolution.
 and private resolveOrderKey
+    input
     (ctx: EvalContext)
     (projections: Projection list)
     (outputCols: (string * Value) list)
@@ -23493,11 +23501,11 @@ and private resolveOrderKey
         |> Result.bind (function
         | Some(sourceExpr, value) ->
             let orderCtx = { ctx with Clause = OrderClause }
-            match storedTimestampForExpr orderCtx sourceExpr with
+            match storedTimestampSortKey input orderCtx sourceExpr with
             | Some stored -> Ok(stored, None)
             | None -> Ok(orderValueForExpr orderCtx sourceExpr value)
-        | None -> evalOrderKey ctx (Col name))
-    | e -> evalOrderKey ctx e
+        | None -> evalOrderKey input ctx (Col name))
+    | e -> evalOrderKey input ctx e
 
 and private groupByIndexTerms (registry: Registry) (table: Table) (tref: TableRef) (select: SelectStmt) : IndexOrderTerm list option =
     let resolved =
@@ -25179,6 +25187,42 @@ and private runWindowedSelect
             | OverSpec spec -> resolveWindow "<unnamed window>" spec
             | OverName name -> resolveNamedWindow name
 
+        let windowSortTerms (spec: WindowSpec) =
+            (spec.PartitionBy |> List.map (fun expression -> expression, Asc)) @ spec.OrderBy
+
+        let windowSorts =
+            lazy
+                (let referenced = windowFuncs |> List.choose (function WindowOver(_, over) -> Some over | _ -> None)
+                 let activeNames = HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
+
+                 for over in referenced do
+                     let mutable next =
+                         match over with
+                         | OverName name -> Some name
+                         | OverSpec spec -> spec.Inherit
+
+                     while next.IsSome && activeNames.Add next.Value do
+                         next <-
+                             match windowDefinitions.TryGetValue next.Value with
+                             | true, (_, spec) -> spec.Inherit
+                             | false, _ -> None
+
+                 let named =
+                     select.Windows
+                     |> List.choose (fun (name, _) -> if activeNames.Contains name then Some(OverName name) else None)
+                 let inlineWindows = referenced |> List.filter (function OverSpec _ -> true | _ -> false)
+                 (named @ inlineWindows)
+                 |> List.choose (resolveOver >> Result.toOption)
+                 |> List.map windowSortTerms)
+
+        let bindSortTerms =
+            let context = lazy (ctxFor (probeRow columns))
+            List.map (fun (expression, direction) ->
+                let column = tryDirectColumnForExpr context.Value expression
+                (match column with Some(index, _) -> Choice1Of2 index | None -> Choice2Of2 expression), direction)
+
+        let firstWindowSort = lazy (windowSorts.Value |> List.tryHead |> Option.map bindSortTerms)
+
         // A frame offset (`ROWS BETWEEN <n> PRECEDING ...`) must be a
         // constant — MySQL rejects a column reference there — so it
         // evaluates once, in a no-columns literal context.
@@ -25373,6 +25417,27 @@ and private runWindowedSelect
                     orderKeyOf row
                     |> Result.map (fun orderKey -> partitionKey, orderKey, row)))
             |> Result.bind (fun keyed ->
+                // The first sort on the original table can use stored instants.
+                // The window still compares peers and frame bounds in local time.
+                let storedSortKeys =
+                    let timestampTerms =
+                        orderTerms |> List.map (function
+                            | _, _, _, Some(index, { Type = TTimestamp _ }) -> Some index
+                            | _ -> None)
+
+                    // Finite RANGE frames still require monotone local-time keys.
+                    if not hasRangeOffset && select.Joins.IsEmpty && (timestampTerms |> List.exists Option.isSome)
+                       && firstWindowSort.Value = Some(bindSortTerms (windowSortTerms spec)) then
+                        keyed
+                        |> List.map (fun (_, key, row) ->
+                            List.map2 (fun index part ->
+                                match index |> Option.bind (storedTimestampAt row) with
+                                | Some stored -> stored, None
+                                | None -> part) timestampTerms key)
+                        |> Array.ofList
+                        |> Some
+                    else None
+
                 let rankedOrderKeys =
                     keyed
                     |> List.map (fun (_, orderKey, _) -> orderKey)
@@ -25405,7 +25470,10 @@ and private runWindowedSelect
                     | _ -> None
 
                 let compareWindowRows (leftIndex, (_, leftKey, _)) (rightIndex, (_, rightKey, _)) =
-                    let compared = compareByOrderKeys dirs leftKey rightKey
+                    let compared =
+                        match storedSortKeys with
+                        | Some keys -> compareByOrderKeys dirs keys.[leftIndex] keys.[rightIndex]
+                        | None -> compareByOrderKeys dirs leftKey rightKey
                     if compared <> 0 then compared else Operators.compare leftIndex rightIndex
 
                 let sortGroup (group: ResizeArray<WindowRow>) =
@@ -26157,7 +26225,11 @@ and private runWindowedSelect
                 qualifiers
                 |> Map.add "__fsdb_window__" (syntheticColumns, columns.Length)
 
-            runSelect ReadValues store registry dbName extendedColumns extendedQualifiers extendedRows ArbitraryGroupRows select' outer
+            let sortInput =
+                let hasTimestamp = columns |> List.exists (fun column -> match column.Type with TTimestamp _ -> true | _ -> false)
+                if hasTimestamp && not select'.OrderBy.IsEmpty && (windowSorts.Value |> List.exists (List.isEmpty >> not)) then IntermediateRows
+                else StoredRows
+            runSelect ReadValues sortInput store registry dbName extendedColumns extendedQualifiers extendedRows ArbitraryGroupRows select' outer
 
 and private fullTextScoresForTable
     (dbName: string)
@@ -27081,6 +27153,7 @@ and private runFullTextSelect
                                 // without fetching rows already counted by the full-text index.
                                 runSelect
                                     output
+                                    StoredRows
                                     store
                                     registry
                                     dbName
@@ -27112,6 +27185,7 @@ and private runFullTextSelect
 
 and private runSelect
     output
+    sortInput
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -27347,7 +27421,7 @@ and private runSelect
         orderBinding
         |> Result.bind (fun () ->
             let context = bindOrderAliases (ctxFor row) outputCols
-            orderBy |> traverse (fun (expr, _) -> resolveOrderKey context orderProjections outputCols (resolveOrderExpr expr)))
+            orderBy |> traverse (fun (expr, _) -> resolveOrderKey sortInput context orderProjections outputCols (resolveOrderExpr expr)))
 
     // The declared fsp per output column, computed once off the probe
     // context — a temporal column renders exactly its fsp digits (see
@@ -27461,7 +27535,7 @@ and private runSelect
             |> Result.bind (fun keep ->
                 if keep then
                     orderExpressions
-                    |> traverse (fun expression -> evalOrderKey (ctxFor row) expression)
+                    |> traverse (fun expression -> evalOrderKey sortInput (ctxFor row) expression)
                     |> Result.map (fun keys -> Some(keys, row))
                 else
                     Ok None)
@@ -27866,10 +27940,10 @@ let private selectMutationTargets
             matched
             |> traverse (fun ((_, row) as positioned) ->
                 orderBy
-                |> traverse (fun (e, _) -> evalOrderKey (ctxFor row) e)
+                |> traverse (fun (e, _) -> evalOrderKey StoredRows (ctxFor row) e)
                 |> Result.bind (fun keys ->
                     tieOrder
-                    |> traverse (fun (e, _) -> evalOrderKey (ctxFor row) e)
+                    |> traverse (fun (e, _) -> evalOrderKey StoredRows (ctxFor row) e)
                     |> Result.map (fun tieKeys -> keys, tieKeys, positioned)))
             |> Result.map (fun keyed ->
                 let ordered =

@@ -69,3 +69,28 @@ EXECUTE timezone_lookup;
 SET time_zone='-04:00';
 EXECUTE timezone_lookup;
 DEALLOCATE PREPARE timezone_lookup;
+
+SET time_zone='Fsdb/Test_Eastern';
+SELECT a.id, ROW_NUMBER() OVER(ORDER BY a.id) AS row_number_by_id
+FROM events a IGNORE INDEX(by_slot)
+WHERE a.id BETWEEN 12 AND 22 AND a.enabled=1
+ORDER BY a.instant,a.ordinal DESC,a.id;
+
+SELECT a.id,
+    ROW_NUMBER() OVER(ORDER BY a.instant,a.ordinal DESC,a.id) AS row_number_by_timestamp,
+    DENSE_RANK() OVER(ORDER BY a.instant) AS timestamp_peer_rank
+FROM events a IGNORE INDEX(by_slot)
+WHERE a.id BETWEEN 12 AND 22 AND a.enabled=1
+ORDER BY a.instant,a.ordinal DESC,a.id;
+
+SELECT a.id,COUNT(*) OVER() AS total
+FROM events a IGNORE INDEX(by_slot)
+WHERE a.id BETWEEN 12 AND 22 AND a.enabled=1
+ORDER BY a.instant,a.ordinal DESC,a.id;
+
+SELECT a.id,ROW_NUMBER() OVER(ORDER BY a.id) AS row_number_by_id,
+    ROW_NUMBER() OVER(by_stamp) AS row_number_by_timestamp
+FROM events a IGNORE INDEX(by_slot)
+WHERE a.id BETWEEN 12 AND 22 AND a.enabled=1
+WINDOW by_stamp AS (ORDER BY a.instant,a.ordinal DESC,a.id)
+ORDER BY a.id;
