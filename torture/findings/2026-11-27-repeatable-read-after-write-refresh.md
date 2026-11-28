@@ -215,3 +215,13 @@ The clustered cursor protects visited primary gaps, including an empty
 range or missing point. LIMIT 0 and an eliminated join source acquire
 no locks on the skipped rows. The comparison includes joined and
 scalar sources and checks the rows copied into a separate destination.
+
+### Temporary-table source overlays
+
+With a temporary destination or a temporary join input, the overlay
+can still read a stale permanent row under REPEATABLE READ. A forced
+new source key can return 1176 where MySQL returns 1412. Under READ
+COMMITTED, INSERT SELECT from a temporary input into a permanent
+destination can leave the inserted row visible to another session
+after ROLLBACK. The comparison checks the destination from a separate
+session after each rollback.
