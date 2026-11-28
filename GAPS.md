@@ -1057,6 +1057,9 @@ UNION, and a join to a session temporary table.
 opens that view at transaction start under REPEATABLE READ. A chained
 transaction retains its isolation and access mode and opens a fresh view
 on its first consistent read.
+[DDL after a read view opens](torture/findings/2026-11-27-repeatable-read-after-write-refresh.md#table-definitions-created-after-the-read-view)
+still diverges for physical table or index changes and some metadata-only
+renames. MySQL binds current names and checks visibility at physical access.
 [Point UPDATE and DELETE](torture/findings/2026-11-27-current-point-writes.md)
 can seek an exact unique key absent from the transaction's old write
 view. The audited writes wait for a pending key or its current row and
@@ -2088,8 +2091,10 @@ use MySQL's four-level posting keys for cached and flushed cursor traversal.
 The expanded ngram corpus matches through mixed postings and deletions.
 [Three-level Japanese wildcards](torture/findings/2026-11-06-japanese-kana-order-and-weights.md#three-level-japanese-wildcards)
 now use the pinned three-level posting keys. The audited cache and disk
-cursors agree on voiced and decomposed Kana. Score differences from
-InnoDB's estimated document count remain.
+cursors agree on voiced and decomposed Kana. The four-collation bigram,
+trigram, and query expansion runs agree on membership and relevance after
+aligning row estimates. Score differences from InnoDB's estimated document
+count remain.
 [Boolean ngram rank cancellation](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#boolean-rank-cancellation)
 now treats a final score of zero as a nonmatch in the audited weighted
 term, phrase, group, and prefix cases. [Single-precision rank accumulation](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#single-precision-rank-accumulation)

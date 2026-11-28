@@ -128,6 +128,14 @@ showed MySQL's estimates diverging from `COUNT(*)` after optimize. Fsdb
 uses the live count, so score differences from estimated document counts
 remain open. [MySQL document-count lookup](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L3668-L3672)
 
+An expanded corpus combined archaic, voiced, halfwidth, and enclosed Kana
+with iteration marks and long vowels. Four Unicode 9.0 collations were
+compared in fresh, flushed, mixed, and post-deletion posting states. After
+`ANALYZE TABLE` aligned the live counts and estimates, all 3,584 bigram
+and 3,584 trigram comparisons agreed on membership. The largest score
+difference was below `1e-6`. A separate 2,688-query expansion comparison
+also matched membership, with score differences below `2e-6`.
+
 ## SQL comparison and index order
 
 Both Japanese UCA 9.0 collations now use the pinned weights for SQL

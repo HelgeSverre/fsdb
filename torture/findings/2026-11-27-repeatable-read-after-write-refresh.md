@@ -50,3 +50,39 @@ An explicit start can combine the snapshot request with `READ ONLY` or
 its replay text. `COMMIT AND CHAIN` and `ROLLBACK AND CHAIN` retain the
 effective isolation and access mode and drop the one-shot snapshot
 request. Preparing a transaction start returns error 1295.
+
+## Table definitions created after the read view
+
+A repeatable-read transaction can establish its view by reading a separate
+table. Another session can then change the target table before the first
+session opens it. Pinned MySQL 8.4.11 returns error 1412 after adding or
+dropping a column, rebuilding the primary key, or truncating and refilling
+the target. Fsdb can read the old definition in these cases.
+
+In the audited queries, MySQL returned 1412 for both a full scan and an
+index seek that would have found no rows. `LIMIT 0` and a constant false
+predicate avoided the scan and returned an empty result. A plain `INSERT`
+could still succeed or return a duplicate-key error. Duplicate upserts
+and `REPLACE` returned 1412 when they opened a row in the changed table.
+
+Index creation has a narrower boundary. After adding `ix(p)` with
+`ALGORITHM=INPLACE`, a covering scan and a seek on `p` returned 1412, while
+a primary-key lookup remained available. Renaming a table, column, or
+index, changing a column default or table comment, and removing an index
+did not invalidate the audited MySQL reads. The renamed objects were
+resolved using their current names. Fsdb can instead bind against its old
+catalog and report a missing table, column, or index.
+
+Renaming `ix` to `iy` and adding a new `ix` in the same ALTER left `iy`
+usable from the old MySQL view, while forcing the new `ix` returned 1412.
+Dropping and adding an identical index under its old name in one ALTER
+left it usable. Changing a default with `ALGORITHM=INSTANT` preserved
+both keys, whereas `ALGORITHM=COPY` and `OPTIMIZE TABLE` invalidated both.
+After a 1412 error, another read of `anchor` still used the original view.
+[MySQL index visibility check](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/dict/dict0mem.cc#L604-L619)
+
+For example, create `anchor(id INT PRIMARY KEY)` and `t(id INT PRIMARY KEY,
+p INT)`, with one row in each. In session A, begin a transaction and read
+`anchor`. In session B, run `ALTER TABLE t ADD COLUMN extra INT,
+ALGORITHM=INSTANT`. In session A, `SELECT p FROM t WHERE id=999` returns
+1412 on MySQL, while `SELECT p FROM t WHERE FALSE` returns an empty set.
