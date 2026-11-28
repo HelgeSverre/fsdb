@@ -147,9 +147,7 @@ unpartitioned windows MySQL can sort the base input before evaluating the
 window and the final order remains in UTC.
 
 The audited `ROW_NUMBER()`, `DENSE_RANK()`, final sort aliases and ordinals,
-and shared and inherited window sorts match. In an interleaved fall-back
-fixture, finite temporal `RANGE` bounds still differ. Adjacent UTC rows
-can move backward in local time. An unordered `ROW_NUMBER()` can also
+and shared and inherited window sorts match. An unordered `ROW_NUMBER()` can
 number rows in a different sequence when MySQL sorts the input before
 evaluating the window. [MySQL 8.4.11 window planning](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/sql_select.cc#L4519-L4617).
 
@@ -168,5 +166,27 @@ timestamp partition key has a constant UTC offset in the input rows.
 On a 10,000-row single-offset control in a named zone, interleaved native
 runs measured 72–73 ms before the change and 71–77 ms with the offset
 check. Always sorting by UTC took 114 ms in the initial run.
-Finite temporal `RANGE` frames still need separate handling for keys
-that move backward in local time.
+
+### Finite RANGE frames across the repeated hour
+
+The first window can sort a TIMESTAMP column by UTC even as its frame
+bounds compare local values. Across a fall-back transition, the local key
+can move backward. Fsdb keeps the usual boundary search when the keys
+remain ordered and follows the frame in physical row order when they do
+not.
+
+MySQL reuses prior frame contributions for audited `COUNT(*)`, exact
+`SUM()` and `AVG()` windows, and floating-point sums with an unbounded
+start. A `MIN(id)` alongside `COUNT(*)` in the same named window can
+require a fresh scan from the retained start position.
+Identical definitions in separate windows keep their own strategy. The
+audited positional functions read the frame's physical positions.
+
+The 87 differential cases cover ascending and descending order, NULL
+input keys, finite and unbounded edges, and separate and shared windows.
+The optimized `MIN` or `MAX` of the ordering key itself and other
+aggregate strategies remain open. [MySQL 8.4.11 window frame execution](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/iterators/window_iterators.cc#L896-L947).
+
+In two interleaved runs of a 10,000-row monotone control, the median
+went from 230–233 ms to 240–242 ms with the named zone and from
+228–232 ms to 231–236 ms with a fixed offset.

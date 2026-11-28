@@ -3633,6 +3633,23 @@ type private NumericAggregateAccumulator(kind: NumericAggregateKind, divisionPre
                 | None, value -> total <- Some(Value.add (VDecimal exactTotal) value)
                 | Some current, value -> total <- Some(Value.add current value)
 
+    member _.Clear() =
+        count <- 0L
+        exactTotal <- 0M
+        total <- None
+
+    member _.Remove(value) =
+        if value <> VNull then
+            match kind with
+            | CountValues -> count <- max 0L (count - 1L)
+            | _ ->
+                count <- count - 1L
+                match total, value with
+                | None, VInt integer -> exactTotal <- exactTotal - decimal integer
+                | None, VUInt unsigned -> exactTotal <- exactTotal - decimal unsigned
+                | None, VDecimal number -> exactTotal <- exactTotal - number
+                | _ -> total <- Some(Value.sub (total |> Option.defaultValue (VDecimal exactTotal)) value)
+
     member _.Value =
         match kind with
         | CountValues -> VInt count
@@ -3640,7 +3657,7 @@ type private NumericAggregateAccumulator(kind: NumericAggregateKind, divisionPre
         | SumValues -> total |> Option.defaultValue (VDecimal exactTotal)
         | AverageValues ->
             let sum = total |> Option.defaultValue (VDecimal exactTotal)
-            Value.divWithIntermediatePrecision divisionPrecision sum (VInt count)
+            if count > 0L then Value.divWithIntermediatePrecision divisionPrecision sum (VInt count) else sum
 
 type private AggregateInputOrder =
     | SourceRowOrder
@@ -3655,6 +3672,80 @@ type private GroupInputRow =
       AggregateInputs: (Expr * Value) list }
 
 type private WindowRow = int * (Value list * (Value * Collation.Collation option) list * Value[])
+
+type private RangeFrameRows =
+    | ScanFrame of int list
+    | AdvanceFrame of removed: int list * added: int list * positions: (int * int) option
+
+type private WindowFrameSelection =
+    | FrameSpan of int * int
+    | FrameReplay of RangeFrameRows
+
+type private WindowFramePosition = FirstPosition | LastPosition | NthPosition of int
+
+/// Tracks physical positions while the RANGE comparisons use local time.
+type private RangeFrameCursor(length: int, incremental: bool, endAtCurrentRow: bool, unboundedStart: bool) =
+    // The physical interval can also contain rows skipped during accumulation.
+    let mutable first = 0
+    let mutable last = -1
+
+    member _.Move(position, beforeFrame, afterFrame) =
+        if incremental && position > 0 && endAtCurrentRow && position >= first && position <= last then
+            AdvanceFrame([], [], Some(first, last))
+        elif position = 0 || not incremental then
+            let rows = ResizeArray<int>()
+            let mutable index = first
+            let mutable finished = false
+            while index < length && not finished do
+                Limits.checkQueryCancellation index
+                if beforeFrame index then index <- index + 1
+                elif afterFrame index then finished <- true
+                else
+                    rows.Add index
+                    index <- index + 1
+            first <- if rows.Count = 0 then index else rows.[0]
+            last <- index - 1
+            ScanFrame(List.ofSeq rows)
+        else
+            let removed = ResizeArray<int>()
+            let added = ResizeArray<int>()
+            let priorFirst, priorLast = first, last
+            let mutable found = priorFirst <= priorLast
+            let mutable nextFirst = first
+            if found && not unboundedStart then
+                let mutable index = first
+                while index < length && beforeFrame index do
+                    Limits.checkQueryCancellation index
+                    if index <= priorLast then removed.Add index
+                    index <- index + 1
+                if index = length then
+                    found <- false
+                    last <- length - 1
+                else
+                    found <- not (afterFrame index)
+                    if found then
+                        first <- index
+                        nextFirst <- index
+
+            let mutable index = last + 1
+            let mutable finished = false
+            while index < length && not finished do
+                Limits.checkQueryCancellation index
+                if beforeFrame index then
+                    if not found then nextFirst <- nextFirst + 1
+                    index <- index + 1
+                elif afterFrame index then
+                    last <- index - 1
+                    finished <- true
+                else
+                    if not found && index = nextFirst then
+                        first <- index
+                        found <- true
+                    added.Add index
+                    index <- index + 1
+            if not finished && added.Count > 0 then last <- index - 1
+            if not found then first <- last + 1
+            AdvanceFrame(List.ofSeq removed, List.ofSeq added, if found then Some(first, last) else None)
 
 /// Every call to the named function inside `expr` — one walker, since the
 /// only caller (`GROUPING`, whose value depends on the ROLLUP level rather
@@ -25563,9 +25654,42 @@ and private runWindowedSelect
                     orderKeyOf row
                     |> Result.map (fun orderKey -> partitionKey, orderKey, row)))
             |> Result.bind (fun keyed ->
-                // Finite RANGE frames still require monotone local-time keys.
+                let rangeReplay =
+                    lazy (
+                        if not hasRangeOffset then None
+                        else
+                            let sharesWindow other =
+                                match over, other with
+                                | OverName a, OverName b -> equalsIgnoreCase a b
+                                | _ -> obj.ReferenceEquals(over, other)
+                            let context = ctxFor (probeRow columns)
+                            let canAdvanceAggregate expression =
+                                metadataOfExpr context expression
+                                |> Option.exists (fun metadata ->
+                                    isIntegerMetadata metadata || metadata.TypeId = TypeNewDecimal
+                                    || (frame.Start = UnboundedPreceding
+                                        && (metadata.TypeId = TypeDouble || metadata.TypeId = TypeFloat)))
+                            let ordersBy expression =
+                                match effectiveOrderBy with
+                                | [ key, direction ] -> bindSortTerms [ expression, direction ] = bindSortTerms [ key, direction ]
+                                | _ -> false
+                            let strategy = function
+                                | WinAggregate(name, args) when Functions.isUnmodifiedBuiltinAggregate name registry ->
+                                    match name.ToUpperInvariant(), args with
+                                    | "COUNT", [ _ ] -> Some true
+                                    | ("SUM" | "AVG"), [ arg ] -> Some(canAdvanceAggregate arg)
+                                    | ("MIN" | "MAX"), [ arg ] when not (ordersBy arg) -> Some false
+                                    | _ -> None
+                                | WinAggregate _ -> None
+                                | _ -> Some true
+                            let strategies =
+                                windowFuncs |> List.choose (function
+                                    | WindowOver(fn, other) when sharesWindow other -> Some(strategy fn)
+                                    | _ -> None)
+                            if List.contains (Some false) strategies then Some false
+                            else strategies |> tryAllSome |> Option.map (List.forall id))
                 let usesStoredWindowKeys =
-                    lazy (not hasRangeOffset && select.Joins.IsEmpty
+                    lazy (select.Joins.IsEmpty && (not hasRangeOffset || rangeReplay.Value.IsSome)
                           && firstWindowSort.Value = Some(bindSortTerms (windowSortTerms spec)))
 
                 // The first sort on the original table can use stored instants.
@@ -25576,7 +25700,9 @@ and private runWindowedSelect
                             | _, _, _, Some(index, { Type = TTimestamp _ }) -> Some index
                             | _ -> None)
 
-                    if (timestampTerms |> List.exists Option.isSome) && usesStoredWindowKeys.Value then
+                    let fixedOffset = match store.ExecutionSettings.TimeZone with FixedOffset _ -> true | _ -> false
+                    if (timestampTerms |> List.exists Option.isSome) && (not hasRangeOffset || not fixedOffset)
+                       && usesStoredWindowKeys.Value then
                         keyed
                         |> List.map (fun (_, key, row) ->
                             List.map2 (fun index part ->
@@ -25623,6 +25749,7 @@ and private runWindowedSelect
                     | FixedOffset _ -> false
                     | _ ->
                         (partitionTimestampTerms |> List.exists Option.isSome)
+                        && not hasRangeOffset
                         && usesStoredWindowKeys.Value
                         && (partitionTimestampTerms |> List.indexed |> List.exists (fun (keyPosition, index) ->
                             index |> Option.exists (offsetVaries keyPosition)))
@@ -25900,7 +26027,7 @@ and private runWindowedSelect
                         if predicate middle then high <- middle else low <- middle + 1
                     low
 
-                let rangeBounds group pos startBound endBound =
+                let rangeBounds group pos startBound endBound (cursor: RangeFrameCursor option) =
                     let selfKey = ordKeyAt group pos |> List.tryHead |> Option.map fst
 
                     match selfKey with
@@ -25909,7 +26036,9 @@ and private runWindowedSelect
                         // Offsets from NULL stay at its peer group; unbounded edges still reach the partition edge.
                         let lo = if startBound = UnboundedPreceding then 0 else peerLow group pos
                         let hi = if endBound = UnboundedFollowing then Array.length group - 1 else peerHigh group pos
-                        Ok(lo, hi)
+                        match cursor with
+                        | Some cursor -> Ok(FrameReplay(cursor.Move(pos, (fun index -> index < lo), (fun index -> index > hi))))
+                        | None -> Ok(FrameSpan(lo, hi))
                     | Some current ->
                         let descending = dirs |> List.tryHead |> Option.map ((=) Desc) |> Option.defaultValue false
 
@@ -26021,15 +26150,20 @@ and private runWindowedSelect
                             boundary endBound
                             |> Result.mapError (failure startValue true)
                             |> Result.map (fun endValue ->
-                                if canSearchRangePartition group current then
-                                    let compareAt index boundary =
-                                        let value = ordKeyAt group index |> List.head |> fst
-                                        let compared =
-                                            match value with
-                                            | VNull -> -1
-                                            | value -> compareRangeValues value boundary
-                                        if descending then -compared else compared
+                                let compareAt index boundary =
+                                    let value = ordKeyAt group index |> List.head |> fst
+                                    let compared =
+                                        match value with
+                                        | VNull -> -1
+                                        | value -> compareRangeValues value boundary
+                                    if descending then -compared else compared
 
+                                match cursor with
+                                | Some cursor ->
+                                    let before index = startValue |> Option.exists (fun value -> compareAt index value < 0)
+                                    let after index = endValue |> Option.exists (fun value -> compareAt index value > 0)
+                                    FrameReplay(cursor.Move(pos, before, after))
+                                | None when canSearchRangePartition group current ->
                                     let low =
                                         startValue
                                         |> Option.map (fun value -> firstRangePosition group.Length (fun index -> compareAt index value >= 0))
@@ -26039,10 +26173,10 @@ and private runWindowedSelect
                                         |> Option.map (fun value -> firstRangePosition group.Length (fun index -> compareAt index value > 0) - 1)
                                         |> Option.defaultValue (group.Length - 1)
 
-                                    if low <= high then low, high
-                                    elif startBound = UnboundedPreceding then 0, -1
-                                    else pos, pos - 1
-                                else
+                                    if low <= high then FrameSpan(low, high)
+                                    elif startBound = UnboundedPreceding then FrameSpan(0, -1)
+                                    else FrameSpan(pos, pos - 1)
+                                | None ->
                                     let within other =
                                         let endsBefore =
                                             endValue
@@ -26065,13 +26199,24 @@ and private runWindowedSelect
                                                 | value -> within value))
 
                                     match inFrame |> Array.tryFindIndex id, inFrame |> Array.tryFindIndexBack id with
-                                    | Some low, Some high -> low, high
-                                    | _ when startBound = UnboundedPreceding -> 0, -1
-                                    | _ -> pos, pos - 1))
+                                    | Some low, Some high -> FrameSpan(low, high)
+                                    | _ when startBound = UnboundedPreceding -> FrameSpan(0, -1)
+                                    | _ -> FrameSpan(pos, pos - 1)))
 
-                // [lo, hi] row indexes (inclusive; `hi < lo` means an empty
-                // frame) this row's frame covers within its partition.
-                let frameRange group pos : Result<int * int, WindowFrameFailure> =
+                let rangeCursor (group: WindowRow[]) =
+                    if storedSortKeys.IsNone || not hasRangeOffset then None
+                    else
+                        let movesBackward =
+                            seq { 1 .. group.Length - 1 }
+                            |> Seq.exists (fun index ->
+                                compareByOrderKeys dirs (ordKeyAt group (index - 1)) (ordKeyAt group index) > 0)
+                        if movesBackward then
+                            rangeReplay.Value |> Option.map (fun incremental ->
+                                RangeFrameCursor(group.Length, incremental, frame.End = CurrentRow, frame.Start = UnboundedPreceding))
+                        else None
+
+                // Span indexes are inclusive. An end before the start denotes an empty frame.
+                let frameRange group pos cursor : Result<WindowFrameSelection, WindowFrameFailure> =
                     let last = Array.length group - 1
 
                     let boundIndex (bound: FrameBound) (isStart: bool) : Result<int, EvalError> =
@@ -26092,25 +26237,58 @@ and private runWindowedSelect
                     match frame.Unit, frame.Start, frame.End with
                     | FrameRange, (BoundPreceding _ | BoundFollowing _), _
                     | FrameRange, _, (BoundPreceding _ | BoundFollowing _) ->
-                        rangeBounds group pos frame.Start frame.End
+                        rangeBounds group pos frame.Start frame.End cursor
                     | _ ->
                         boundIndex frame.Start true
                         |> Result.bind (fun lo ->
-                            boundIndex frame.End false |> Result.map (fun hi -> max 0 lo, min last hi))
+                            boundIndex frame.End false |> Result.map (fun hi -> FrameSpan(max 0 lo, min last hi)))
                         |> Result.mapError (fun cause -> { Cause = cause; CandidateRows = [] })
-
-                // The frame-relative row `FIRST_VALUE`/`LAST_VALUE`/
-                // `NTH_VALUE` read, or None when the frame is too short.
-                let frameRowAt group pos (pick: int -> int -> int option) =
-                    frameRange group pos
-                    |> Result.mapError _.Cause
-                    |> Result.map (fun (lo, hi) -> pick lo hi |> Option.filter (fun i -> i >= lo && i <= hi) |> Option.map (rowAt group))
 
                 let perRow (compute: WindowRow[] -> int -> Result<Value, EvalError>) =
                     partitions
                     |> traverse (fun group ->
                         group
                         |> traverseArrayIndexed (fun pos (origIdx, _) -> compute group pos |> Result.map (fun v -> origIdx, v))
+                        |> Result.map Array.toList)
+                    |> Result.map (List.collect id >> Array.ofList)
+
+                let positionalValues position expr =
+                    let pickSpan lo hi =
+                        let index =
+                            match position with
+                            | FirstPosition -> lo
+                            | LastPosition -> hi
+                            | NthPosition offset -> lo + offset
+                        if index >= lo && index <= hi then Some index else None
+                    let pickRows rows =
+                        match position with
+                        | FirstPosition -> List.tryHead rows
+                        | LastPosition -> List.tryLast rows
+                        | NthPosition offset -> List.tryItem offset rows
+                    partitions
+                    |> traverse (fun group ->
+                        let cursor = rangeCursor group
+                        let mutable selected = None
+                        group
+                        |> traverseArrayIndexed (fun pos (originalIndex, _) ->
+                            frameRange group pos cursor
+                            |> Result.mapError _.Cause
+                            |> Result.bind (fun rows ->
+                                match rows with
+                                | FrameSpan(lo, hi) ->
+                                    selected <- pickSpan lo hi
+                                | FrameReplay(ScanFrame rows) -> selected <- pickRows rows
+                                | FrameReplay(AdvanceFrame(removed, added, positions)) ->
+                                    if not removed.IsEmpty then selected <- None
+                                    let next =
+                                        match position, added with
+                                        | LastPosition, _ :: _ -> List.tryLast added
+                                        | _ -> positions |> Option.bind (fun (lo, hi) -> pickSpan lo hi)
+                                    next |> Option.iter (fun index -> selected <- Some index)
+                                match selected with
+                                | Some index -> evalExpr (ctxFor (rowAt group index)) expr
+                                | None -> Ok VNull)
+                            |> Result.map (fun value -> originalIndex, value))
                         |> Result.map Array.toList)
                     |> Result.map (List.collect id >> Array.ofList)
 
@@ -26130,10 +26308,27 @@ and private runWindowedSelect
                             |> Result.map Array.ofList)
                         |> Result.bind (fun inputs ->
                             let evaluate index argument _ = Ok inputs.[index].[argument]
+                            let cursor = rangeCursor group
+                            let incremental =
+                                if cursor.IsNone || rangeReplay.Value <> Some true then None
+                                else
+                                    match name.ToUpperInvariant() with
+                                    | "COUNT" -> Some(NumericAggregateAccumulator(CountValues, divisionPrecisionIncrement ()))
+                                    | "SUM" -> Some(NumericAggregateAccumulator(SumValues, divisionPrecisionIncrement ()))
+                                    | "AVG" -> Some(NumericAggregateAccumulator(AverageValues, divisionPrecisionIncrement ()))
+                                    | _ -> None
+                            let addOrRemove index =
+                                match args with
+                                | [ Star _ ] when equalsIgnoreCase name "COUNT" -> VInt 1L
+                                | [ _ ] when equalsIgnoreCase name "COUNT" -> inputs.[index].[0]
+                                | [ expression ] ->
+                                    enumNumericOperand (contextAt index) expression inputs.[index].[0]
+                                    |> Functions.numericAggregateValue
+                                | _ -> VNull
                             let prefix =
                                 match args with
                                 | [ expression ]
-                                    when frame.Start = UnboundedPreceding
+                                    when cursor.IsNone && frame.Start = UnboundedPreceding
                                          && (equalsIgnoreCase name "SUM" || equalsIgnoreCase name "AVG")
                                          && Functions.isUnmodifiedBuiltinAggregate name registry ->
                                     let kind = if equalsIgnoreCase name "SUM" then SumValues else AverageValues
@@ -26144,7 +26339,7 @@ and private runWindowedSelect
                             group
                             |> traverseArrayIndexed (fun pos (originalIndex, _) ->
                                 let evaluated =
-                                    match frameRange group pos with
+                                    match frameRange group pos cursor with
                                     | Error failure ->
                                         // Growing frames check their retained first row before adding new inputs.
                                         let retainedFrameFailed =
@@ -26160,7 +26355,20 @@ and private runWindowedSelect
                                                 Diagnostics.afterError (fun () ->
                                                     evalAggregateUsing evaluate registry contextAt [ index ] name args |> ignore))
                                         Error failure.Cause
-                                    | Ok(lo, hi) ->
+                                    | Ok(FrameReplay(ScanFrame rows)) ->
+                                        match incremental with
+                                        | None -> evalAggregateUsing evaluate registry contextAt rows name args
+                                        | Some accumulator ->
+                                            accumulator.Clear()
+                                            for index in rows do accumulator.Add(addOrRemove index)
+                                            Ok accumulator.Value
+                                    | Ok(FrameReplay(AdvanceFrame(removed, added, _))) ->
+                                        // Incremental replay is selected only for these numeric aggregates.
+                                        let accumulator = incremental.Value
+                                        for index in removed do accumulator.Remove(addOrRemove index)
+                                        for index in added do accumulator.Add(addOrRemove index)
+                                        Ok accumulator.Value
+                                    | Ok(FrameSpan(lo, hi)) ->
                                         previousFrame <- Some(lo, hi)
                                         match prefix with
                                         | Some(expression, accumulator) ->
@@ -26283,28 +26491,16 @@ and private runWindowedSelect
                             else
                                 evalExpr (ctxFor (rowAt group srcPos)) valueExpr))
                 | WinFirstValue e ->
-                    perRow (fun group pos ->
-                        frameRowAt group pos (fun lo _ -> Some lo)
-                        |> Result.bind (function
-                            | Some row -> evalExpr (ctxFor row) e
-                            | None -> Ok VNull))
+                    positionalValues FirstPosition e
                 | WinLastValue e ->
-                    perRow (fun group pos ->
-                        frameRowAt group pos (fun _ hi -> Some hi)
-                        |> Result.bind (function
-                            | Some row -> evalExpr (ctxFor row) e
-                            | None -> Ok VNull))
+                    positionalValues LastPosition e
                 | WinNthValue(e, nExpr) ->
                     constantInt "nth_value" nExpr
                     |> Result.bind (fun n ->
                         if n < 1L then
                             Error(1210, "Incorrect arguments to nth_value")
                         else
-                            perRow (fun group pos ->
-                                frameRowAt group pos (fun lo _ -> Some(lo + int n - 1))
-                                |> Result.bind (function
-                                    | Some row -> evalExpr (ctxFor row) e
-                                    | None -> Ok VNull)))
+                            positionalValues (NthPosition(int n - 1)) e)
                 | WinAggregate(name, args) ->
                     // Oracle-pinned refusals: MySQL 8.4 rejects both of
                     // these as 1235 rather than evaluating them.

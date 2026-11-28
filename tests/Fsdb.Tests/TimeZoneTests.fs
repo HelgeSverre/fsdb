@@ -179,6 +179,34 @@ let tests =
                      + "FROM events IGNORE INDEX(by_instant) ORDER BY instant,r,id LIMIT 5")
                   [ [ "2"; "1" ]; [ "4"; "1" ]; [ "7"; "2" ]; [ "1"; "1" ]; [ "3"; "1" ] ]
 
+          testCase "finite TIMESTAMP RANGE frames follow MySQL across a clock fold"
+          <| fun _ ->
+              let session =
+                  [ "SET time_zone='+00:00'"
+                    "CREATE TABLE events (id INT PRIMARY KEY, instant TIMESTAMP NOT NULL)"
+                    "INSERT INTO events VALUES (4,'2024-11-03 05:15:00'),(3,'2024-11-03 05:45:00'),(2,'2024-11-03 06:15:00'),(1,'2024-11-03 06:45:00')"
+                    "SET time_zone='Fsdb/Test_Eastern'" ]
+                  |> List.fold execute (populatedSession ())
+              let check expressions frame expected =
+                  let sql = $"SELECT id,{expressions} FROM events WINDOW w AS(ORDER BY instant RANGE BETWEEN {frame}) ORDER BY id"
+                  match handle session sql |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows expected sql
+                  | other -> failtestf "Expected rows for %s, got %A" sql other
+              let around = "INTERVAL 10 MINUTE PRECEDING AND INTERVAL 10 MINUTE FOLLOWING"
+              check "COUNT(*) OVER w,SUM(id) OVER w,AVG(id) OVER w" around
+                  ([ ["1";"2";"4";"2.0000"]; ["2";"2";"4";"2.0000"]
+                     ["3";"2";"4";"2.0000"]; ["4";"1";"4";"4.0000"] ] |> List.map (List.map Some))
+              check "COUNT(*) OVER w,MIN(id) OVER w" around
+                  [ [Some "1";Some "2";Some "1"]; [Some "2";Some "0";None]
+                    [Some "3";Some "2";Some "1"]; [Some "4";Some "1";Some "4"] ]
+              check "FIRST_VALUE(id) OVER w,LAST_VALUE(id) OVER w,NTH_VALUE(id,2) OVER w" around
+                  [ [Some "1";Some "3";Some "1";Some "2"]; [Some "2";Some "3";Some "1";Some "2"]
+                    [Some "3";Some "3";Some "1";Some "2"]; [Some "4";Some "4";Some "4";None] ]
+              check "COUNT(*) OVER w,SUM(id*1e0) OVER w,AVG(id*1e0) OVER w"
+                  "UNBOUNDED PRECEDING AND INTERVAL 10 MINUTE FOLLOWING"
+                  ([ ["1";"4";"10";"2.5"]; ["2";"4";"10";"2.5"]
+                     ["3";"4";"10";"2.5"]; ["4";"1";"4";"4"] ] |> List.map (List.map Some))
+
           testCase "TIMESTAMP sorts after a join compare local times"
           <| fun _ ->
               let session =
