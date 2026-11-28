@@ -1195,11 +1195,20 @@ let tests =
                     let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L ]
                     let area = geometry "POLYGON((85 0,85 4,89 4,89 0,85 0),(86 1,88 1,88 3,86 3,86 1))"
                     let overlay name first second = call "ST_AsText" [ call name [ first; second ] ]
+                    let linuxOracle =
+                        OperatingSystem.IsLinux()
+                        && (match Runtime.InteropServices.RuntimeInformation.ProcessArchitecture with
+                            | Runtime.InteropServices.Architecture.Arm64 | Runtime.InteropServices.Architecture.X64 -> true
+                            | _ -> false)
+                    let intersection =
+                        if linuxOracle then
+                            VString "GEOMETRYCOLLECTION(POINT(88 1.00001),POINT(86 1))"
+                        else VString "POINT(86 1)"
 
                     for wkt in [ "LINESTRING(86 1.00001,88 1.00001)"; "LINESTRING(88 1.00001,86 1.00001)" ] do
                         let line = geometry wkt
-                        Expect.equal (overlay "ST_Intersection" line area) (VString "POINT(86 1)") wkt
-                        Expect.equal (overlay "ST_Intersection" area line) (VString "POINT(86 1)") wkt
+                        Expect.equal (overlay "ST_Intersection" line area) intersection wkt
+                        Expect.equal (overlay "ST_Intersection" area line) intersection wkt
                         Expect.equal (overlay "ST_Difference" line area) (VString wkt) wkt
 
                     for wkt, clipped, remaining in
@@ -1256,6 +1265,21 @@ let tests =
                     let line = geometry "LINESTRING(80.77618702776390 -147.39327281023256,83.66878579138226 -147.39327281023256)"
                     let expected = geometry "GEOMETRYCOLLECTION(POINT(83.66878579138226 -147.39327281023256),POINT(80.77618702776390 -147.39327381023256))"
                     Expect.equal (call "ST_Intersection" [ line; area ]) expected "the source endpoint precedes the polygon vertex"
+
+                testCase "geographic intersections retain a rounded contact at the far source endpoint"
+                <| fun _ ->
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L ]
+                    let area =
+                        geometry (
+                            "POLYGON((77.18650874404889 -80.37097342541750,77.18650874404889 -75.92161154998936,79.99686211084318 -75.92161154998936,79.99686211084318 -80.37097342541750,77.18650874404889 -80.37097342541750),"
+                            + "(77.88909708574747 -79.25863295656046,79.29427376914461 -79.25863295656046,79.29427376914461 -77.03395201884641,77.88909708574747 -77.03395201884641,77.88909708574747 -79.25863295656046))")
+                    let first = "77.88909708574747 -79.25863195656046"
+                    let last = "79.29427376914461 -79.25863195656046"
+                    let expected = geometry $"GEOMETRYCOLLECTION(POINT({last}),POINT(77.88909708574747 -79.25863295656046))"
+                    for start, endpoint in [ first, last; last, first ] do
+                        let line = geometry $"LINESTRING({start},{endpoint})"
+                        for left, right in [ line, area; area, line ] do
+                            Expect.equal (call "ST_Intersection" [ left; right ]) expected "both endpoint contacts survive"
 
                 testCase "geographic intersections subtract clipped lines using the solver coordinates"
                 <| fun _ ->

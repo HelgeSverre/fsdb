@@ -1241,3 +1241,27 @@ The direct MySQL comparison differed on exactly the same cases as macOS
 Fsdb against the pinned image. Of the Linux Fsdb differences, 22 polar
 intersections occurred where both MySQL builds agreed. Those cases include
 changes between isolated points, line strings, and geometry collections.
+
+### Rounded source endpoint contacts on Linux
+
+In eight of the 22 shared-oracle cases, the far source endpoint never
+reached the point coverage check. Fusing the longitude term in the
+Andoyer cosine calculation reached the zero-distance boundary used to
+recognize those contacts on Linux ARM64 and x64. Fsdb uses that form for
+recognizing rounded source endpoints on those platforms. The pinned
+Linux builds also retain a second point at `(88 1.00001)` on the
+structured near-hole line. Native macOS MySQL returns only `(86 1)`.
+[Boost's Andoyer inverse](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/formulas/andoyer_inverse.hpp#L72-L89).
+
+| Sweep | Results per architecture | Linux ARM64 mismatches before → after | Linux x64 mismatches before → after |
+| --- | ---: | ---: | ---: |
+| Structured WGS 84 | 7,168 | 6 → 2 | 6 → 2 |
+| Mixed WGS 84 | 4,096 | 17 → 17 | 17 → 17 |
+| Polar WGS 84 | 6,144 | 235 → 201 | 235 → 201 |
+| Polar GRS 80 | 6,144 | 229 → 197 | 231 → 199 |
+| Polar Clarke 1866 | 6,144 | 225 → 193 | 225 → 193 |
+
+The A/B comparison found no new mismatches on either Linux architecture.
+Native macOS still matched its MySQL build in all 17,408 WGS 84 results.
+The 14 remaining shared-oracle cases involve whether the clipped geometry
+covers an isolated point near a short segment.

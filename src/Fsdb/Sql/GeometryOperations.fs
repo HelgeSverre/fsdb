@@ -3085,12 +3085,28 @@ let private geographicPartitionContacts referenceSystem lineSections boundarySec
         for struct (line, boundary), _ in pairs do visit line boundary
         List.ofSeq ordered
 
+let private usesFusedLongitudeForOverlayEndpoints =
+    OperatingSystem.IsLinux()
+    && (match Runtime.InteropServices.RuntimeInformation.ProcessArchitecture with
+        | Runtime.InteropServices.Architecture.Arm64 | Runtime.InteropServices.Architecture.X64 -> true
+        | _ -> false)
+
 let private geographicRoundedOverlayContacts referenceSystem ((start, endpoint) as source) =
     let spheroid, flattening = geographicIntersectionSpheroid referenceSystem
     let distance = geographicInverseDistanceRadians false spheroid
     let azimuth first last = geographicSegmentAzimuthsRadians flattening first last |> fst
     let sourceStart, sourceEnd = geographicLatitudeOrderedSegment source
     let sourceBounds = lazy (geographicSectionBounds flattening [ source ])
+    let coincides first second =
+        if usesFusedLongitudeForOverlayEndpoints then
+            // The pinned Linux builds retain contacts when this form
+            // rounds to unity at the inverse's zero-distance boundary.
+            let latitude, longitude = first
+            let otherLatitude, otherLongitude = second
+            let struct (sine, cosine) = Math.SinCos latitude
+            let struct (otherSine, otherCosine) = Math.SinCos otherLatitude
+            Math.FusedMultiplyAdd(cosine * otherCosine, cos (otherLongitude - longitude), sine * otherSine) >= 1.0
+        else boostGeoEqual (distance first second) 0.0
     let forward origin destination point =
         let delta = azimuth origin point - azimuth origin destination
         abs (normalizedLongitudeRadians delta) <= Math.PI / 2.0
@@ -3116,8 +3132,7 @@ let private geographicRoundedOverlayContacts referenceSystem ((start, endpoint) 
 
     let sourceEndpoint boundary =
         let edgeStart, edgeEnd = geographicLatitudeOrderedSegment boundary
-        if boostGeoEqual (distance edgeStart sourceEnd) 0.0
-           && not (boostGeoEqual (distance edgeStart sourceStart) 0.0)
+        if coincides edgeStart sourceEnd && not (coincides edgeStart sourceStart)
            && forward edgeStart edgeEnd sourceEnd then
             let sourceAzimuth = azimuth sourceStart sourceEnd
             let side point = geographicAzimuthSide (azimuth sourceStart point) sourceAzimuth
