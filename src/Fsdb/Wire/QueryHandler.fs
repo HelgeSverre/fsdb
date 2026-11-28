@@ -1649,7 +1649,7 @@ let private pendingTransactionCharacteristics (session: Session) =
     |> List.choose id
     |> String.concat " "
 
-let private explicitTransactionCharacteristics (readOnly: bool option) (session: Session) =
+let private explicitTransactionCharacteristics consistentSnapshot (readOnly: bool option) (session: Session) =
     let isolation =
         session.PendingTransactionIsolation
         |> Option.map (fun value -> sprintf "SET TRANSACTION ISOLATION LEVEL %s; " (transactionIsolationName value))
@@ -1658,10 +1658,13 @@ let private explicitTransactionCharacteristics (readOnly: bool option) (session:
     let access =
         readOnly
         |> Option.orElse session.PendingTransactionReadOnly
-        |> Option.map (fun value -> if value then " READ ONLY" else " READ WRITE")
-        |> Option.defaultValue ""
+        |> Option.map (fun value -> if value then "READ ONLY" else "READ WRITE")
 
-    isolation + "START TRANSACTION" + access + ";"
+    let options =
+        [ if consistentSnapshot then yield "WITH CONSISTENT SNAPSHOT"
+          yield! Option.toList access ]
+    let suffix = if options.IsEmpty then "" else " " + String.concat ", " options
+    isolation + "START TRANSACTION" + suffix + ";"
 
 let private transactionIsolationScope (prefix: string) =
     match prefix.Trim().ToUpperInvariant() with
@@ -2244,7 +2247,9 @@ let private handleSet session sql =
 // Transaction control stays outside the data-statement AST because it changes
 // connection state without entering Executor.
 
-let private beginTx = Regex(@"^(?:BEGIN(?:\s+WORK)?|START\s+TRANSACTION(?:\s+READ\s+(ONLY|WRITE))?)$", RegexOptions.IgnoreCase)
+let private beginTx =
+    let option = @"(?:(?<snapshot>WITH\s+CONSISTENT\s+SNAPSHOT)|READ\s+(?<access>ONLY|WRITE))"
+    Regex(@"^(?:BEGIN(?:\s+WORK)?|START\s+TRANSACTION(?:\s+" + option + @"(?:\s*,\s*" + option + @")*)?)$", RegexOptions.IgnoreCase)
 
 let private transactionCompletion =
     Regex(
@@ -4867,7 +4872,7 @@ type private Probe =
     | SetPassword of user: string option * change: PasswordChange
     | SetVar
     | RollbackTo of savepoint: string
-    | Begin of readOnly: bool option
+    | Begin of readOnly: bool option * consistentSnapshot: bool
     | Commit of completion: TransactionCompletion
     | Rollback of completion: TransactionCompletion
     | Savepoint of name: string
@@ -5191,8 +5196,14 @@ let private tryProbe (parserOptions: Parser.ParserOptions) (sql: string) : Probe
     | _, _ when command.StartsWith("SET ", StringComparison.OrdinalIgnoreCase) -> Some SetVar
     | RegexMatch rollbackToSavepointStmt matched, _ -> Some(RollbackTo(capture 2 matched))
     | _, RegexMatch beginTx matched ->
-        let readOnly = tryCapture 1 matched |> Option.map (_.Equals("ONLY", StringComparison.OrdinalIgnoreCase))
-        Some(Begin readOnly)
+        let access =
+            matched.Groups["access"].Captures
+            |> Seq.cast<Capture>
+            |> Seq.map (fun capture -> capture.Value.Equals("ONLY", StringComparison.OrdinalIgnoreCase))
+            |> Set.ofSeq |> Set.toList
+        match access with
+        | [] | [ _ ] -> Some(Begin(List.tryHead access, matched.Groups["snapshot"].Success))
+        | _ -> None
     | _, _ when completion.IsSome -> completion
     | RegexMatch savepointStmt matched, _ -> Some(Savepoint(capture 1 matched))
     | RegexMatch releaseSavepointStmt matched, _ -> Some(Release(capture 1 matched))
@@ -5366,7 +5377,7 @@ let private resolveCompletionDirective defaultValue = function
     | EnableCompletion -> true
     | DisableCompletion -> false
 
-let private applyTransactionCompletion completion characteristics readOnly session =
+let private applyTransactionCompletion completion readOnly isolation (characteristics: string) session =
     let defaultChain, defaultRelease =
         match session.Variables |> Map.tryFind "completion_type" |> Option.flatten with
         | Some "CHAIN" -> true, false
@@ -5375,7 +5386,14 @@ let private applyTransactionCompletion completion characteristics readOnly sessi
 
     let session =
         if resolveCompletionDirective defaultChain completion.Chain then
-            beginTransaction ExplicitTrackedTransaction characteristics readOnly session
+            // A chained transaction preserves isolation and access mode. A
+            // request to pin the read view applies only to the original BEGIN.
+            let pending = isolation |> Option.orElse session.PendingTransactionIsolation
+            let characteristics =
+                characteristics
+                    .Replace("START TRANSACTION WITH CONSISTENT SNAPSHOT,", "START TRANSACTION", StringComparison.Ordinal)
+                    .Replace("START TRANSACTION WITH CONSISTENT SNAPSHOT;", "START TRANSACTION;", StringComparison.Ordinal)
+            beginTransaction ExplicitTrackedTransaction characteristics readOnly { session with PendingTransactionIsolation = pending }
         else
             session
 
@@ -5489,30 +5507,44 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         | Error(code, msg) -> session, Err(code, msg)
     | SetVar -> handleSet session sql
     | RollbackTo name -> rollbackToSavepoint name session
-    | Begin readOnly ->
+    | Begin(readOnly, consistentSnapshot) ->
         match xaAssociation session with
         | Some(_, state) -> session, xaRmFail (xaStateName state)
         | None ->
             let access = readOnly |> Option.defaultValue (configuredReadOnly session)
-            let characteristics = explicitTransactionCharacteristics readOnly session
+            let characteristics = explicitTransactionCharacteristics consistentSnapshot readOnly session
             TableLocks.releaseExplicit session.Store session.ConnectionId
-            beginTransaction ExplicitTrackedTransaction characteristics access session, Affected 0UL
+            let started = beginTransaction ExplicitTrackedTransaction characteristics access session
+            if not consistentSnapshot then started, Affected 0UL
+            else
+                let snapshot =
+                    match started.Tx with
+                    | Some tx when tx.Isolation = RepeatableRead ->
+                        let seeded = startTransactionStatement started
+                        seeded.Tx |> Option.iter (fun current -> Storage.pinConsistentReadView current.Snapshot current.BaseCatalog)
+                        seeded
+                    | _ ->
+                        Diagnostics.warning 138 "InnoDB: WITH CONSISTENT SNAPSHOT was ignored because this phrase can only be used with REPEATABLE READ isolation level."
+                        started
+                snapshot, Affected 0UL
     | Commit completion ->
         match xaAssociation session with
         | Some(_, state) -> session, xaRmFail (xaStateName state)
         | None ->
             let readOnly = session.Tx |> Option.map _.ReadOnly |> Option.defaultValue false
             let characteristics = session.TransactionTracking.Characteristics
+            let isolation = session.Tx |> Option.map _.Isolation
             let committed = commitSession session
-            applyTransactionCompletion completion characteristics readOnly committed, Affected 0UL
+            applyTransactionCompletion completion readOnly isolation characteristics committed, Affected 0UL
     | Rollback completion ->
         match xaAssociation session with
         | Some(_, state) -> session, xaRmFail (xaStateName state)
         | None ->
             let readOnly = session.Tx |> Option.map _.ReadOnly |> Option.defaultValue false
             let characteristics = session.TransactionTracking.Characteristics
+            let isolation = session.Tx |> Option.map _.Isolation
             let rolledBack = rollbackSession session
-            applyTransactionCompletion completion characteristics readOnly rolledBack, Affected 0UL
+            applyTransactionCompletion completion readOnly isolation characteristics rolledBack, Affected 0UL
     | Savepoint name -> savepoint name session
     | Release name -> releaseSavepoint name session
     | Use dbName ->
@@ -6300,8 +6332,9 @@ let private prepareStatementWithOptions
     let trimmed = sql.Trim().TrimEnd(';').Trim()
     let command = Parser.stripVersionCommentsWithOptions options trimmed
     let probe = tryProbe options trimmed
+    let beginsTransaction = match probe with Some(Begin _) -> true | _ -> false
 
-    if hasKeywordPrefix "LOAD DATA" command || hasKeywordPrefix "HANDLER" command || hasKeywordPrefix "XA" command then
+    if beginsTransaction || hasKeywordPrefix "LOAD DATA" command || hasKeywordPrefix "HANDLER" command || hasKeywordPrefix "XA" command then
         Result.Error(1295, "This command is not supported in the prepared statement protocol yet")
     elif probe.IsSome then
         match probe with

@@ -1156,11 +1156,17 @@ let releaseTransactionLocks (store: Store) : unit =
         store.ConsistentReadViews.TryRemove context.Owner |> ignore
         releaseAllLockStripes context
 
-let internal recordConsistentReadView (live: Store) (snapshot: Store) =
+let private recordReadView (snapshot: Store) catalog =
     snapshot.TransactionLocks
     |> Option.iter (fun context ->
-        if not (live.ConsistentReadViews.ContainsKey context.Owner) then
-            live.ConsistentReadViews.TryAdd(context.Owner, live.Catalog) |> ignore)
+        if not (snapshot.ConsistentReadViews.ContainsKey context.Owner) then
+            snapshot.ConsistentReadViews.TryAdd(context.Owner, catalog ()) |> ignore)
+
+let internal recordConsistentReadView (live: Store) snapshot =
+    recordReadView snapshot (fun () -> live.Catalog)
+
+let internal pinConsistentReadView snapshot catalog =
+    recordReadView snapshot (fun () -> catalog)
 
 let internal transactionGapLocks (store: Store) =
     match store.TransactionLocks with

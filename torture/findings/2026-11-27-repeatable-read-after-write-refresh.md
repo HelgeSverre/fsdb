@@ -35,3 +35,18 @@ temporary table kept the same permanent-table view.
 The [current point-write follow-up](2026-11-27-current-point-writes.md)
 fixes an UPDATE targeting a key moved after the read view opened. The
 indexed overlay regression reaches the moved row directly.
+
+## Explicit consistent snapshots
+
+`START TRANSACTION WITH CONSISTENT SNAPSHOT` pins the committed view at
+the start of a REPEATABLE READ transaction. A writer that commits before
+the reader's first query is still outside this view. Locking reads can
+see the current row, and a write can overlay its own change without
+replacing the pinned view. Other isolation levels return warning 138
+and apply their ordinary read rules.
+
+An explicit start can combine the snapshot request with `READ ONLY` or
+`READ WRITE` in either order. The wire tracker includes the request in
+its replay text. `COMMIT AND CHAIN` and `ROLLBACK AND CHAIN` retain the
+effective isolation and access mode and drop the one-shot snapshot
+request. Preparing a transaction start returns error 1295.

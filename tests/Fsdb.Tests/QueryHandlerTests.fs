@@ -16677,6 +16677,45 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | other -> failtestf "expected the rolled-back increment to be absent, got %A" other
 
+          testCase "consistent snapshot starts immediately and chains preserve isolation without pinning"
+          <| fun _ ->
+              let warning =
+                  "InnoDB: WITH CONSISTENT SNAPSHOT was ignored because this phrase can only be used with REPEATABLE READ isolation level."
+              for isolation, defaultIsolation in [ "REPEATABLE READ", "READ COMMITTED"; "READ COMMITTED", "REPEATABLE READ" ] do
+                  let store = Fsdb.Storage.create ()
+                  let run session sql expected =
+                      let next, result = handle session sql
+                      Expect.equal result expected sql
+                      next
+                  let row value = ResultSet([ "n" ], [ [ Some value ] ])
+                  let writer = run (create 1 store) "CREATE TABLE t(id INT PRIMARY KEY,n INT)" (Affected 0UL)
+                  let writer = run writer "INSERT INTO t VALUES (1,100)" (Affected 1UL)
+                  let reader = { create 2 store with Capabilities = ClientProtocol41 ||| ClientSessionTrack }
+                  let reader = run reader "SET SESSION session_track_transaction_info=CHARACTERISTICS" (Affected 0UL)
+                  let reader = run reader "PREPARE tx FROM 'START TRANSACTION WITH CONSISTENT SNAPSHOT'"
+                                   (Err(1295, "This command is not supported in the prepared statement protocol yet"))
+                  let reader = run reader $"SET SESSION TRANSACTION ISOLATION LEVEL {defaultIsolation}" (Affected 0UL)
+                  let reader = run reader $"SET TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                  let reader = run reader "START TRANSACTION READ ONLY, WITH CONSISTENT SNAPSHOT" (Affected 0UL)
+                  let tracking = $"SET TRANSACTION ISOLATION LEVEL {isolation}; START TRANSACTION"
+                  Expect.contains reader.SessionStateChanges
+                      (TransactionCharacteristicsChanged $"{tracking} WITH CONSISTENT SNAPSHOT, READ ONLY;")
+                      "the requested start flags are replayable"
+                  let repeatable = isolation = "REPEATABLE READ"
+                  let warnings = if repeatable then [] else [ [ Some "Warning"; Some "138"; Some warning ] ]
+                  let reader = run reader "SHOW WARNINGS" (ResultSet([ "Level"; "Code"; "Message" ], warnings))
+                  let writer = run writer "UPDATE t SET n=200 WHERE id=1" (Affected 1UL)
+                  let reader = run reader "SELECT n FROM t WHERE id=1" (row (if repeatable then "100" else "200"))
+                  let reader = run reader "ROLLBACK AND CHAIN" (Affected 0UL)
+                  Expect.contains reader.SessionStateChanges
+                      (TransactionCharacteristicsChanged $"{tracking} READ ONLY;")
+                      "the chain replay retains isolation and access mode"
+                  let writer = run writer "UPDATE t SET n=300 WHERE id=1" (Affected 1UL)
+                  let reader = run reader "SELECT n FROM t WHERE id=1" (row "300")
+                  run writer "UPDATE t SET n=400 WHERE id=1" (Affected 1UL) |> ignore
+                  let reader = run reader "SELECT n FROM t WHERE id=1" (row (if repeatable then "300" else "400"))
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "transaction access modes, chaining, and SET CHARACTER SET are enforced"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

@@ -1053,6 +1053,10 @@ also refresh the duplicate row after a wait, including checked join views.
 retain the first committed read view and overlay only the transaction's own
 changes. The audited queries include a checked upsert after a lock wait,
 UNION, and a join to a session temporary table.
+[`WITH CONSISTENT SNAPSHOT`](torture/findings/2026-11-27-repeatable-read-after-write-refresh.md#explicit-consistent-snapshots)
+opens that view at transaction start under REPEATABLE READ. A chained
+transaction retains its isolation and access mode and opens a fresh view
+on its first consistent read.
 [Point UPDATE and DELETE](torture/findings/2026-11-27-current-point-writes.md)
 can seek an exact unique key absent from the transaction's old write
 view. The audited writes wait for a pending key or its current row and

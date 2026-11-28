@@ -1918,7 +1918,7 @@ let tests =
               | Result.Error(1064, _) -> ()
               | other -> failtestf "expected a 1064 error, got %A" other
 
-          testCase "prepareStatement accepts SET/SHOW/transaction-control forms the grammar itself doesn't parse"
+          testCase "prepareStatement accepts supported text commands and rejects transaction starts"
           <| fun _ ->
               // Laravel's Schema::disableForeignKeyConstraints() runs
               // Connection::statement(), which always calls PDO::prepare()
@@ -1928,7 +1928,6 @@ let tests =
               for sql in
                   [ "SET FOREIGN_KEY_CHECKS=0"
                     "SET NAMES utf8mb4"
-                    "START TRANSACTION"
                     "COMMIT"
                     "COMMIT RELEASE"
                     "ROLLBACK AND CHAIN NO RELEASE"
@@ -1936,6 +1935,11 @@ let tests =
                   match prepareStatement sql with
                   | Result.Ok(_, 0) -> ()
                   | other -> failtestf "expected %s to prepare with 0 placeholders, got %A" sql other
+
+              for sql in [ "BEGIN"; "START TRANSACTION"; "START TRANSACTION WITH CONSISTENT SNAPSHOT" ] do
+                  match prepareStatement sql with
+                  | Result.Error(1295, _) -> ()
+                  | other -> failtestf "expected %s to be refused with 1295, got %A" sql other
 
           testCase "a prepared SHOW COLUMNS filters by its bound Field value"
           <| fun _ ->
