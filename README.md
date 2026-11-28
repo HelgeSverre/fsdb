@@ -923,6 +923,10 @@ the current session or perform external work:
 - `Cancellation` is signalled when the client disconnects, cancels, or is
   killed. Pass it into blocking I/O.
 
+If an embedded async command throws `OperationCanceledException` during
+execution, Fsdb rolls back its open transaction and releases its transaction
+locks. Cancellation before dispatch leaves the transaction open.
+
 `ScalarFunction.create` produces a deterministic function that is allowed in
 stored expressions. `ScalarFunction.effectful` marks it non-deterministic and
 direct-only. Direct-only functions are rejected where fsdb would invoke them

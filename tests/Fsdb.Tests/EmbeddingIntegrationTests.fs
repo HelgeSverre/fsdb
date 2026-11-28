@@ -50,6 +50,62 @@ let tests =
                       use _command = prepared
                       failtestf "expected preparation of %s to return 1295" command
 
+          testCase "cancelling an embedded statement discards the active transaction"
+          <| fun _ ->
+              for invocation in [ "text"; "immediate"; "reusable" ] do
+                  use started = new System.Threading.ManualResetEventSlim(false)
+                  use cancellation = new System.Threading.CancellationTokenSource()
+                  let wait (context: Fsdb.Functions.QueryContext) _ =
+                      started.Set()
+                      context.Cancellation.WaitHandle.WaitOne(TimeSpan.FromSeconds 5.0) |> ignore
+                      context.Cancellation.ThrowIfCancellationRequested()
+                      VNull
+                  let db =
+                      Fsdb.Db.create ()
+                      |> Fsdb.Db.registerFunction (Fsdb.Functions.ScalarFunction.create "wait_for_cancel" wait |> Fsdb.Functions.ScalarFunction.effectful)
+                  use connection = Fsdb.Db.connect db
+                  use observer = Fsdb.Db.connect db
+                  let run sql expected = Expect.equal (connection.Query sql) expected sql
+                  run "CREATE TABLE permanent_rows(id INT PRIMARY KEY)" (Affected 0UL)
+                  run "CREATE TEMPORARY TABLE session_rows(id INT PRIMARY KEY)" (Affected 0UL)
+                  run "BEGIN" (Affected 0UL)
+                  run "INSERT INTO permanent_rows VALUES(1)" (Affected 1UL)
+                  run "INSERT INTO session_rows VALUES(1)" (Affected 1UL)
+                  let sql = "SELECT wait_for_cancel()"
+                  use prepared =
+                      match connection.Prepare sql with
+                      | Ok prepared -> prepared
+                      | Error error -> failtestf "could not prepare the cancellation fixture: %A" error
+                  let execute token =
+                      match invocation with
+                      | "text" -> connection.QueryAsync(sql, token)
+                      | "immediate" -> connection.ExecuteAsync(sql, [], token)
+                      | _ -> prepared.ExecuteAsync([], token)
+                  use preCancelled = new System.Threading.CancellationTokenSource()
+                  preCancelled.Cancel()
+                  Expect.throwsT<System.Threading.Tasks.TaskCanceledException>
+                      (fun () -> (execute preCancelled.Token).GetAwaiter().GetResult() |> ignore)
+                      "cancellation before dispatch leaves the open transaction intact"
+                  run "SELECT id FROM session_rows" (ResultSet([ "id" ], [ [ Some "1" ] ]))
+
+                  let pending = execute cancellation.Token
+                  Expect.isTrue (started.Wait(TimeSpan.FromSeconds 3.0)) invocation
+                  cancellation.Cancel()
+                  let cancelled =
+                      try
+                          pending.GetAwaiter().GetResult() |> ignore
+                          false
+                      with :? OperationCanceledException -> true
+                  Expect.isTrue cancelled invocation
+                  run "SELECT id FROM session_rows" (ResultSet([ "id" ], []))
+                  run "COMMIT" (Affected 0UL)
+                  Expect.equal
+                      (observer.Query "SELECT id FROM permanent_rows")
+                      (ResultSet([ "id" ], []))
+                      "a subsequent commit cannot publish the discarded transaction"
+                  Expect.equal (observer.Query "SET innodb_lock_wait_timeout=1") (Affected 0UL) "bound the lock check"
+                  Expect.equal (observer.Query "INSERT INTO permanent_rows VALUES(1)") (Affected 1UL) "the aborted transaction releases its key lock"
+
           testCase "embedded async query observes cancellation and typed values"
           <| fun _ ->
               use conn = Fsdb.Db.create () |> Fsdb.Db.connect

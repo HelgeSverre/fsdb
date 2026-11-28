@@ -2658,7 +2658,7 @@ let private rollbackSession (session: Session) =
     { ended with Cursors = Map.empty }
 
 // Error recovery releases the transaction without starting another publication.
-let private abortTransaction session = discardTransaction ignore session
+let internal abortTransaction session = discardTransaction ignore session
 
 /// Starts a new transaction with a provisional snapshot. The real snapshot
 /// is rebound at the first database statement, matching InnoDB's default

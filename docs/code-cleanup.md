@@ -207,8 +207,8 @@ wire controls matched for ordinary completion, snapshot replay, XA
 terminal state, and detached resolution. `just package-check` passed
 with the Release library `fd0b5b69cacd`.
 
-An embedded cancellation follow-up remains open. The host connection can
-retain and later commit a transaction
-after an asynchronous command throws cancellation. The barrier-controlled
-reproduction covers both text and bound commands. An isolated repair
-passes the focused regression and awaits its own full gate.
+Embedded cancellation now updates the host connection's session when it
+discards a transaction. A barrier-controlled regression covers text, one-shot
+bound, and reusable prepared commands, including temporary-row rollback and
+release of a conflicting key. Cancellation before dispatch keeps the open
+transaction intact.

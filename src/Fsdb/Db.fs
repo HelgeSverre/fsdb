@@ -275,9 +275,14 @@ type Connection internal (db: Db) =
     member private _.Run(action: Session.Session -> Session.Session * QueryHandler.QueryResult) =
         lock gate (fun () ->
             if disposed then raise (System.ObjectDisposedException(nameof Connection))
-            let updated, result = action session
-            session <- updated
-            result)
+            Storage.queryCancellation.Value.ThrowIfCancellationRequested()
+            try
+                let updated, result = action session
+                session <- updated
+                result
+            with :? System.OperationCanceledException ->
+                session <- QueryHandler.abortTransaction session
+                reraise ())
 
     member this.Query(sql: string) : QueryHandler.QueryResult =
         this.Run(fun session ->
