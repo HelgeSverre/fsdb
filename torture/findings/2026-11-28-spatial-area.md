@@ -57,3 +57,60 @@ SET @b = ST_GeomFromText('POLYGON((
 SELECT ROUND(ST_Area(ST_SymDifference(@a,@b))),
        ROUND(ST_Area(ST_SymDifference(@b,@a)));
 ```
+
+### Where symmetric difference diverges
+
+For the same inputs, compare the internal union of the directed differences
+with an explicit SQL union. The latter first serializes each intermediate
+geometry, which can change the coordinates used by the union.
+
+```sql
+SET @ab = ST_Difference(@a,@b);
+SET @ba = ST_Difference(@b,@a);
+WITH results AS (
+  SELECT 1 AS n, 'A minus B' AS operation, @ab AS g
+  UNION ALL SELECT 2, 'B minus A', @ba
+  UNION ALL SELECT 3, 'XOR A, B', ST_SymDifference(@a,@b)
+  UNION ALL SELECT 4, 'XOR B, A', ST_SymDifference(@b,@a)
+)
+SELECT operation, ST_GeometryType(g), ROUND(ST_Area(g)) FROM results ORDER BY n;
+
+SELECT ST_GeometryType(g), ROUND(ST_Area(g)) FROM (SELECT ST_Union(@ab,@ba) AS g) AS u;
+SELECT ST_GeometryType(g), ROUND(ST_Area(g)) FROM (SELECT ST_Union(@ba,@ab) AS g) AS u;
+```
+
+| Operation | MySQL type and rounded area (m²) | Fsdb type and rounded area (m²) |
+| --- | --- | --- |
+| A minus B | POLYGON, 64,588,256,568 | POLYGON, 64,588,256,568 |
+| B minus A | POLYGON, 22,506,879,148 | POLYGON, 22,506,879,148 |
+| XOR A, B | POLYGON, 22,506,879,148 | MULTIPOLYGON, 87,095,135,715 |
+| XOR B, A | MULTIPOLYGON, 87,095,135,715 | MULTIPOLYGON, 87,095,135,715 |
+| Union AB, BA | POLYGON, 110,776,053,411 | Error 1235 |
+| Union BA, AB | POLYGON, 110,776,053,411 | Error 1235 |
+
+Across the 36 pairs, Fsdb matched MySQL on type and rounded area within
+1 m² for all 72 directed differences and 44 of 72 symmetric differences.
+The pinned Linux MySQL explicit unions matched the corresponding symmetric
+differences in 63 of 72 cases. Fsdb's explicit unions returned error 1235
+in ten cases. Native macOS MySQL 8.4.11 and the pinned Linux build agreed
+in both operand orders for the four pairs where swapping operands changed
+the result. Their symmetric differences differed in both directions for
+11 other pairs.
+
+MySQL delegates polygon symmetric difference to Boost Geometry, which
+unions the two intermediate multipolygons with their solver coordinates.
+A standalone ARM64 Linux replay using Boost Geometry 1.84 and GCC
+`-ffp-contract=off` matched the pinned MySQL build on all 72 symmetric
+differences. The same replay with `-ffp-contract=fast` matched 54 of 72.
+An Apple Clang build matched the native MySQL build on all 72.
+[MySQL polygon dispatch](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/gis/symdifference_functor.cc#L683-L690)
+[Boost's directed differences and final union](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/sym_difference.hpp#L105-L147)
+
+The Boost traversal trace for the SQL fixture produces one new ring in
+both operand orders. In the forward order, finalized turns mark both input
+rings as traversed, so only the new ring survives. In reverse, the larger
+input ring is eligible for selection because its turns remain unfinalized,
+and Boost returns it alongside the new ring. A parity implementation
+needs to keep the intermediate coordinates and follow the union's turn
+traversal and ring selection.
+[Boost overlay traversal and ring selection](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/overlay/overlay.hpp)

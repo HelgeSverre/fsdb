@@ -3607,9 +3607,13 @@ implementation effort:
    with lines and points. [Geographic polygon set operations](torture/findings/2026-11-26-geographic-polygon-union.md#intersection-difference-and-symmetric-difference)
    extend intersection, difference, and symmetric difference to polygon,
    multipolygon, and polygon-only collection operands. Near-degenerate
-   turns still affect isolated intersection points and symmetric difference
-   lobes. Shared-edge intersection now follows the source ring and
-   preserves its vertices. [Clipping-ring start cuts](torture/findings/2026-11-26-geographic-polygon-union.md#clipping-ring-start-cuts)
+   turns still affect isolated intersection points and
+   [symmetric difference lobes](torture/findings/2026-11-28-spatial-area.md#where-symmetric-difference-diverges).
+   The two subtractions agree within 1 m² in the audited pairs. The final
+   union's turn traversal and ring selection can change the output area
+   when the operands are swapped. Shared-edge intersection now follows
+   the source ring and preserves its vertices.
+   [Clipping-ring start cuts](torture/findings/2026-11-26-geographic-polygon-union.md#clipping-ring-start-cuts)
    now follow MySQL's turn order inside a source edge and at straight
    source vertices. A few split decisions differ across MySQL builds.
    Serialized ring starts, member ordering, and polar endpoints remain
