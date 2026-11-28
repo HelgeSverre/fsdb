@@ -439,19 +439,17 @@ let private decodeGeometryWkb allowNonFinitePoint (srid: int) (bytes: byte[]) =
 
 let tryGeometryFromWkb srid bytes = decodeGeometryWkb false srid bytes |> Option.map (fun struct (geometry, _) -> geometry)
 
-let private decodeMySqlGeometry allowNonFinitePoint (bytes: byte[]) =
+let internal tryGeometryFromMySqlBinaryWithByteOrder allowNonFinitePoint (bytes: byte[]) =
     if bytes.Length < 5 then
         None
     else
         let srid = BinaryPrimitives.ReadInt32LittleEndian(ReadOnlySpan(bytes, 0, 4))
         decodeGeometryWkb allowNonFinitePoint srid bytes.[4..]
 
-let internal tryGeometryFromMySqlBinaryWithByteOrder bytes = decodeMySqlGeometry false bytes
-
-let tryGeometryFromMySqlBinary bytes = tryGeometryFromMySqlBinaryWithByteOrder bytes |> Option.map (fun struct (geometry, _) -> geometry)
+let tryGeometryFromMySqlBinary bytes = tryGeometryFromMySqlBinaryWithByteOrder false bytes |> Option.map (fun struct (geometry, _) -> geometry)
 
 let internal tryGeometryFromMySqlBinaryBeforePointValidation bytes =
-    decodeMySqlGeometry true bytes |> Option.map (fun struct (geometry, _) -> geometry)
+    tryGeometryFromMySqlBinaryWithByteOrder true bytes |> Option.map (fun struct (geometry, _) -> geometry)
 
 type GeometryBounds =
     { MinX: float
@@ -1420,7 +1418,7 @@ let ofWire (s: string) : Value =
         | 'G' ->
             let bytes = Convert.FromBase64String payload
 
-            match tryGeometryFromMySqlBinary bytes with
+            match tryGeometryFromMySqlBinaryBeforePointValidation bytes with
             | Some geometry -> VGeometry geometry
             | None -> failwith "Value.ofWire: invalid geometry payload"
         | tag -> failwithf "Value.ofWire: unknown tag '%c' in %s" tag s
@@ -1558,7 +1556,9 @@ let decodeValue (r: #IReader) : Value =
             |> Option.map (fun length -> r.ReadBytes(int length))
             |> Option.defaultValue [||]
 
-        match tryGeometryFromMySqlBinary bytes with
+        // SQL can store a point with an infinite coordinate produced by a
+        // spatial operation. Recover the stored value as it was published.
+        match tryGeometryFromMySqlBinaryBeforePointValidation bytes with
         | Some geometry -> VGeometry geometry
         | None -> failwith "Value.decodeValue: invalid geometry payload"
     | 0x0buy ->

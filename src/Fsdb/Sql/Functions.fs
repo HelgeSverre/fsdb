@@ -6305,7 +6305,7 @@ let private gisGeometryArgument functionName value =
 
 let private validatedGeometryArgument functionName value =
     let decode bytes =
-        tryGeometryFromMySqlBinaryWithByteOrder bytes |> Option.map (fun struct (decoded, hasBigEndian) ->
+        tryGeometryFromMySqlBinaryWithByteOrder false bytes |> Option.map (fun struct (decoded, hasBigEndian) ->
             let geometry = GeometryCoordinates.swapMySqlGeographicAxes decoded
             if hasBigEndian then retainGeometrySqlEncoding bytes geometry
             else geometry)
@@ -6871,11 +6871,15 @@ let private geometryCentroidFn: Scalar =
             match value with
             | VGeometry _ -> legacyGeometryArgument "st_centroid" value
             | _ ->
-                match stringBytes value |> tryGeometryFromMySqlBinaryWithByteOrder with
+                match stringBytes value |> tryGeometryFromMySqlBinaryWithByteOrder true with
                 | Some struct (_, true) -> raise (SqlError(3055, "Geometry byte string must be little endian."))
                 | Some struct (geometry, false) -> geometry
                 | None -> invalid ()
-        requireWellFormedGisGeometry "st_centroid" geometry
+        // A Cartesian point is copied, including a coordinate produced by
+        // an overflowing centroid calculation.
+        match geometry.Shape with
+        | GPoint _ -> ()
+        | _ -> requireWellFormedGisGeometry "st_centroid" geometry
         let referenceSystem = spatialReferenceSystem "st_centroid" geometry.Srid
         match centroid referenceSystem geometry.Shape with
         | Ok(Some(x, y)) ->

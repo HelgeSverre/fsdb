@@ -2336,9 +2336,16 @@ let tests =
                     Expect.equal (centroid 0L "GEOMETRYCOLLECTION(GEOMETRYCOLLECTION())") VNull "an empty collection returns NULL"
                     Expect.equal (call "ST_Centroid" [ VNull ]) VNull "NULL propagates"
                     match centroid 0L "MULTIPOINT(-1e308 0,-1e308 0,1e308 0)" with
-                    | VGeometry point ->
-                        Expect.equal (Convert.ToHexString(geometryToMySqlBinary point))
+                    | VGeometry point as value ->
+                        let bytes = geometryToMySqlBinary point
+                        Expect.equal (Convert.ToHexString bytes)
                             "000000000101000000000000000000F0FF0000000000000000" "point-sum overflow retains the MySQL binary value"
+                        Expect.equal (call "ST_Centroid" [ value ]) value "a further centroid copies the point"
+                        Expect.equal (call "ST_Centroid" [ VBytes bytes ]) value "the same point can arrive as binary"
+                        Expect.equal (value |> toWire |> ofWire) value "the tagged format retains the point"
+                        let writer = Fsdb.Binary.Writer()
+                        encodeValue writer value
+                        Expect.equal (decodeValue (Fsdb.Binary.Reader(writer.ToArray()))) value "WAL and snapshots retain the point"
                     | result -> failtestf "expected a point on overflow, got %A" result
 
                     for srid, text, code in

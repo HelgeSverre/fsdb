@@ -28,3 +28,5 @@ A stored `POINT` generated from the centroid matched MySQL before and
 after reopening Fsdb's WAL-backed database, including the binary point,
 its SRID, and NULL handling. When a multipoint coordinate sum overflows
 to infinity, the result retains the binary point; `ST_AsText` returns NULL.
+A further centroid copies that point. Direct inserts and stored generated
+points retain the same bytes through forced WAL replay and snapshot reload.
