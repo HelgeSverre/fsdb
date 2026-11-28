@@ -81,6 +81,13 @@ both keys, whereas `ALGORITHM=COPY` and `OPTIMIZE TABLE` invalidated both.
 After a 1412 error, another read of `anchor` still used the original view.
 [MySQL index visibility check](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/dict/dict0mem.cc#L604-L619)
 
+SQL preparation and static `EXPLAIN` could resolve a new secondary index
+while `EXECUTE` and `EXPLAIN ANALYZE` returned 1412 when they opened it.
+After an instant column addition, static `EXPLAIN` of a constant primary
+lookup already returned 1412. `EXPLAIN ANALYZE` with `LIMIT 0` succeeded in
+both cases. `DESCRIBE` and `SHOW INDEX` still reported the old definitions
+inside the transaction, even when statement binding resolved the new ones.
+
 For example, create `anchor(id INT PRIMARY KEY)` and `t(id INT PRIMARY KEY,
 p INT)`, with one row in each. In session A, begin a transaction and read
 `anchor`. In session B, run `ALTER TABLE t ADD COLUMN extra INT,
