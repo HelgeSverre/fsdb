@@ -981,14 +981,16 @@ corresponding `SKIP LOCKED` ranges count unlocked rows toward the limit
 and preserve the gaps at the records they visit successfully.
 [Ordered exact-numeric secondary seeks](torture/findings/2026-11-27-ordered-secondary-locking.md)
 also check pending insertion order before filling OFFSET and LIMIT.
+[Implicit primary-key suffixes and leading ranges](torture/findings/2026-11-27-ordered-secondary-locking.md#implicit-primary-key-suffixes-and-leading-ranges)
+extend those checks to whole numeric secondary keys, including unhinted
+covered seeks and audited composite primary keys.
 [Secondary next-key locks](torture/findings/2026-11-27-ordered-secondary-locking.md#next-key-locks)
-protect the visited gaps on audited exact-numeric indexes that explicitly
-include the primary key. The gaps block inserts and key moves from UPDATE
-and ON DUPLICATE KEY UPDATE, including audited upserts through checked
-views and cascaded moves to a child table.
+protect the visited gaps on audited exact-numeric indexes. The gaps block
+inserts and key moves from UPDATE and ON DUPLICATE KEY UPDATE, including
+audited upserts through checked views and cascaded moves to a child table.
 Lower isolation retains row-only locking and can release OFFSET rows.
-Implicit primary-key suffixes, other secondary key types, and covering
-FOR SHARE record ownership remain open.
+Secondary filesort lock coverage, other key types, and covering FOR SHARE
+record ownership remain open.
 The [blocking form](torture/findings/2026-11-27-ordered-secondary-locking.md#blocking-reads)
 waits for a pending insert or row lock before the limit and reopens the
 seek after the blocker resolves. Audited timeouts retain the visited

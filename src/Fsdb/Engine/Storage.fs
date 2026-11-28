@@ -3043,6 +3043,47 @@ let private supportsRangeAccess group =
     group.Transforms |> List.forall Option.isNone
     && (indexesWholeColumns group || group.Indices.Length = 1)
 
+let internal isIntegerKeyType = function
+    | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ -> true
+    | _ -> false
+
+let private exactOrderedKeyColumn (column: ColumnDef) =
+    match column.Type with
+    | TDecimal _ -> true
+    | kind -> isIntegerKeyType kind
+
+let private extendOrderedSecondaryKey (columns: ColumnDef list) (primary: IndexKeyGroup option) group =
+    match primary with
+    | Some primary when not (group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase))
+                        && indexesWholeColumns group && indexesWholeColumns primary
+                        && List.forall (fun index -> exactOrderedKeyColumn columns.[index]) group.Indices
+                        && List.forall (fun index -> exactOrderedKeyColumn columns.[index]) primary.Indices ->
+        // InnoDB appends the missing primary parts in their declared directions.
+        let missing =
+            List.zip primary.Indices primary.Directions
+            |> List.filter (fun (index, _) -> not (List.contains index group.Indices))
+        if missing.IsEmpty then group
+        else
+            { group with
+                Indices = group.Indices @ List.map fst missing
+                PrefixLengths = group.PrefixLengths @ List.replicate missing.Length None
+                Transforms = group.Transforms @ List.replicate missing.Length None
+                Directions = group.Directions @ List.map snd missing }
+    | _ -> group
+
+let private secondaryLockOrderName declared effective =
+    if declared.Indices.Length = effective.Indices.Length then declared.Name
+    else "\u0000SECONDARY_LOCK_ORDER\u0000" + declared.Name
+
+let private maintainedOrderGroups columns groups =
+    let primary = groups |> List.tryFind (fun group -> group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase))
+    groups |> List.collect (fun declared ->
+        let effective = extendOrderedSecondaryKey columns primary declared
+        if declared.Indices.Length = effective.Indices.Length then [ declared ]
+        else
+            // Ordinary scans keep the declared key's row-ID tie order.
+            [ declared; { effective with Name = secondaryLockOrderName declared effective } ])
+
 let private usesSecondaryOrder group =
     supportsRangeAccess group || supportsOrderedAccess group
 
@@ -3555,6 +3596,7 @@ let private rebuildSecondaryIndex (table: Table) : Map<string, Map<string, Set<R
 
 let private rebuildSecondaryOrder (table: Table) : SecondaryOrder =
     indexKeyGroups table
+    |> maintainedOrderGroups table.Columns
     |> List.filter usesSecondaryOrder
     |> List.map (fun group ->
         let entries: ImmutableSortedSet<SecondaryOrderEntry> =
@@ -3795,6 +3837,7 @@ let private reindexRow
     let secondaryOrder =
         withoutIndexExpressionDiagnostics (fun () ->
             uniqueGroups @ secondaryGroups
+            |> maintainedOrderGroups columns
             |> List.filter usesSecondaryOrder
             |> List.fold (fun indexes keyGroup -> updateNamedGroup keyGroup.Name (updateOrderedGroup keyGroup) indexes) secondaryOrder)
 
@@ -4287,10 +4330,6 @@ let private foreignKeyCascadeValue (child: ColumnDef) (parent: ColumnDef) parent
         |> String.concat ","
         |> VString
     | _ -> parentValue
-
-let internal isIntegerKeyType = function
-    | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ -> true
-    | _ -> false
 
 /// Equal integer values share one key whichever representation stored them.
 let private canonicalIntegerKey value =
@@ -8350,13 +8389,12 @@ type OrderedKeyTerm =
       OrderedTransform: IndexTransform option
       OrderedDirection: Direction }
 
-let private tryOrderedKeyTraversal allowed table (terms: OrderedKeyTerm list) indices =
+let private tryOrderedKeyTraversalInGroups allowed (groups: IndexKeyGroup list) (terms: OrderedKeyTerm list) indices =
     let transforms = terms |> List.map _.OrderedTransform
     let directions = terms |> List.map _.OrderedDirection
     let width = List.length indices
 
-    orderedKeyGroups table
-    |> visibleGroups
+    groups |> visibleGroups
     |> List.filter (fun group -> allowed group.Name)
     |> List.tryPick (fun group ->
         if width > 0 && width <= group.Indices.Length
@@ -8365,6 +8403,9 @@ let private tryOrderedKeyTraversal allowed table (terms: OrderedKeyTerm list) in
             tryIndexTraversal directions (List.take width group.Directions)
             |> Option.map (fun traversal -> group, traversal)
         else None)
+
+let private tryOrderedKeyTraversal allowed table terms indices =
+    tryOrderedKeyTraversalInGroups allowed (orderedKeyGroups table) terms indices
 
 let internal isExactTemporalIndexBound columnType value =
     match columnType, value with
@@ -8381,8 +8422,8 @@ let internal tryOrderedIndexNameWith allowed (table: Table) terms =
     |> Option.filter (fun (group, _) -> Map.containsKey group.Name table.SecondaryOrder)
     |> Option.map (fun (group, _) -> group.Name)
 
-let private tryOrderedIndexWithPrefix
-    (allowed: string -> bool)
+let private tryOrderedIndexWithPrefixUsing
+    (findTraversal: Table -> OrderedKeyTerm list -> int list -> (IndexKeyGroup * IndexTraversal) option)
     (store: Store)
     (table: Table option)
     (terms: OrderedKeyTerm list)
@@ -8396,7 +8437,7 @@ let private tryOrderedIndexWithPrefix
         |> traverse (fun term -> resolveColumn table.Columns term.OrderedColumnName)
         |> Result.toOption
         |> Option.bind (fun indices ->
-            tryOrderedKeyTraversal allowed table terms indices
+            findTraversal table terms indices
             |> Option.bind (fun (group, traversal) ->
                 let normalizeValue index prefixLength transform value =
                     let column = table.Columns.[index]
@@ -8490,6 +8531,9 @@ let private tryOrderedIndexWithPrefix
 
                     Some(table, entries, prefix, slice, traversal)
                 | _ -> None)))
+
+let private tryOrderedIndexWithPrefix allowed store table terms prefixValues lower upper =
+    tryOrderedIndexWithPrefixUsing (tryOrderedKeyTraversal allowed) store table terms prefixValues lower upper
 
 let private tryOrderedIndexSliceWithPrefix allowed store table terms prefixValues lower upper =
     tryOrderedIndexWithPrefix allowed store table terms prefixValues lower upper
@@ -8686,12 +8730,30 @@ type private OrderedSecondaryReadConflict =
 exception private OrderedSecondaryPending of string
 exception private OrderedSecondaryRowLocked of RowId * Value list * TransactionRowWrites option
 
-let private exactOrderedSecondaryKey (table: Table) primary (group: IndexKeyGroup) =
-    let exactNumeric = function TDecimal _ -> true | kind -> isIntegerKeyType kind
-    not (group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase))
-    && not (List.isEmpty primary)
-    && List.forall (fun index -> List.contains index group.Indices) primary
-    && List.forall (fun index -> exactNumeric table.Columns.[index].Type) group.Indices
+let private orderedSecondaryLockGroups (table: Table) =
+    uniqueKeyGroups table
+    |> List.tryFind (fun group -> group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase))
+    |> Option.filter (fun group ->
+        indexesWholeColumns group
+        && List.forall (fun index -> exactOrderedKeyColumn table.Columns.[index]) group.Indices)
+    |> Option.map (fun primary ->
+        let groups =
+            insertOrderKeyGroups table
+            |> List.choose (fun declared ->
+                if declared.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)
+                   || not (List.forall (fun index -> exactOrderedKeyColumn table.Columns.[index]) declared.Indices) then None
+                else Some(declared, extendOrderedSecondaryKey table.Columns (Some primary) declared))
+        primary.Indices, groups)
+
+let internal orderedSecondaryLockKeys (table: Table) =
+    match orderedSecondaryLockGroups table with
+    | None -> []
+    | Some(_, groups) ->
+        groups |> List.map (fun (_, effective) ->
+            let parts =
+                List.zip effective.Indices effective.Directions
+                |> List.map (fun (index, direction) -> table.Columns.[index].Name, direction)
+            effective.Name, parts)
 
 let internal tryLockOrderedSecondaryRead
     timeout (store: Store) (live: Store) refresh database tableName indexName terms prefixValues lower upper strength wait releaseOffset offset limit =
@@ -8708,17 +8770,15 @@ let internal tryLockOrderedSecondaryRead
         |> Option.filter (fun _ ->
             not (Map.containsKey (database.ToLowerInvariant(), normalizeTableName tableName) snapshot.TableShadows))
         |> Option.bind (fun table ->
-            let primary =
-                primaryKeyColumns table
-                |> List.choose (resolveColumn table.Columns >> Result.toOption)
-            insertOrderKeyGroups table
-            |> List.tryFind (fun group ->
-                group.Name.Equals(indexName, StringComparison.OrdinalIgnoreCase)
-                && group.Indices.Length = List.length terms
-                && exactOrderedSecondaryKey table primary group)
-            |> Option.bind (fun group ->
-                let allowed (name: string) = name.Equals(group.Name, StringComparison.OrdinalIgnoreCase)
-                tryOrderedIndexWithPrefix allowed snapshot (Some table) terms prefixValues lower upper
+            orderedSecondaryLockGroups table
+            |> Option.bind (fun (primary, groups) ->
+                groups |> List.tryFind (fun (_, group) -> group.Name.Equals(indexName, StringComparison.OrdinalIgnoreCase))
+                |> Option.map (fun (declared, group) -> primary, declared, group))
+            |> Option.bind (fun (primary, declared, group) ->
+                let storageName = secondaryLockOrderName declared group
+                let traversal _ =
+                    tryOrderedKeyTraversalInGroups (fun _ -> true) [ { group with Name = storageName } ]
+                tryOrderedIndexWithPrefixUsing traversal snapshot (Some table) terms prefixValues lower upper
                 |> Option.bind (fun (_, entries, prefix, slice, traversal) ->
                     let convert = function
                         | None -> Some None
@@ -8744,12 +8804,35 @@ let internal tryLockOrderedSecondaryRead
                             let index = sortedInsertionPoint FirstEqual ordered.Count (fun index -> comparePhysical (keyAt index) key)
                             index < ordered.Count && comparePhysical (keyAt index) key = 0
 
-                        let types = group.Indices |> List.map (fun index -> table.Columns.[index].Type)
+                        let types = declared.Indices |> List.map (fun index -> table.Columns.[index].Type)
                         let primaryTypes = primary |> List.map (fun index -> table.Columns.[index].Type)
+                        let implicitPositions =
+                            primary
+                            |> List.indexed
+                            |> List.choose (fun (position, index) ->
+                                if List.contains index declared.Indices then None else Some position)
+                        let extendClaim key primaryKey =
+                            if implicitPositions.IsEmpty then Some key
+                            else primaryKey |> Option.map (fun primaryKey -> key @ List.map (fun index -> List.item index primaryKey) implicitPositions)
                         let cache = lazy (keyLockCache snapshot (lockNamespaceKey database tableName))
-                        let decode = lazy (orderedClaimDecoder group.Name types primaryTypes)
-                        let active = lazy (activeOrderedKeyClaims snapshot database tableName group.Name types primaryTypes)
+                        let decode = lazy (
+                            let decode = orderedClaimDecoder group.Name types primaryTypes
+                            fun claim -> decode claim |> Option.bind (fun (key, primaryKey) -> extendClaim key primaryKey))
+                        let active = lazy (
+                            activeOrderedKeyClaims snapshot database tableName group.Name types primaryTypes
+                            |> List.choose (fun (key, primaryKey, claim) ->
+                                extendClaim key primaryKey |> Option.map (fun expanded -> expanded, claim)))
                         let selected = slice (orderedPrefixBounds entries prefix)
+                        let exactUnique =
+                            (table.Indexes |> List.exists (fun index ->
+                                index.Unique && index.Name.Equals(group.Name, StringComparison.OrdinalIgnoreCase)))
+                            && (claimPrefix |> List.truncate declared.Indices.Length |> List.forall ((<>) OrderedNull))
+                            && (claimPrefix.Length >= declared.Indices.Length
+                                || (claimPrefix.Length + 1 = declared.Indices.Length
+                                    && (match lower, upper with
+                                        | Some(left, true), Some(right, true) -> left = right
+                                        | _ -> false)))
+                        let protectsGaps = not releaseOffset && (not exactUnique || selected.First = selected.AfterLast)
                         let inRange (key: OrderedIndexKeyPart list) =
                             let prefixLength = claimPrefix.Length
                             if List.take prefixLength key <> claimPrefix then false
@@ -8766,7 +8849,7 @@ let internal tryLockOrderedSecondaryRead
                             if wait = SkipLocked then None
                             else
                                 active.Value
-                                |> List.fold (fun first (key, _, claim) ->
+                                |> List.fold (fun first (key, claim) ->
                                     // A write that returns to the stored key still
                                     // takes the usual clustered-record wait path.
                                     if inRange key && not (isStored entries key)
@@ -8782,7 +8865,7 @@ let internal tryLockOrderedSecondaryRead
                             identities)
 
                         let registerGap besideUpper upperIndex =
-                            if not releaseOffset then
+                            if protectsGaps then
                                 let boundary index =
                                     if index < 0 || index >= entries.Count then None
                                     else
@@ -8803,13 +8886,13 @@ let internal tryLockOrderedSecondaryRead
                                     // gap even though it is absent from this snapshot.
                                     let mutable pendingBoundaries =
                                         active.Value
-                                        |> List.choose (fun (point, _, claim) -> if between point then Some(point, claim) else None)
+                                        |> List.filter (fst >> between)
                                         |> List.sortWith (fun (left, _) (right, _) ->
                                             if besideUpper then comparePhysical right left else comparePhysical left right)
                                     let remains (point, claim) =
                                         let hasPoint =
                                             Option.filter (fun latest -> latest.SchemaRevision = table.SchemaRevision)
-                                            >> Option.bind (fun latest -> Map.tryFind group.Name latest.SecondaryOrder)
+                                            >> Option.bind (fun latest -> Map.tryFind storageName latest.SecondaryOrder)
                                             >> Option.exists (fun ordered -> isStored ordered point)
                                         (exactKeyOwner cache.Value claim).IsSome
                                         || hasPoint (tableAt live database tableName)
@@ -8820,7 +8903,7 @@ let internal tryLockOrderedSecondaryRead
                                                 |> hasPoint))
                                     let contains key =
                                         decode.Value key
-                                        |> Option.exists (fun (point, _) ->
+                                        |> Option.exists (fun point ->
                                             if not (between point) then false
                                             else
                                                 pendingBoundaries <- pendingBoundaries |> List.skipWhile (remains >> not)
@@ -8833,7 +8916,7 @@ let internal tryLockOrderedSecondaryRead
                             tableAt current database tableName
                             |> Option.exists (fun latest ->
                                 latest.SchemaRevision = table.SchemaRevision
-                                && (Map.tryFind group.Name latest.SecondaryOrder
+                                && (Map.tryFind storageName latest.SecondaryOrder
                                     |> Option.exists (fun order -> obj.ReferenceEquals(order, entries) || order.SetEquals entries)))
 
                         let scan current =
@@ -8880,10 +8963,10 @@ let internal tryLockOrderedSecondaryRead
                                 index <- if traversal = Forward then index + 1 else index - 1
                             if ids.Count < limit then
                                 pending |> Option.iter (snd >> stopAtPending)
-                                if not releaseOffset then
+                                if protectsGaps then
                                     if traversal = Backward then
                                         if starting then registerGap false selected.AfterLast
-                                        if index >= 0 then
+                                        if not exactUnique && index >= 0 then
                                             registerGap true index
                                             lockRecord entries.[index] |> ignore
                                     else
@@ -14264,18 +14347,16 @@ type private StagedUpdate =
       OriginalCatalog: Catalog
       WarningPositions: Dictionary<RowId, int> option }
 
-let private orderedSecondaryWriteGroups (table: Table) =
-    let primary = primaryKeyColumns table |> List.choose (resolveColumn table.Columns >> Result.toOption)
-    primary, (insertOrderKeyGroups table |> List.filter (exactOrderedSecondaryKey table primary))
-
 let private orderedUpdateKeys table rows =
-    let primary, groups = orderedSecondaryWriteGroups table
-    [ for group in groups do
-          for change in rows do
-              if group.Indices |> List.exists (fun index -> change.Before.[index] <> change.After.[index]) then
-                  let encode indices =
-                      indices |> List.map (fun index -> change.After.[index]) |> encodeEqualityValues table.Columns indices
-                  yield secondaryOrderLockName group (encode group.Indices) (Some(encode primary)) ]
+    match orderedSecondaryLockGroups table with
+    | None -> []
+    | Some(primary, groups) ->
+        [ for declared, effective in groups do
+              for change in rows do
+                  if effective.Indices |> List.exists (fun index -> change.Before.[index] <> change.After.[index]) then
+                      let encode indices =
+                          indices |> List.map (fun index -> change.After.[index]) |> encodeEqualityValues table.Columns indices
+                      yield secondaryOrderLockName declared (encode declared.Indices) (Some(encode primary)) ]
 
 let private directAndCascadedUpdates dbName tableName direct cascaded =
     if List.isEmpty direct then cascaded

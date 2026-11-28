@@ -317,7 +317,8 @@ type private IndexPrefixMatch =
       PinnedCount: int }
 
 type private ResolvedIndexPrefix =
-    { Database: string
+    { Name: string
+      Database: string
       Table: Table
       Match: IndexPrefixMatch
       PinnedValues: Value list
@@ -16389,26 +16390,43 @@ and private tryOrderedSecondaryLockingRead store registry dbName (select: Select
         let offset = select.Offset |> Option.map literalCount |> Option.defaultValue (Some 0)
         let live, refresh = lockingReadStore.Value |> Option.defaultValue (None, fun () -> store)
 
-        let selectedIndex () =
+        let secondaryCandidates table =
+            let candidates =
+                Storage.orderedSecondaryLockKeys table
+                |> List.map (fun (name, parts) ->
+                    { Name = name
+                      Terms = parts |> List.map (fun (column, direction) ->
+                          { Column = column; Transform = None; Direction = direction }) })
             match tref.IndexHints with
-            | [] ->
-                tryEqualityAccess store registry dbName tref select.Where
-                |> tryEqualityPrefixOrder store registry dbName tref select
-                |> Option.map _.KeyName
-            | [ { Kind = ForceIndex; Scope = (None | Some IndexJoin); Indexes = [ name ] } ] -> Some name
-            | _ -> None
+            | [] when select.Where.IsSome ->
+                // A covered LIMIT can use a seek even when the general
+                // read planner estimates that a scan is cheaper.
+                let preferred =
+                    tryEqualityAccess store registry dbName tref select.Where |> Option.map _.KeyName
+                    |> Option.orElseWith (fun () ->
+                        tryRangeAccessInTable BareOrQualifiedColumn store registry table tref select.Where
+                        |> Option.map _.RangeIndexName)
+                candidates |> List.sortBy (fun candidate -> not (preferred |> Option.exists (equalsIgnoreCase candidate.Name)))
+            | [ { Kind = ForceIndex; Scope = (None | Some IndexJoin); Indexes = [ name ] } ] ->
+                candidates |> List.filter (fun candidate -> equalsIgnoreCase candidate.Name name)
+            | _ -> []
 
         if not (validateOrderAliases columns qualifiers projections select.OrderBy |> Result.isOk) then None
         else
-            let secondary = selectedIndex () |> Option.filter (equalsIgnoreCase "PRIMARY" >> not)
-            Option.map3 (fun index offset terms -> index, offset, terms) secondary offset (indexOrderTerms registry tref select)
-            |> Option.bind (fun (name, offset, terms) ->
-                orderedIndexPrefixMatches IndexJoin store registry dbName tref select.Where terms []
+            Option.map2 (fun offset terms -> offset, terms) offset (indexOrderTerms registry tref select)
+            |> Option.bind (fun (offset, terms) ->
+                let pinned =
+                    exactStoredKeyPins store registry source.Table tref select.Where
+                    |> List.map (fun (pin: PointEquality) -> pin.Column.ToLowerInvariant()) |> Set.ofList
+                let terms =
+                    terms |> List.filter (fun term ->
+                        term.Transform.IsSome || not (Set.contains (term.Column.ToLowerInvariant()) pinned))
+                orderedIndexPrefixMatchesWith secondaryCandidates true IndexJoin store registry dbName tref select.Where terms []
                 |> List.tryPick (fun resolved ->
                     let matched = resolved.Match
-                    if not resolved.PredicateCovered then None
+                    if terms.IsEmpty || not resolved.PredicateCovered then None
                     else
-                        indexPrefixOrderDirections false terms Set.empty matched
+                        indexPrefixOrderDirections true terms Set.empty matched
                         |> Option.bind (fun directions ->
                             let keyTerms =
                                 List.map2 (fun (term: IndexOrderTerm) direction -> { term with Direction = direction }) matched.Terms directions
@@ -16416,7 +16434,7 @@ and private tryOrderedSecondaryLockingRead store registry dbName (select: Select
                             let count = min (int64 System.Int32.MaxValue) (int64 offset + int64 limit) |> int
                             let timeout = lockingReadTimeout.Value |> Option.defaultValue (Limits.lockWaitTimeout ())
                             let lower, upper = fixedPrefixSuffixBounds false store registry resolved.Table tref select.Where matched
-                            Storage.tryLockOrderedSecondaryRead timeout store (Option.defaultValue store live) refresh database tref.Table name keyTerms resolved.PinnedValues
+                            Storage.tryLockOrderedSecondaryRead timeout store (Option.defaultValue store live) refresh database tref.Table resolved.Name keyTerms resolved.PinnedValues
                                 lower upper locking.Strength locking.Wait releaseLockingReadOffsetRows.Value offset count)))
     | _ -> None
 
@@ -23577,6 +23595,7 @@ and private fixedPrefixSuffixBounds
     |> Option.defaultValue (None, None)
 
 and private trySuffixRangeCoverageCount
+    allowLeadingRange
     (store: Store)
     (registry: Registry)
     (table: Table)
@@ -23584,7 +23603,7 @@ and private trySuffixRangeCoverageCount
     (whereExpr: Expr option)
     (matched: IndexPrefixMatch)
     : int option =
-    if matched.PinnedCount = 0 then
+    if matched.PinnedCount = 0 && not allowLeadingRange then
         Some 0
     else
         match matched |> tryDirectSuffixTerm with
@@ -23606,7 +23625,9 @@ and private trySuffixRangeCoverageCount
 
             if lowerCount <= 1 && upperCount <= 1 then Some predicateGroups.Length else None
 
-and private orderedIndexPrefixMatches
+and private orderedIndexPrefixMatchesWith
+    (candidates: Table -> OrderedIndexCandidate list)
+    allowLeadingRange
     (hintScope: TableIndexHintScope)
     (store: Store)
     (registry: Registry)
@@ -23629,7 +23650,7 @@ and private orderedIndexPrefixMatches
             |> List.tryPick (fun (equality: PointEquality) ->
                 if equalsIgnoreCase equality.Column term.Column then Some equality.Value else None)
 
-        orderedIndexCandidates table
+        candidates table
         |> List.filter (fun candidate -> indexAllowedForOrderedAccess hintScope tref candidate.Name)
         |> List.choose (fun candidate ->
             tryIndexPrefix table pinnedColumns requestedTerms candidate.Terms
@@ -23639,9 +23660,10 @@ and private orderedIndexPrefixMatches
                 |> List.map valueFor
                 |> tryAllSome
                 |> Option.map (fun pinnedValues ->
-                    let coveredRangeCount = trySuffixRangeCoverageCount store registry table tref whereExpr matched
+                    let coveredRangeCount = trySuffixRangeCoverageCount allowLeadingRange store registry table tref whereExpr matched
 
-                    { Database = tableDb
+                    { Name = candidate.Name
+                      Database = tableDb
                       Table = table
                       Match = matched
                       PinnedValues = pinnedValues
@@ -23650,6 +23672,9 @@ and private orderedIndexPrefixMatches
                         && (coveredRangeCount
                             |> Option.exists (fun rangeCount -> conjunctCount = pins.Length + rangeCount)) }))))
     |> Option.defaultValue []
+
+and private orderedIndexPrefixMatches scope store registry dbName tref whereExpr requestedTerms prefixPins =
+    orderedIndexPrefixMatchesWith orderedIndexCandidates false scope store registry dbName tref whereExpr requestedTerms prefixPins
 
 and private preferEqualityPrefix allowLeadingRange (candidates: ResolvedIndexPrefix list) =
     if allowLeadingRange then

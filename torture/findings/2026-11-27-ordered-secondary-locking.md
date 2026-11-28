@@ -28,8 +28,8 @@ The ordered read now checks pending keys as it visits the committed index
 slice. A pending key after the requested limit does not affect the result.
 SKIP LOCKED counts successful visits toward OFFSET and LIMIT, and a lower
 isolation level checks an OFFSET row without retaining its row lock.
-The path applies to a complete numeric index order with the primary key
-columns explicitly present in the secondary index.
+The original fixture declares the primary key explicitly as part of the
+secondary index.
 
 The digest-pinned comparison matched 768 read outcomes in memory and with
 WAL. The cases combine integer and DECIMAL sort keys, four isolation levels,
@@ -40,7 +40,49 @@ FOR UPDATE cases. Separate checks agreed for autocommit and for a reader
 that had inserted its own row. An Expecto regression verifies that a
 concurrent deletion reopens the seek and releases the stale row claim.
 Covering FOR SHARE reads still differ in primary record ownership.
-Secondary next-key gaps and general residual filtering remain open.
+General residual filtering remains open.
+
+## Implicit primary-key suffixes and leading ranges
+
+For whole numeric secondary indexes, Fsdb maintains a separate locking order
+when the index declaration omits primary-key columns. The locking order
+appends those columns in their primary-key directions. The locking cursor
+reconstructs the same order from a pending writer's secondary and primary
+claims. Ordinary range scans and uniqueness checks use the declared key.
+[InnoDB secondary index representation](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/dict/dict0dict.cc#L3086-L3115)
+
+A covered ordered read can use a bound on the first secondary column
+without an equality prefix. Predicates that pin an ORDER BY column leave
+the remaining order to the index. Both explicitly named and unhinted
+indexes are covered. The cursor observes pending auto-increment inserts,
+honors NOWAIT and SKIP LOCKED, and stops after advancing through
+OFFSET and LIMIT.
+
+The pinned comparison matched 382 single-column-primary-key outcomes in
+memory and WAL mode. The 320-read matrix had 88 differences before this
+change. The comparison covered forward and reverse scans, descending keys,
+READ COMMITTED and REPEATABLE READ, inserts and primary-key changes into
+visited gaps, and unique secondary equalities. A found unique key locks the
+record. A missing unique key protects the surrounding gap at REPEATABLE READ.
+Separate ownership probes verified that a read retains its visited OFFSET
+row at REPEATABLE READ and releases it at READ COMMITTED. A blocking read
+reopened the leading range after either commit or rollback. Reopening a WAL
+written before this change also rebuilt the implicit suffix in primary-key
+order.
+
+A 24,000-row in-memory Debug fixture with `KEY ix(score)` inserted 400 rows
+per batch across 500 distinct scores. Across three runs per build, median
+insert allocations rose from 1,125 MB to 1,254 MB and median retained heap
+rose from 33.6 MiB to 46.3 MiB. The retained heap includes the table and
+both index orders.
+
+The composite test went from 12 differences to one in 24 outcomes. The
+remaining case agreed across memory and WAL restart. With
+`PRIMARY KEY(tenant DESC,id DESC)` and `KEY ix(score,id)`,
+MySQL uses filesort for `score>10.50 AND score<=30.50 ORDER BY score DESC,
+id DESC,tenant ASC LIMIT 2 OFFSET 1`. It reaches a pending row beyond the
+ordered limit and returns 3572. Fsdb uses the physical index order and
+fills the limit before reaching that row.
 
 ## Blocking reads
 

@@ -9060,6 +9060,72 @@ let tests =
                   run reader "ROLLBACK" (Affected 0UL) |> ignore
                   run holder "ROLLBACK" (Affected 0UL) |> ignore
 
+          testCase "secondary locking reads visit pending keys in implicit suffix and leading-range order"
+          <| fun _ ->
+              for key, predicate, order, hint, rows in
+                  [ "score", "score=20", "id", "FORCE INDEX(ix)", [ "3"; "4" ]
+                    "score,id", "score=20", "id", "", [ "3"; "4" ]
+                    "score", "score BETWEEN 10 AND 30", "score,id", "FORCE INDEX(ix)", [ "1"; "3" ]
+                    "score,id", "score BETWEEN 10 AND 30", "score,id", "", [ "1"; "3" ] ] do
+                  let store = Fsdb.Storage.create ()
+                  let run session sql expected =
+                      let next, result = handle session sql
+                      Expect.equal result expected sql
+                      next
+                  let holder = create 1 store
+                  run holder $"CREATE TABLE jobs(id INT PRIMARY KEY,score INT NOT NULL,KEY ix({key}))" (Affected 0UL) |> ignore
+                  run holder "INSERT INTO jobs VALUES (4,20),(1,10),(3,20),(5,40)" (Affected 4UL) |> ignore
+                  let holder = run holder "BEGIN" (Affected 0UL)
+                  let holder = run holder "INSERT INTO jobs VALUES (2,20)" (Affected 1UL)
+                  let reader = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+                  let query = $"SELECT id FROM jobs {hint} WHERE {predicate} ORDER BY {order} LIMIT 2 FOR UPDATE"
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  let reader, nowait = handle reader (query + " NOWAIT")
+                  TestSupport.Sql.expectError 3572 nowait query
+                  let reader = run reader "ROLLBACK" (Affected 0UL)
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  let reader = run reader (query + " SKIP LOCKED") (ResultSet([ "id" ], rows |> List.map (Some >> List.singleton)))
+                  let reader = run reader "ROLLBACK" (Affected 0UL)
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  let reader, blocked = handle reader query
+                  TestSupport.Sql.expectError 1205 blocked query
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+                  run holder "ROLLBACK" (Affected 0UL) |> ignore
+
+          testCase "implicit secondary suffixes protect gaps around the visited primary key"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let reader = create 1 store
+              run reader "CREATE TABLE jobs(id INT PRIMARY KEY,score INT NOT NULL,KEY ix(score))" (Affected 0UL) |> ignore
+              run reader "INSERT INTO jobs VALUES (4,20),(1,10),(3,20),(5,40)" (Affected 4UL) |> ignore
+              let reader = run reader "BEGIN" (Affected 0UL)
+              let reader =
+                  run reader "SELECT id FROM jobs WHERE score=20 ORDER BY score,id LIMIT 1 FOR UPDATE"
+                      (ResultSet([ "id" ], [ [ Some "3" ] ]))
+              let writer = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              for sql in [ "INSERT INTO jobs VALUES(2,20)"; "UPDATE jobs SET id=2 WHERE id=4" ] do
+                  TestSupport.Sql.expectError 1205 (handle writer sql |> snd) sql
+              let writer = run writer "INSERT INTO jobs VALUES(7,20)" (Affected 1UL)
+              let reader = run reader "ROLLBACK" (Affected 0UL)
+              run reader "CREATE TABLE unique_jobs(id INT PRIMARY KEY,score INT NOT NULL,UNIQUE KEY ix(score))" (Affected 0UL) |> ignore
+              run reader "INSERT INTO unique_jobs VALUES (1,10),(3,20),(5,30)" (Affected 3UL) |> ignore
+              let reader = run reader "BEGIN" (Affected 0UL)
+              let reader =
+                  run reader "SELECT id FROM unique_jobs FORCE INDEX(ix) WHERE score=20 ORDER BY id LIMIT 2 FOR UPDATE"
+                      (ResultSet([ "id" ], [ [ Some "3" ] ]))
+              let writer = run writer "INSERT INTO unique_jobs VALUES(2,19)" (Affected 1UL)
+              let reader = run reader "ROLLBACK" (Affected 0UL)
+              let reader = run reader "BEGIN" (Affected 0UL)
+              let reader =
+                  run reader "SELECT id FROM unique_jobs FORCE INDEX(ix) WHERE score=25 ORDER BY id DESC LIMIT 2 FOR UPDATE"
+                      (ResultSet([ "id" ], []))
+              TestSupport.Sql.expectError 1205 (handle writer "INSERT INTO unique_jobs VALUES(4,25)" |> snd) "a missing unique equality protects its gap"
+              run reader "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "ordered secondary NOWAIT reopens when a visited row disappears"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
