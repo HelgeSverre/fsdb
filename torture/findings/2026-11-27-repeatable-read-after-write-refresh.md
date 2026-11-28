@@ -201,10 +201,23 @@ For the audited standalone view updates, the layout error takes precedence
 over waiting for the rebuilt row. Missing columns and invalid index hints
 retain their existing errors. An INVOKER view still reports a grant failure
 first, with the same 1142 versus MySQL 1356 difference as the no-DDL control.
-Multi-target UPDATE assignment ordering differs. The audited MySQL statements
-process targets in written source order. Only changes to an immediate target
-are visible to later targets. The optimizer can choose a different immediate
-target when the query uses a different index.
+
+### Multi-target assignment order
+
+Audited UPDATE joins over distinct base tables process targets in written
+source order. The driving table may update its row immediately. Later target
+expressions see the resulting row, including changes from BEFORE triggers.
+For a buffered target, repeated SET expressions read the row image from
+before that target's update. Changing the driving access key, including
+through a BEFORE trigger, can require buffered updates for all targets.
+
+Tests cover both driving-table choices, STRAIGHT_JOIN, repeated matches,
+repeated assignments, and three-table joins. A failure while applying a
+buffered target discards the earlier immediate update. The WAL replay probe
+preserves the successful statement and excludes the failed one. With IGNORE,
+an immediate duplicate leaves the stored row intact and exposes the attempted
+image to later target expressions. Ordering for
+writes through views, self-joins, and additional optimizer choices remains open.
 
 ### Plain joined read partners
 

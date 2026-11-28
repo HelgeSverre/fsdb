@@ -30631,6 +30631,100 @@ let private boundUpdateJoinSources storeForSource store dbName from joins where 
             let table = sources[owner].Table
             lazy (Ok { Columns = table.Columns; Rows = boundUpdateRows table access; IdentityOf = Some; WriteTable = None }))))
 
+/// A plain multi-target UPDATE may write its driving row before buffering the
+/// other targets. Keep the target order separate from the driving access.
+let private planJoinedUpdateTargets store registry dbName beforeTriggerColumns (update: UpdateStmt) (sources: MutationSource list) assignments =
+    let targets = assignments |> List.groupBy (fun (source, _, _) -> source) |> List.sortBy fst
+    let physical = lazy (
+        sources
+        |> List.map (fun source ->
+            if source.FromStoredView then None
+            else source.PhysicalTable |> Option.bind (fun reference ->
+                physicalFastPathTable store dbName reference |> Option.map (fun table -> reference, table)))
+        |> tryAllSome)
+
+    match (if targets.Length > 1 then physical.Value else None) with
+    | Some tables when (tables |> List.distinctBy (fst >> physicalTableKey dbName) |> List.length) = sources.Length
+                       && (update.Joins |> List.forall (fun join ->
+                           (match join.Table with FromTable _ -> true | _ -> false)
+                           && (match join.Kind with InnerJoin | StraightJoin | CrossJoin | LeftJoin -> true | _ -> false))) ->
+        Diagnostics.suppress (fun () ->
+            let columns =
+                sources |> List.collect (fun source ->
+                    source.Columns |> List.map (fun column -> mutationColumnKey (source.Qualifier, column.Name), column.Type))
+                |> Map.ofList
+            let qualify = Expression.rewrite (function
+                | Col name ->
+                    sources |> List.filter (fun source -> (resolveColumn source.Columns name).IsOk)
+                    |> List.tryExactlyOne |> Option.map (fun source -> QualifiedCol(source.Qualifier, name))
+                | _ -> None)
+            let where = update.Where |> Option.map qualify
+            let predicates, _ = sourcePredicatesForInnerJoins (FromTable update.From) update.Joins ConsumesAllRows where
+            let joinPairs =
+                update.Joins |> List.mapi (fun index join ->
+                    let right = sources.[index + 1].Qualifier
+                    let usingPairs =
+                        join.Using |> List.choose (fun column ->
+                            sources |> List.take (index + 1)
+                            |> List.tryFind (fun source -> (resolveColumn source.Columns column).IsOk)
+                            |> Option.map (fun left -> (left.Qualifier, column), (right, column)))
+                    qualifiedColumnEqualities (conjuncts join.On) @ usingPairs)
+                |> List.concat
+            let canReorder = update.Joins |> List.forall (fun join -> join.Kind = InnerJoin || join.Kind = CrossJoin)
+            let bounds =
+                if update.Joins |> List.forall (fun join -> join.Kind = InnerJoin || join.Kind = StraightJoin) then
+                    signedJoinBounds columns joinPairs (optionalConjuncts where)
+                else Map.empty
+            let accessFor index (reference, table: Table) =
+                let owner = sources.[index].Qualifier
+                let primary = Storage.primaryKeyColumns table
+                let access =
+                    Map.tryFind (owner.ToLowerInvariant()) predicates
+                    |> Option.bind (fun predicate -> tryPhysicalAccessInTableWith CandidateNarrowing store registry table reference (Some predicate))
+                let primaryProbe =
+                    not primary.IsEmpty
+                    && (indexAllowedBy (indexHintsFor IndexJoin reference) "PRIMARY")
+                    && (primary |> List.forall (fun column -> Map.containsKey (mutationColumnKey (owner, column)) bounds))
+                let point =
+                    primaryProbe || (access |> Option.exists (function EqualityAccess plan -> plan.Unique && plan.UsesFullKey | _ -> false))
+                let estimate =
+                    if primaryProbe then 1
+                    else access |> Option.map physicalAccessCandidateCount |> Option.defaultValue table.RowsArray.Count
+                index, table, access, primary, point, estimate
+            let accesses = List.mapi accessFor tables
+            let index, table, access, primary, point, _ =
+                if canReorder then accesses |> List.minBy (fun (index, _, _, _, point, estimate) -> not point, estimate, index)
+                else List.head accesses
+            let immediate =
+                targets |> List.tryFind (fst >> (=) index)
+                |> Option.bind (fun (_, assignments) ->
+                    let owner = sources.[index].Qualifier
+                    let written =
+                        (assignments |> List.map (fun (_, column, _) -> sources.[index].Columns.[column].Name))
+                        @ beforeTriggerColumns (fst tables.[index])
+                    let scanColumns =
+                        if point then []
+                        else
+                            let keys = access |> Option.map physicalAccessKeyNames |> Option.defaultValue []
+                            primary @ (table.Indexes |> List.collect (fun key ->
+                                if keys |> List.exists (equalsIgnoreCase key.Name) then key.KeyColumns |> List.map _.Name else []))
+                    let affectsJoin name =
+                        let matches (alias, column) = equalsIgnoreCase alias owner && equalsIgnoreCase name column
+                        let referenced = function
+                            | QualifiedCol(alias, column) -> matches (alias, column)
+                            | Col column -> equalsIgnoreCase name column
+                            | _ -> false
+                        let readsOtherSource = Expression.exists (function
+                            | QualifiedCol(alias, _) -> not (equalsIgnoreCase alias owner)
+                            | _ -> false)
+                        (joinPairs |> List.exists (fun (left, right) -> matches left || matches right))
+                        || (update.Joins |> List.exists (fun join -> Expression.exists referenced join.On))
+                        || (optionalConjuncts where |> List.exists (fun term -> readsOtherSource term && Expression.exists referenced term))
+                    if written |> List.exists (fun name -> affectsJoin name || List.exists (equalsIgnoreCase name) scanColumns) then None
+                    else Some index)
+            Some(targets, immediate))
+    | _ -> None
+
 let private explainKey name length =
     Some({ Names = [ name ]; Length = length }: ExplainRendering.ExplainKey)
 
@@ -38771,163 +38865,261 @@ let rec private executeAsWithViewSources
 
                     let claims = sources |> List.map (fun _ -> HashSet<Value[]>(HashIdentity.Reference)) |> Array.ofList
                     let pending = grouped.Tables |> Array.map (fun _ -> Dictionary<Value[], ResizeArray<int * Value>>(HashIdentity.Reference))
+                    let physicalColumns =
+                        grouped.RepresentativeSources |> Array.map (fun source -> sources.[source].Columns)
 
-                    let processRow ((identities, flat): Value[] option list * Value[]) : Result<unit, EvalError> =
-                        check flat
-                        |> Result.bind (fun isMatch ->
-                            if not isMatch then
-                                Ok()
-                            else
-                                // Later assignments observe earlier assignments in the statement.
-                                let working = Array.copy flat
+                    let assignedIndicesByGroup =
+                        grouped.Tables
+                        |> Array.mapi (fun i _ ->
+                            resolvedAssignments
+                            |> List.choose (fun (srcIdx, colIdx, _) -> if sourceGroups.[srcIdx] = Some i then Some colIdx else None)
+                            |> Set.ofList)
 
-                                let claimedThisRow =
-                                    identities
-                                    |> List.mapi (fun srcIdx identity ->
-                                        match identity with
-                                        | None -> false
-                                        | Some physRow ->
-                                            if claims.[srcIdx].Contains physRow then
-                                                false
-                                            else
-                                                claims.[srcIdx].Add physRow |> ignore
-                                                true)
-                                    |> Array.ofList
+                    let coercedAssignmentsByGroup =
+                        grouped.Tables
+                        |> Array.mapi (fun i _ ->
+                            resolvedAssignments
+                            |> List.choose (fun (sourceIndex, columnIndex, expression) ->
+                                if sourceGroups.[sourceIndex] <> Some i
+                                   || isSelfAssignment false sources.[sourceIndex].Qualifier sources.[sourceIndex].Columns.[columnIndex].Name expression then
+                                    None
+                                else Some columnIndex)
+                            |> Set.ofList)
 
-                                let rec go assignments =
-                                    match assignments with
+                    let invocationTables = grouped.Tables |> Array.map (fst >> physicalTableKey dbName) |> Set.ofArray
+
+                    let target i =
+                        let tableRef, temporary = grouped.Tables.[i]
+                        joinedMutationStore snapshot split temporary,
+                        (tableRef.Database |> Option.defaultValue dbName), tableRef.Table
+
+                    let applyGroup i candidates valuesPrepared =
+                        let snapshot, tdb, tname = target i
+                        let beforeTriggers = triggersFor snapshot tdb tname "BEFORE" "UPDATE"
+                        let afterTriggers = triggersFor snapshot tdb tname "AFTER" "UPDATE"
+                        let changedRows = ResizeArray<Value[] option * Value[] option>()
+                        let predicate _ row = Ok(pending.[i].ContainsKey row)
+                        let columns = physicalColumns.[i]
+                        let prepareValue = prepareUpdateAssignment updateStmt.Ignore snapshot beforeTriggers
+                        let updater row =
+                            let updated =
+                                match pending.[i].TryGetValue row with
+                                | true, vals ->
+                                    let newRow = Array.copy row
+
+                                    vals
+                                    |> Seq.fold (fun state (colIdx, value) ->
+                                        state |> Result.bind (fun () ->
+                                            (if valuesPrepared then Ok value else prepareValue columns.[colIdx] value)
+                                            |> Result.map (fun value -> newRow.[colIdx] <- value))) (Ok())
+                                    |> Result.map (fun () ->
+                                        applyOnUpdateTimestamps
+                                            (temporalCoercionMode snapshot)
+                                            columns
+                                            assignedIndicesByGroup.[i]
+                                            row
+                                            newRow
+                                    )
+                                    |> Result.bind (computeGeneratedWithValidation (not updateStmt.Ignore) snapshot registry tdb tname columns)
+                                | false, _ -> Ok row
+
+                            match updated with
+                            | Error(ExpressionError(3819, message)) when updateStmt.Ignore ->
+                                Diagnostics.warning 3819 message
+                                Ok row
+                            | Error(ExpressionError(1369, message)) when updateStmt.Ignore ->
+                                Diagnostics.warning 1369 message
+                                Ok row
+                            | Error error -> Error error
+                            | Ok candidate ->
+                                match prepareUpdateAfterTriggers updateStmt.Ignore snapshot tdb tname columns coercedAssignmentsByGroup.[i] beforeTriggers row candidate with
+                                | Error error -> Error error
+                                | Ok None -> Ok row
+                                | Ok(Some candidate) ->
+                                    let validated =
+                                        computeGeneratedRow snapshot registry tdb tname columns candidate
+                                        |> Result.bind (validateViewCandidate snapshot tdb tname physicalColumns.[i] (Some row))
+
+                                    match validated with
+                                    | Error(ExpressionError(3819, message)) when updateStmt.Ignore ->
+                                        Diagnostics.warning 3819 message
+                                        Ok row
+                                    | Error(ExpressionError(1369, message)) when updateStmt.Ignore ->
+                                        Diagnostics.warning 1369 message
+                                        Ok row
+                                    | Error error -> Error error
+                                    | Ok candidate ->
+                                        changedRows.Add(Some(Array.copy row), Some candidate)
+                                        Ok candidate
+
+                        applyUpdateRows updateStmt snapshot tdb tname candidates predicate coercedAssignmentsByGroup.[i] updater changedRows beforeTriggers afterTriggers
+                        |> Result.map (fun changed ->
+                            let attempted =
+                                if valuesPrepared && updateStmt.Ignore && changed = 0 then
+                                    changedRows |> Seq.tryLast |> Option.bind snd
+                                else None
+                            changed, attempted)
+
+                    let enqueue group row column value =
+                        let assignments =
+                            match pending.[group].TryGetValue row with
+                            | true, values -> values
+                            | false, _ ->
+                                let values = ResizeArray()
+                                pending.[group].[row] <- values
+                                values
+                        assignments.Add(column, value)
+
+                    let evaluate (working: Value[]) (source, column, expression) =
+                        if isSelfAssignment false sources.[source].Qualifier sources.[source].Columns.[column].Name expression then
+                            Ok working.[sourceOffsets.[source] + column]
+                        else evalExpr (ctxFor working) expression
+
+                    let evalError (code, message) = Err(code, message)
+
+                    let processLegacy (identities: Value[] option list) working =
+                        let claimed = identities |> List.mapi (fun source -> Option.exists claims.[source].Add) |> List.toArray
+                        let rec evaluateAll = function
+                            | [] -> Ok()
+                            | ((source, column, _) as assignment) :: rest ->
+                                evaluate working assignment
+                                |> Result.mapError evalError
+                                |> Result.bind (fun value ->
+                                    working.[sourceOffsets.[source] + column] <- value
+                                    match sourceGroups.[source], identities.[source] with
+                                    | Some group, Some row when claimed.[source] -> enqueue group row column value
+                                    | _ -> ()
+                                    evaluateAll rest)
+                        evaluateAll resolvedAssignments
+
+                    let planned =
+                        if split.IsNone && viewSources.Aliases.IsEmpty && matchNodes.IsEmpty then
+                            let triggerColumns (reference: TableRef) =
+                                let database = reference.Database |> Option.defaultValue dbName
+                                triggersFor snapshot database reference.Table "BEFORE" "UPDATE"
+                                |> List.collect (fun trigger ->
+                                    StoredProgram.parseTrigger (SqlMode.parserOptionsFor trigger.SqlMode) trigger.Body
+                                    |> Result.defaultValue []
+                                    |> List.collect StoredProgram.sqlStatements
+                                    |> List.choose (function SetTriggerNew(column, _) -> Some column | _ -> None))
+                            planJoinedUpdateTargets snapshot registry dbName triggerColumns updateStmt sources resolvedAssignments
+                        else None
+                    let immediateRowId =
+                        lazy (
+                            planned |> Option.bind snd |> Option.bind (fun source -> sourceGroups.[source])
+                            |> Option.bind (fun group ->
+                                let store, database, table = target group
+                                tableSnapshot store database table |> Result.toOption |> Option.map (fun current -> store, current))
+                            |> Option.map (fun (store, table) ->
+                                let keyIndices =
+                                    Storage.primaryKeyColumns table
+                                    |> List.map (resolveColumn table.Columns >> Result.toOption) |> tryAllSome
+                                let identities = lazy (
+                                    let rows = Dictionary<Value[], RowId>(HashIdentity.Reference)
+                                    for rowId, row in table.RowsArray.Indexed do
+                                        rows.[row] <- rowId
+                                    rows)
+                                fun (row: Value[]) ->
+                                    let byKey =
+                                        keyIndices
+                                        |> Option.bind (fun indices ->
+                                            let values = indices |> List.map (fun index -> row.[index])
+                                            Storage.tryPrimaryWriteLockTargets store table values)
+                                        |> Option.bind (fun claim -> List.tryExactlyOne claim.RowIds)
+                                        |> Option.filter (fun rowId ->
+                                            table.RowsArray.TryFind rowId |> Option.exists (fun current -> obj.ReferenceEquals(row, current)))
+                                    byKey |> Option.defaultWith (fun () -> identities.Value.[row])))
+                    let mutable immediateMatched = 0
+                    let mutable immediateChanged = 0
+                    let immediateImages = lazy (Dictionary<Value[], Value[]>(HashIdentity.Reference))
+
+                    let processPlanned targets immediate (identities: Value[] option list) working =
+                        let expose source (image: Value[]) = System.Array.Copy(image, 0, working, sourceOffsets.[source], image.Length)
+                        immediate |> Option.iter (fun source ->
+                            identities.[source] |> Option.iter (fun row ->
+                                match immediateImages.Value.TryGetValue row with
+                                | true, image -> expose source image
+                                | _ -> ()))
+                        let processTarget (source, assignments) =
+                            match sourceGroups.[source], identities.[source] with
+                            | Some group, Some row when claims.[source].Add row ->
+                                let isImmediate = immediate = Some source
+                                let prepareValue =
+                                    if isImmediate then
+                                        let store, database, table = target group
+                                        let before = triggersFor store database table "BEFORE" "UPDATE"
+                                        prepareUpdateAssignment updateStmt.Ignore store before
+                                    else fun _ value -> Ok value
+                                let rec collect = function
                                     | [] -> Ok()
-                                    | (srcIdx, colIdx, expr) :: rest ->
-                                        (if isSelfAssignment false sources.[srcIdx].Qualifier sources.[srcIdx].Columns.[colIdx].Name expr then
-                                             Ok working.[sourceOffsets.[srcIdx] + colIdx]
-                                         else evalExpr (ctxFor working) expr)
-                                        |> Result.bind (fun v ->
-                                            working.[sourceOffsets.[srcIdx] + colIdx] <- v
+                                    | ((_, column, _) as assignment) :: rest ->
+                                        evaluate working assignment
+                                        |> Result.mapError evalError
+                                        |> Result.bind (fun value ->
+                                            prepareValue physicalColumns.[group].[column] value |> Result.mapError storageErr)
+                                        |> Result.bind (fun value ->
+                                            if isImmediate then working.[sourceOffsets.[source] + column] <- value
+                                            enqueue group row column value
+                                            collect rest)
+                                collect assignments
+                                |> Result.bind (fun () ->
+                                    if not isImmediate then Ok()
+                                    else
+                                        let rowId = immediateRowId.Value.Value row
+                                        withTriggerInvocationTables invocationTables (fun () ->
+                                            applyGroup group (Some [ rowId, row ]) true)
+                                        |> Result.mapError storageErr
+                                        |> Result.map (fun (changed, attempted) ->
+                                            immediateMatched <- immediateMatched + 1
+                                            immediateChanged <- immediateChanged + changed
+                                            pending.[group].Clear()
+                                            let store, database, table = target group
+                                            let current =
+                                                // An ignored conflict can leave the attempted image in the join row.
+                                                attempted |> Option.orElseWith (fun () ->
+                                                    tableSnapshot store database table |> Result.toOption
+                                                    |> Option.bind (fun table -> table.RowsArray.TryFind rowId))
+                                                |> Option.defaultValue row
+                                            immediateImages.Value.[row] <- current
+                                            expose source current))
+                            | _ -> Ok()
 
-                                            match List.item srcIdx identities with
-                                            | None -> ()
-                                            | Some physRow ->
-                                                match sourceGroups.[srcIdx] with
-                                                | Some physIdx when claimedThisRow.[srcIdx] ->
-                                                    let assignments =
-                                                        match pending.[physIdx].TryGetValue physRow with
-                                                        | true, values -> values
-                                                        | false, _ ->
-                                                            let values = ResizeArray()
-                                                            pending.[physIdx].[physRow] <- values
-                                                            values
+                        let rec run = function
+                            | [] -> Ok()
+                            | target :: rest -> processTarget target |> Result.bind (fun () -> run rest)
+                        run targets
 
-                                                    assignments.Add(colIdx, v)
-                                                | _ -> ()
-
-                                            go rest)
-
-                                go resolvedAssignments)
+                    let processRow ((identities, flat): Value[] option list * Value[]) =
+                        check flat
+                        |> Result.mapError evalError
+                        |> Result.bind (fun isMatch ->
+                            if not isMatch then Ok()
+                            else
+                                let working = Array.copy flat
+                                match planned with
+                                | Some(targets, immediate) -> processPlanned targets immediate identities working
+                                | None -> processLegacy identities working)
 
                     match joinedRows |> traverse processRow with
-                    | Error(code, message) -> ids, Err(code, message)
+                    | Error error -> ids, error
                     | Ok _ ->
-                        let physicalColumns =
-                            grouped.RepresentativeSources |> Array.map (fun source -> sources.[source].Columns)
-
-                        let assignedIndicesByGroup =
-                            grouped.Tables
-                            |> Array.mapi (fun i _ ->
-                                resolvedAssignments
-                                |> List.choose (fun (srcIdx, colIdx, _) -> if sourceGroups.[srcIdx] = Some i then Some colIdx else None)
-                                |> Set.ofList)
-
-                        let coercedAssignmentsByGroup =
-                            grouped.Tables
-                            |> Array.mapi (fun i _ ->
-                                resolvedAssignments
-                                |> List.choose (fun (sourceIndex, columnIndex, expression) ->
-                                    if sourceGroups.[sourceIndex] <> Some i
-                                       || isSelfAssignment false sources.[sourceIndex].Qualifier sources.[sourceIndex].Columns.[columnIndex].Name expression then
-                                        None
-                                    else Some columnIndex)
-                                |> Set.ofList)
-
-                        let invocationTables = grouped.Tables |> Array.map (fst >> physicalTableKey dbName) |> Set.ofArray
-
                         let apply =
                             withTriggerInvocationTables invocationTables (fun () ->
                                 grouped.Tables
-                                |> Array.mapi (fun i (tableRef, temporary) ->
-                                    if pending.[i].Count = 0 then
-                                        Ok 0
+                                |> Array.mapi (fun i _ ->
+                                    if pending.[i].Count = 0 then Ok 0
                                     else
-                                        let snapshot = joinedMutationStore snapshot split temporary
-                                        let tdb, tname = (tableRef.Database |> Option.defaultValue dbName), tableRef.Table
-                                        let beforeTriggers = triggersFor snapshot tdb tname "BEFORE" "UPDATE"
-                                        let afterTriggers = triggersFor snapshot tdb tname "AFTER" "UPDATE"
-                                        let changedRows = ResizeArray<Value[] option * Value[] option>()
-                                        let predicate _ row = Ok(pending.[i].ContainsKey row)
+                                        let store, database, table = target i
                                         let candidates =
-                                            tableSnapshot snapshot tdb tname
+                                            tableSnapshot store database table
                                             |> Result.toOption
                                             |> Option.bind (fun table ->
                                                 let rows =
                                                     table.RowsArray.Indexed
                                                     |> Seq.filter (fun (_, row) -> pending.[i].ContainsKey row)
                                                     |> Seq.toList
-
                                                 if rows.Length = pending.[i].Count then Some rows else None)
-
-                                        let columns = physicalColumns.[i]
-                                        let prepareValue = prepareUpdateAssignment updateStmt.Ignore snapshot beforeTriggers
-                                        let updater row =
-                                            let updated =
-                                                match pending.[i].TryGetValue row with
-                                                | true, vals ->
-                                                    let newRow = Array.copy row
-
-                                                    vals
-                                                    |> Seq.fold (fun state (colIdx, value) ->
-                                                        state |> Result.bind (fun () ->
-                                                            prepareValue columns.[colIdx] value
-                                                            |> Result.map (fun value -> newRow.[colIdx] <- value))) (Ok())
-                                                    |> Result.map (fun () ->
-                                                        applyOnUpdateTimestamps
-                                                            (temporalCoercionMode snapshot)
-                                                            columns
-                                                            assignedIndicesByGroup.[i]
-                                                            row
-                                                            newRow
-                                                    )
-                                                    |> Result.bind (computeGeneratedWithValidation (not updateStmt.Ignore) snapshot registry tdb tname columns)
-                                                | false, _ -> Ok row
-
-                                            match updated with
-                                            | Error(ExpressionError(3819, message)) when updateStmt.Ignore ->
-                                                Diagnostics.warning 3819 message
-                                                Ok row
-                                            | Error(ExpressionError(1369, message)) when updateStmt.Ignore ->
-                                                Diagnostics.warning 1369 message
-                                                Ok row
-                                            | Error error -> Error error
-                                            | Ok candidate ->
-                                                match prepareUpdateAfterTriggers updateStmt.Ignore snapshot tdb tname columns coercedAssignmentsByGroup.[i] beforeTriggers row candidate with
-                                                | Error error -> Error error
-                                                | Ok None -> Ok row
-                                                | Ok(Some candidate) ->
-                                                    let validated =
-                                                        computeGeneratedRow snapshot registry tdb tname columns candidate
-                                                        |> Result.bind (validateViewCandidate snapshot tdb tname physicalColumns.[i] (Some row))
-
-                                                    match validated with
-                                                    | Error(ExpressionError(3819, message)) when updateStmt.Ignore ->
-                                                        Diagnostics.warning 3819 message
-                                                        Ok row
-                                                    | Error(ExpressionError(1369, message)) when updateStmt.Ignore ->
-                                                        Diagnostics.warning 1369 message
-                                                        Ok row
-                                                    | Error error -> Error error
-                                                    | Ok candidate ->
-                                                        changedRows.Add(Some(Array.copy row), Some candidate)
-                                                        Ok candidate
-
-                                        applyUpdateRows updateStmt snapshot tdb tname candidates predicate coercedAssignmentsByGroup.[i] updater changedRows beforeTriggers afterTriggers)
+                                        applyGroup i candidates false |> Result.map fst)
                                 |> Array.toList
                                 |> traverse id)
 
@@ -38936,10 +39128,9 @@ let rec private executeAsWithViewSources
                             match split with
                             | Some _ -> commitJoinedMutation store baseCatalog snapshot split
                             | None -> publishMutationSnapshot store baseCatalog snapshot
-                            // CLIENT_FOUND_ROWS reports claimed rows; the
-                            // default reports rows changed after BEFORE triggers.
-                            let matched = pending |> Array.sumBy (fun d -> d.Count)
-                            ids, Affected(uint64 (if foundRows then matched else List.sum counts))
+                            let matched = immediateMatched + (pending |> Array.sumBy (fun rows -> rows.Count))
+                            let changed = immediateChanged + List.sum counts
+                            ids, Affected(uint64 (if foundRows then matched else changed))
                         | Error e -> ids, storageErr e)
 
     | Delete { Source = SingleDeleteTable source } when source.Database.IsNone

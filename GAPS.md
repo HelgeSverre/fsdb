@@ -1084,6 +1084,9 @@ also reject rebuilt layouts and forced probes through new keys in the audited
 plans, including writes through mergeable views. [Audited plain joins on
 integer primary keys](torture/findings/2026-11-27-repeatable-read-after-write-refresh.md#plain-joined-read-partners)
 wait on matching partner rows and read their committed versions after a wait.
+[Audited multi-target updates on distinct base tables](torture/findings/2026-11-27-repeatable-read-after-write-refresh.md#multi-target-assignment-order)
+apply the driving row immediately when the access path permits it. Later
+target expressions can see that row's new values, including trigger changes.
 Broader access plans, joined write scheduling, and prepared or EXPLAIN paths
 still differ.
 [Point UPDATE and DELETE](torture/findings/2026-11-27-current-point-writes.md)

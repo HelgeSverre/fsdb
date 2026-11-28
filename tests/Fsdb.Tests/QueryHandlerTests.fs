@@ -17193,6 +17193,42 @@ let tests =
               let reader = run reader "SELECT v FROM dst WHERE id=1" (ResultSet([ "v" ], [ [ Some "400" ] ]))
               run reader "ROLLBACK" (Affected 0UL) |> ignore
 
+          testCase "multi-target updates expose only the immediate target's new row"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let session = run (create 1 (Fsdb.Storage.create ())) "CREATE TABLE a(id INT PRIMARY KEY,k INT,v INT,INDEX ix(k))" (Affected 0UL)
+              let session = run session "CREATE TABLE b(id INT PRIMARY KEY,k INT,v INT,INDEX ix(k))" (Affected 0UL)
+              let session = run session "INSERT INTO a VALUES(1,10,10),(2,20,20)" (Affected 2UL)
+              let session = run session "INSERT INTO b VALUES(1,10,100),(2,20,200)" (Affected 2UL)
+              let check sql expectedA expectedB session =
+                  let session = run session "START TRANSACTION" (Affected 0UL)
+                  let session = run session sql (Affected 2UL)
+                  let expected = ResultSet([ "av"; "bv" ], [ [ Some expectedA; Some expectedB ] ])
+                  let session = run session "SELECT a.v AS av,b.v AS bv FROM a JOIN b USING(id) WHERE a.id=1" expected
+                  run session "ROLLBACK" (Affected 0UL)
+              let session = session |> check "UPDATE a JOIN b ON a.id=b.id SET b.v=a.v,a.v=a.v+1 WHERE a.id=1" "11" "11"
+              let session = session |> check "UPDATE a JOIN b ON a.id=b.id SET b.v=b.v+1,b.v=b.v+2,a.v=b.v WHERE a.id=1" "100" "102"
+              let session = session |> check "UPDATE a JOIN b ON a.id=b.id SET b.v=b.v+1,b.v=b.v+2,a.v=b.v WHERE b.k=10" "100" "103"
+              let session = session |> check "UPDATE a JOIN b USING(id) SET a.k=a.k+1,a.v=a.k,b.v=a.k WHERE a.k=10" "10" "10"
+              let session = run session "CREATE TRIGGER a_adjust BEFORE UPDATE ON a FOR EACH ROW SET NEW.v=NEW.v+5" (Affected 0UL)
+              let session = session |> check "UPDATE a JOIN b ON a.id=b.id SET b.v=a.v,a.v=a.v+1 WHERE a.id=1" "16" "16"
+              let session = run session "ALTER TABLE b ADD UNIQUE INDEX uq_v(v)" (Affected 0UL)
+              let session = run session "UPDATE a JOIN b ON a.id=b.id SET b.v=200,a.v=a.v+1 WHERE a.id=1"
+                                (Err(1062, "Duplicate entry '200' for key 'b.uq_v'"))
+              let session = run session "SELECT a.v AS av,b.v AS bv FROM a JOIN b USING(id) WHERE a.id=1"
+                                (ResultSet([ "av"; "bv" ], [ [ Some "10"; Some "100" ] ]))
+              let session = run session "DROP TRIGGER a_adjust" (Affected 0UL)
+              let session = run session "CREATE TRIGGER b_rekey BEFORE UPDATE ON b FOR EACH ROW SET NEW.k=NEW.k+3" (Affected 0UL)
+              let session = session |> check "UPDATE a JOIN b USING(id) SET b.v=b.v+1,b.v=b.v+2,a.v=b.v WHERE b.k=10" "100" "102"
+              let session = run session "DROP TRIGGER b_rekey" (Affected 0UL)
+              let session = run session "ALTER TABLE a ADD UNIQUE INDEX uq_v(v)" (Affected 0UL)
+              let session = run session "UPDATE IGNORE a JOIN b ON a.id=b.id SET b.v=a.v,a.v=20 WHERE a.id=1" (Affected 1UL)
+              run session "SELECT a.v AS av,b.v AS bv FROM a JOIN b USING(id) WHERE a.id=1"
+                  (ResultSet([ "av"; "bv" ], [ [ Some "10"; Some "20" ] ])) |> ignore
+
           testCase "transaction access modes, chaining, and SET CHARACTER SET are enforced"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
