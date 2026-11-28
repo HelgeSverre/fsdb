@@ -6210,25 +6210,16 @@ let private bindPreparedPlaceholders source (session: Session) (prepared: Prepar
                         if bound.Reprepared then sessionDivisionPrecision session else prepared.DivisionPrecisionIncrement }
             updated, bindParameterExpressions bound.Statement bound.Expressions)
 
-/// Renumbers surviving `Placeholder` nodes densely in traversal (= source)
-/// order, returning the statement and the true parameter count. FParsec's
-/// `attempt` rewinds the input but not the parse-time placeholder counter,
-/// so a backtracked atom (`CONVERT(?, x)`) can leave a gap/overcount in the
-/// AST indices; renumbering here is the source of truth `bindPlaceholders`
-/// then binds against, so COM_STMT_PREPARE_OK advertises the right count and
-/// each value lands on the right `?`.
+/// Compacts the parser's SQL-text indices after backtracking. AST traversal
+/// can visit placeholders in a different order, as in WITH and LIMIT.
 let renumberPlaceholders (stmt: Statement) : Statement * int =
-    let next = ref 0
+    let indices = System.Collections.Generic.SortedSet<int>()
+    mapPlaceholders (fun index ->
+        indices.Add index |> ignore
+        Placeholder index) stmt |> ignore
 
-    let renumbered =
-        mapPlaceholders
-            (fun _ ->
-                let n = next.Value
-                next.Value <- n + 1
-                Placeholder n)
-            stmt
-
-    renumbered, next.Value
+    let dense = indices |> Seq.mapi (fun index original -> original, index) |> Map.ofSeq
+    mapPlaceholders (fun original -> Placeholder dense.[original]) stmt, indices.Count
 
 /// Validates COM_STMT_PREPARE without executing text-probed commands.
 let private prepareStatementWithOptions

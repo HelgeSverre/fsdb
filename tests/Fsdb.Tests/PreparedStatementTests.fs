@@ -3729,6 +3729,22 @@ let tests =
                   | other -> failtestf "expected updated rows, got %A" other
               | other -> failtestf "expected a parsed CTE update with two params, got %A" other
 
+          testCase "prepared CTEs and LIMIT bind parameters in SQL text order"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE prepared_bounds (id INT PRIMARY KEY)"
+              let session, _ = handle session "INSERT INTO prepared_bounds VALUES (1), (2), (3), (4), (5)"
+
+              for sql, expected in
+                  [ "WITH seed AS (SELECT CONVERT(?, SIGNED) AS a) SELECT a, ? AS b FROM seed",
+                    ResultSet([ "a"; "b" ], [ [ Some "1"; Some "3" ] ])
+                    "SELECT id FROM prepared_bounds ORDER BY id LIMIT ?, ?",
+                    ResultSet([ "id" ], [ [ Some "2" ]; [ Some "3" ]; [ Some "4" ] ]) ] do
+                  let ast, count = prepareStatementForSession session sql |> Result.defaultWith (fun error -> failtestf "%s: %A" sql error)
+                  Expect.equal count 2 sql
+                  let prepared = createPreparedStatement session sql ast count
+                  Expect.equal (executePrepared session prepared [ VInt 1L; VInt 3L ] |> snd) expected sql
+
           testCase "a prepared ROW predicate binds each constructor field"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
