@@ -150,3 +150,16 @@ also matched which gaps a blocking scan protected while it waited.
 Another 24 schedules matched across mixed-direction composite, collated
 text, decimal, and binary keys. Eight explicit `READ ONLY` transactions
 at SERIALIZABLE matched the implicit and explicit shared-read behavior.
+
+MySQL also scans the primary index when the eligible secondary indexes
+cannot cover the projection. `FORCE INDEX` on one non-covering secondary
+index can still produce a primary scan, even when another index covers
+the projection. The planner accounts for the primary key stored in
+secondary records and requires whole, untransformed values for the
+other projected columns.
+
+The comparison matched 264 additional schedules. These cover unhinted
+and forced non-covering scans, a competing covering index excluded by
+the hint, prefix and functional indexes, composite primary keys,
+qualified stars, and concurrent row locks and pending inserts. Covering
+secondary scans require their own locking rules.

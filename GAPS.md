@@ -970,8 +970,8 @@ tables with durable row changes.
 [Explicit primary-key locking reads](torture/findings/2026-11-26-explicit-primary-locking-reads.md)
 now protect missing keys and the visited range under REPEATABLE READ
 and SERIALIZABLE. [Full primary scans](torture/findings/2026-11-26-explicit-primary-locking-reads.md#full-primary-scans)
-also protect the final insertion gap when `PRIMARY` is forced or is the
-only visible B-tree index. [Exact primary-key locking reads](torture/findings/2026-11-27-missing-primary-write-gaps.md#exact-primary-key-locking-reads)
+also protect the final insertion gap when `PRIMARY` is forced or the
+eligible secondary indexes cannot cover the projection. [Exact primary-key locking reads](torture/findings/2026-11-27-missing-primary-write-gaps.md#exact-primary-key-locking-reads)
 also protect gaps for audited collated text, decimal, and binary keys.
 READ COMMITTED retains row-only locking for the audited reads.
 [Exact `NOWAIT` and `SKIP LOCKED` reads](torture/findings/2026-11-27-missing-primary-write-gaps.md#exact-nowait-and-skip-locked-reads)

@@ -8603,34 +8603,38 @@ let tests =
           testCase "full primary locking scans protect the final gap in repeatable reads"
           <| fun _ ->
               let cases =
-                  [ "REPEATABLE READ", " FORCE INDEX(PRIMARY)", " FOR UPDATE", false
-                    "REPEATABLE READ", "", " FOR SHARE NOWAIT", true
-                    "REPEATABLE READ", " FORCE INDEX(PRIMARY)", " FOR UPDATE SKIP LOCKED", false
-                    "SERIALIZABLE", "", "", true
-                    "READ COMMITTED", " FORCE INDEX(PRIMARY)", " FOR UPDATE", false ]
-              for isolation, hint, locking, empty in cases do
+                  [ "REPEATABLE READ", ", KEY ix(k)", " FORCE INDEX(PRIMARY)", " FOR UPDATE", false
+                    "REPEATABLE READ", "", "", " FOR SHARE NOWAIT", true
+                    "REPEATABLE READ", ", KEY ix(k)", " FORCE INDEX(PRIMARY)", " FOR UPDATE SKIP LOCKED", false
+                    "SERIALIZABLE", "", "", "", true
+                    "READ COMMITTED", ", KEY ix(k)", " FORCE INDEX(PRIMARY)", " FOR UPDATE", false
+                    "REPEATABLE READ", ", KEY ix(k)", "", " FOR SHARE NOWAIT", true
+                    "REPEATABLE READ", ", KEY ix(k)", " FORCE INDEX(ix)", " FOR UPDATE SKIP LOCKED", false
+                    "REPEATABLE READ", ", KEY ix(k), KEY covering(n)", " FORCE INDEX(ix)", " FOR SHARE", false
+                    "SERIALIZABLE", ", KEY ix(k)", "", "", false
+                    "READ COMMITTED", ", KEY ix(k)", " FORCE INDEX(ix)", " FOR UPDATE", false ]
+              for isolation, indexes, hint, locking, empty in cases do
                   let store = Fsdb.Storage.create ()
                   let run session sql expected =
                       let next, result = handle session sql
                       Expect.equal result expected sql
                       next
                   let reader = create 1 store
-                  let secondary = if hint = "" then "" else ", KEY ix(n)"
-                  let reader = run reader $"CREATE TABLE t(id INT PRIMARY KEY,n INT{secondary})" (Affected 0UL)
-                  let reader = if empty then reader else run reader "INSERT INTO t VALUES(10,1),(20,2)" (Affected 2UL)
+                  let reader = run reader $"CREATE TABLE t(id INT PRIMARY KEY,k INT,n INT{indexes})" (Affected 0UL)
+                  let reader = if empty then reader else run reader "INSERT INTO t VALUES(10,1,11),(20,2,22)" (Affected 2UL)
                   let reader = run reader $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
                   let reader = run reader "BEGIN" (Affected 0UL)
-                  let rows = if empty then [] else [ [ Some "10" ]; [ Some "20" ] ]
-                  let reader = run reader $"SELECT id FROM t{hint}{locking}" (ResultSet([ "id" ], rows))
+                  let rows = if empty then [] else [ [ Some "11" ]; [ Some "22" ] ]
+                  let reader = run reader $"SELECT n FROM t{hint}{locking}" (ResultSet([ "n" ], rows))
                   let writer = create 2 store
-                  let pending = Threading.Tasks.Task.Run(fun () -> handle writer "INSERT INTO t VALUES(80,3)")
+                  let pending = Threading.Tasks.Task.Run(fun () -> handle writer "INSERT INTO t VALUES(80,3,33)")
                   let blocked () = lock store.LockWaits.SyncRoot (fun () -> store.LockWaits.Edges.Count > 0)
                   let observed = Threading.SpinWait.SpinUntil((fun () -> blocked () || pending.IsCompleted), TimeSpan.FromSeconds 3.0)
                   let wasBlocked = blocked ()
                   run reader "ROLLBACK" (Affected 0UL) |> ignore
                   Expect.isTrue (pending.Wait(TimeSpan.FromSeconds 4.0)) "the insert finishes after the reader ends"
                   Expect.isTrue observed "the insert either waits or finishes while the reader is open"
-                  Expect.equal wasBlocked (isolation <> "READ COMMITTED") $"{isolation}{hint}{locking}"
+                  Expect.equal wasBlocked (isolation <> "READ COMMITTED") $"{isolation}{indexes}{hint}{locking}"
                   Expect.equal (snd pending.Result) (Affected 1UL) "the final gap is writable after release"
 
           testCase "exact primary reads with NOWAIT or SKIP LOCKED protect the MySQL gap"

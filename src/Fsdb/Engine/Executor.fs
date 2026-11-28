@@ -39066,16 +39066,19 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
     | _ -> Ok()
 
 let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: SelectStmt) =
-    let primaryHint = function
+    let fullScanShape = select.Where.IsNone && select.OrderBy.IsEmpty && select.Limit.IsNone && select.Offset.IsNone
+    let forcedIndex = function
+        | [ { Kind = ForceIndex; Scope = (None | Some IndexJoin); Indexes = [ index ] } ] -> Some index
+        | _ -> None
+    let isPrimary = equalsIgnoreCase "PRIMARY"
+    let supportedHint = function
         | [] -> true
-        | [ { Kind = ForceIndex; Scope = (None | Some IndexJoin); Indexes = [ index ] } ] ->
-            equalsIgnoreCase "PRIMARY" index
-        | _ -> false
+        | hints -> forcedIndex hints |> Option.exists (fun name -> isPrimary name || (protectGaps && fullScanShape))
     match select.From with
     | Some(FromTable source) when
         select.Joins.IsEmpty && select.Ctes.IsEmpty && select.Locking.IsEmpty
         && select.GroupBy.IsEmpty && select.Having.IsNone && select.Windows.IsEmpty
-        && not (SelectStmt.hasDestination select) && primaryHint source.IndexHints ->
+        && not (SelectStmt.hasDestination select) && supportedHint source.IndexHints ->
         let database = source.Database |> Option.defaultValue dbName
         let qualifier = source.Alias |> Option.defaultValue source.Table
         let columnName = function
@@ -39123,10 +39126,12 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
                 |> Option.map _.Direction
                 |> Option.defaultValue Asc
 
+            let forced = forcedIndex source.IndexHints
+            let isSecondaryBtree (index: IndexDef) = index.Visible && index.Kind = BTree && not (isPrimary index.Name)
             let primaryIsOnlyChoice =
-                not source.IndexHints.IsEmpty
-                || not (table.Indexes |> List.exists (fun index ->
-                    index.Visible && index.Kind = BTree && not (equalsIgnoreCase "PRIMARY" index.Name)))
+                match forced with
+                | Some index -> isPrimary index
+                | None -> not (List.exists isSecondaryBtree table.Indexes)
 
             let canStopAtLimit limit =
                 literalRowCounts && not select.Distinct && not select.CalculateFoundRows
@@ -39307,8 +39312,27 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
             let boundedClusteredScan =
                 select.Limit.IsSome && (select.OrderBy.IsEmpty || wait = SkipLocked)
             let fullClusteredScan =
-                protectGaps && primaryIsOnlyChoice && select.Limit.IsNone
-                && select.OrderBy.IsEmpty && select.Offset.IsNone
+                if not protectGaps || not fullScanShape then false
+                elif primaryIsOnlyChoice then true
+                else
+                    let projectedColumns =
+                        select.Projections |> List.collect (fun projection ->
+                            match projection.Expression with
+                            | Star _ -> List.map (fun (column: ColumnDef) -> column.Name) table.Columns
+                            | expression -> columnName expression |> Option.toList)
+                    let covers (index: IndexDef) =
+                        let stores column =
+                            List.exists (equalsIgnoreCase column) keys
+                            || (index.KeyColumns |> List.exists (fun key ->
+                                key.PrefixLength.IsNone && key.Transform.IsNone && equalsIgnoreCase column key.Name))
+                        List.forall stores projectedColumns
+                    // A predicate-free scan can use a secondary tree only
+                    // when it can return the projection without a row lookup.
+                    match forced with
+                    | None -> not (table.Indexes |> List.exists (fun index -> isSecondaryBtree index && covers index))
+                    | Some name ->
+                        table.Indexes |> List.exists (fun index ->
+                            isSecondaryBtree index && equalsIgnoreCase name index.Name && not (covers index))
             if keys.IsEmpty || (conditions.IsEmpty && not (boundedClusteredScan || fullClusteredScan))
                || not (List.forall simpleProjection select.Projections) then None
             else
@@ -39317,7 +39341,7 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
                 |> Option.orElseWith (fun () ->
                     match wait with
                     | WaitForLocks when protectGaps && orderedRangeKeys -> range ()
-                    | _ when orderedRangeKeys && primaryIsOnlyChoice -> range ()
+                    | _ when orderedRangeKeys && (primaryIsOnlyChoice || fullClusteredScan) -> range ()
                     | _ -> None)
                 |> Option.map (fun (access, limit) ->
                     let plan: Storage.PrimaryReadPlan =
