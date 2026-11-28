@@ -121,6 +121,11 @@ let tests =
                   ("SELECT (SELECT id FROM merged_events e WHERE e.instant=p.wall ORDER BY e.instant,id LIMIT 1), "
                    + "(SELECT id FROM materialized_events e WHERE e.instant=p.wall ORDER BY e.instant,id LIMIT 1) FROM picks p")
                   [ "2"; "1" ]
+              expectRow session
+                  ("WITH e AS (SELECT id,instant FROM events IGNORE INDEX(by_slot)) "
+                   + "SELECT (SELECT x.id FROM e x WHERE x.instant=p.wall ORDER BY x.instant,x.id LIMIT 1), "
+                   + "(SELECT /*+ NO_MERGE(x) */ x.id FROM e x WHERE x.instant=p.wall ORDER BY x.instant,x.id LIMIT 1) FROM picks p")
+                  [ "2"; "1" ]
 
           testCase "correlated TIMESTAMP ranges seek ordered keys across a repeated local hour"
           <| fun _ ->

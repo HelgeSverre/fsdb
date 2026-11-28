@@ -902,6 +902,7 @@ type private AggregateBindingScope =
 type private StatementMemo =
     { FromSubqueries: Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>
       MaterializedDerivedSources: HashSet<FromItem>
+      MaterializedCteReferences: HashSet<TableRef>
       SharedDerivedGroups: Dictionary<string, (CteGroup * SelectOrUnion) list>
       SharedDerivedRows: Dictionary<CteGroup, Result<ColumnDef list * Value[] list, QueryResult>>
       ExpressionSubqueries: Dictionary<SelectStmt, MemoizedSubquery>
@@ -945,6 +946,7 @@ let private sharedViewCteScope = System.Threading.AsyncLocal<SharedViewCteScope 
 let private freshStatementMemo () =
     { FromSubqueries = Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
       MaterializedDerivedSources = HashSet<FromItem>(HashIdentity.Reference)
+      MaterializedCteReferences = HashSet<TableRef>(HashIdentity.Reference)
       SharedDerivedGroups = Dictionary<string, (CteGroup * SelectOrUnion) list>(System.StringComparer.OrdinalIgnoreCase)
       SharedDerivedRows = Dictionary<CteGroup, Result<ColumnDef list * Value[] list, QueryResult>>()
       ExpressionSubqueries = Dictionary<SelectStmt, MemoizedSubquery>(HashIdentity.Reference)
@@ -1073,15 +1075,21 @@ let private mapColumnSourceOrigin mapping = function
     | MaterializedColumn origin -> MaterializedColumn(mapping origin)
     | CorrelatedColumn origin -> CorrelatedColumn(mapping origin)
 
+type private MaterializedCte =
+    { References: HashSet<TableRef>
+      Rows: Lazy<Result<Value[] list, QueryResult>> }
+
 type private CteBinding =
     { Columns: ColumnDef list
       Rows: Lazy<Result<Value[] list, QueryResult>>
+      Materialized: MaterializedCte option
       Origins: ColumnSource option list
       StatementStable: bool
       PhysicalProjection: PhysicalProjection option }
 
 /// Statement-local CTE bindings, keyed by normalized name.
 let private cteScope = System.Threading.AsyncLocal<Map<string, CteBinding>>()
+let private skippedCteMaterialization = new System.Threading.ThreadLocal<TableRef list>(fun () -> [])
 // Both settings are read inside the synchronous statement executor. Scoped
 // thread values avoid copying the async execution context for every query.
 let private cteRecursionDepth = new System.Threading.ThreadLocal<int64 option>()
@@ -4900,6 +4908,13 @@ type private SelectOutput = ReadValues | MergedRelationValues
 
 let private derivedIsMaterialized source =
     (currentStatementMemo ()).MaterializedDerivedSources.Contains source
+
+let private cteReferenceIsMaterialized reference =
+    (currentStatementMemo ()).MaterializedCteReferences.Contains reference
+    || (reference.Database.IsNone
+        && (currentCteScope () |> Map.tryFind (reference.Table.ToLowerInvariant())
+            |> Option.bind _.Materialized
+            |> Option.exists (fun materialized -> materialized.References.Contains reference)))
 
 let private withDeclaredGeometryType (column: ColumnDef) (definition: ColumnDef) =
     match column.Type, definition.Type with
@@ -11143,7 +11158,15 @@ and private resolveTableRef
     // first — a CTE shadows a real table of the same name, as in MySQL.
     match (if tableRef.Database.IsSome then None else currentCteScope () |> Map.tryFind (tableRef.Table.ToLowerInvariant())) with
     | Some binding when planningProbe.Value -> Ok(binding.Columns, [])
-    | Some binding -> binding.Rows.Value |> Result.map (fun rows -> binding.Columns, rows)
+    | Some binding ->
+        let rows =
+            match binding.Materialized with
+            | Some materialized when materialized.References.Contains tableRef ->
+                if skippedCteMaterialization.Value |> List.exists (fun reference -> obj.ReferenceEquals(reference, tableRef)) then
+                    Ok []
+                else materialized.Rows.Value
+            | _ -> binding.Rows.Value
+        rows |> Result.map (fun rows -> binding.Columns, rows)
     | None ->
 
     if tableRef.Database.IsNone && System.String.Equals(tableRef.Table, "dual", System.StringComparison.OrdinalIgnoreCase) then
@@ -12570,6 +12593,32 @@ and private materializeRelationValue columnName rowNumber value =
             Value.encodedString charset bytes.[0 .. offset - 1]
     | _ -> Value.materialize value
 
+and private validateMaterializedGeometry store columns (rows: Value[] list) =
+    let checks =
+        columns
+        |> List.indexed
+        |> List.choose (fun (index, column) ->
+            match column.Type with
+            | TGeometry _ ->
+                Some(index, Storage.prepareStoredValueCoercion store { column with Nullable = true; Srid = None })
+            | _ -> None)
+    if checks.IsEmpty then Ok()
+    else
+        // Materialized geometry follows the same subtype rules as stored columns.
+        rows |> List.tryPick (fun row ->
+            checks |> List.tryPick (fun (index, check) ->
+                match check row.[index] with
+                | Error error -> Some(storageErr error)
+                | Ok _ -> None))
+        |> function Some error -> Error error | None -> Ok()
+
+and private materializeRelationRows readValue (columns: ColumnDef list) (rows: Value[] list) =
+    let definitions = List.toArray columns
+    rows |> List.mapi (fun rowIndex row ->
+        row |> Array.mapi (fun index value ->
+            let column = definitions.[index]
+            readValue column value |> materializeRelationValue column.Name (rowIndex + 1)))
+
 and private resolveRelationBody store registry dbName columnNames materialization body outer =
     resolveRelationBodyWithOutput ReadValues store registry dbName columnNames materialization body outer
 
@@ -12649,35 +12698,9 @@ and private resolveRelationBodyWithOutput output store registry dbName columnNam
                 | _ -> columns
             renameRelationColumns columnNames (fun (column: ColumnDef) -> column.Name) (fun name column -> { column with Name = name }) columns
             |> Result.bind (fun columns ->
-                let geometryColumns =
-                    columns
-                    |> List.indexed
-                    |> List.choose (fun (index, column) ->
-                        match column.Type with
-                        | TGeometry _ -> Some(index, column)
-                        | _ -> None)
-                let geometryError =
-                    if typedRows.IsEmpty || geometryColumns.IsEmpty || merged then
-                        None
-                    else
-                        // Materialized geometry uses the same encoding and subtype rules as stored columns.
-                        let checks =
-                            geometryColumns |> List.map (fun (index, column) ->
-                                index, Storage.prepareStoredValueCoercion store { column with Nullable = true; Srid = None })
-                        typedRows |> List.tryPick (fun row ->
-                            checks |> List.tryPick (fun (index, check) ->
-                                match check row.[index] with
-                                | Error error -> Some(storageErr error)
-                                | Ok _ -> None))
-                match geometryError with
-                | Some error -> Error error
-                | None ->
-                    let names = columns |> List.map _.Name |> List.toArray
-                    let rows =
-                        typedRows
-                        |> List.mapi (fun rowIndex row ->
-                            row |> Array.mapi (fun index value -> materializeRelationValue names.[index] (rowIndex + 1) value))
-                    Ok(columns, rows))
+                let valid = if typedRows.IsEmpty || merged then Ok() else validateMaterializedGeometry store columns typedRows
+                valid |> Result.map (fun () ->
+                    columns, materializeRelationRows (fun _ value -> value) columns typedRows))
         | Err(code, message) -> Error(Err(code, message))
         | Affected _ -> Error(Err(1064, "derived table did not return a resultset"))
         | MultipleResults _ -> Error(nestedResultsError "a derived table")
@@ -15482,10 +15505,20 @@ and private withCteScope
                 match remaining with
                 | [] -> Ok()
                 | cte :: rest ->
-                    let bindCte columns rows physicalProjection =
+                    let bindCte columns (rows: Lazy<Result<Value[] list, QueryResult>>) physicalProjection =
+                        let materialize values =
+                            validateMaterializedGeometry store columns values
+                            |> Result.map (fun () -> materializeRelationRows (readColumnValue store) columns values)
+                        let references = (currentStatementMemo ()).MaterializedCteReferences
+                        let materialized =
+                            if references.Count = 0
+                               || cteSelfReferenced cte || not (queryBodyCanMerge registry cte.Body) then None
+                            else
+                                Some { References = references; Rows = lazy (rows.Value |> Result.bind materialize) }
                         let binding =
                             { Columns = columns
                               Rows = rows
+                              Materialized = materialized
                               Origins = originsFor cte columns
                               StatementStable = outer.IsNone
                               PhysicalProjection = physicalProjection }
@@ -15545,7 +15578,7 @@ and private materializeCte
     (outer: EvalContext option)
     : Result<ColumnDef list * Value[] list, QueryResult> =
     if not (cteSelfReferenced cte) then
-        resolveRelationBody store registry dbName cte.CteColumns AllowMerge cte.Body outer
+        resolveRelationBodyWithOutput MergedRelationValues store registry dbName cte.CteColumns AllowMerge cte.Body outer
     else
 
     match cte.Body with
@@ -15647,6 +15680,7 @@ and private materializeCte
                                         cteKey
                                         { Columns = columns
                                           Rows = lazy (Ok iterationRows)
+                                          Materialized = None
                                           Origins = recursiveOrigins
                                           StatementStable = false
                                           PhysicalProjection = None }
@@ -16078,12 +16112,30 @@ and private runSelectStmtWithOutput output store registry dbName (select: Select
     let rangesBefore =
         if select.Limit.IsSome then Some(HashSet<Expr>(rangeSetups.Keys, HashIdentity.Reference))
         else None
-    let result =
+    let run () =
         if select.Limit.IsSome && not select.CalculateFoundRows && not suppressReadRowLocks.Value
            && zeroLimitWithoutOffset select.Limit select.Offset then
             DynamicScope.withThreadValue suppressReadRowLocks true (fun () ->
                 runSelectStmtCore output store registry dbName select outer)
         else runSelectStmtCore output store registry dbName select outer
+    let result =
+        let hasMaterializedCteReferences =
+            (currentStatementMemo ()).MaterializedCteReferences.Count > 0
+            || (currentCteScope () |> Map.exists (fun _ binding -> binding.Materialized.IsSome))
+        let noRows =
+            hasMaterializedCteReferences && not select.CalculateFoundRows
+            && (hasZeroRowLimit select
+                || (select.Where |> Option.exists (fun predicate ->
+                    let context = contextFactory store registry dbName Map.empty Map.empty None [||]
+                    tryClosedNumericValue context predicate |> Option.exists (fun value -> truthy value <> Some true))))
+        if not noRows then run ()
+        else
+            let skipped =
+                (Option.toList select.From @ List.map (fun (join: Join) -> join.Table) select.Joins)
+                |> List.collect FromItem.leaves
+                |> List.choose (function FromTable reference when cteReferenceIsMaterialized reference -> Some reference | _ -> None)
+            if skipped.IsEmpty then run ()
+            else DynamicScope.withThreadValue skippedCteMaterialization (skipped @ skippedCteMaterialization.Value) run
     if hasZeroRowLimit select then
         pendingBefore |> Option.iter rollbackCorrelatedNumericWarnings
         rangesBefore |> Option.iter (fun before ->
@@ -18338,7 +18390,7 @@ and private tryPhysicalProjectionUncached
             physicalTable tableRef
         else
             match currentCteScope () |> Map.tryFind (tableRef.Table.ToLowerInvariant()) with
-            | Some binding when binding.StatementStable -> binding.PhysicalProjection
+            | Some binding when binding.StatementStable && not (cteReferenceIsMaterialized tableRef) -> binding.PhysicalProjection
             | Some _ -> None
             | None -> physicalTable tableRef
 
@@ -27096,14 +27148,16 @@ let private emitJoinHintDiagnostics store registry schema statement =
     let pending = DynamicScope.valueOrDefault OptimizerHintResolution.emptyExecution joinHintDiagnostics
     let scopes = lazy (OptimizerHintScopes.collect OptimizerHintScopes.BoundStatement statement)
     if not pending.SourceStrategies.IsEmpty then
-        let materialized = (currentStatementMemo ()).MaterializedDerivedSources
+        let memo = currentStatementMemo ()
         for block in scopes.Value.Numbered do
-            for source in block.Sources do
-                match source with
-                | FromSubquery(_, alias)
-                    when sourceStrategy pending block.Number alias = Some OptimizerHintResolution.MaterializeSource ->
-                    materialized.Add source |> ignore
+            match block.Source, block.ParentBlock with
+            | Some source, Some parent
+                when sourceStrategy pending parent source.Alias = Some OptimizerHintResolution.MaterializeSource ->
+                match source.Item with
+                | FromSubquery _ as item -> memo.MaterializedDerivedSources.Add item |> ignore
+                | FromTable reference -> memo.MaterializedCteReferences.Add reference |> ignore
                 | _ -> ()
+            | _ -> ()
     if not pending.Warnings.IsEmpty then
         // A statement can enter the executor again for a mutation rewrite or stored body.
         joinHintDiagnostics.Value <- OptimizerHintResolution.emptyExecution
@@ -28125,6 +28179,7 @@ let private prepareDeleteViewSource store registry (stored: StoredView) (view: U
                      |> List.mapi (fun index (_, values) -> Array.append values [| VInt(int64 index) |])
                      |> Ok)
               Origins = List.replicate (columns.Length + 1) None
+              Materialized = None
               StatementStable = true
               PhysicalProjection = None }
 

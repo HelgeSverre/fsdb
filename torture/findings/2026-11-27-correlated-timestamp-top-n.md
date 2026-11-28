@@ -70,3 +70,17 @@ memory and WAL mode. On the forced leading-index query, the analyzed plans
 reported 4 rows per invocation in Fsdb and 89 in MySQL 8.4.11. Fsdb's
 regression drops from 173 examined rows to fewer than 20. Tighter disjoint
 UTC slices through a clock transition remain open.
+
+### CTE reference materialization
+
+Two scalar subqueries can refer to the same CTE using the same alias while
+only one uses `NO_MERGE`. The merged reference sorts direct TIMESTAMP
+columns in UTC. The materialized reference sorts its copied local values.
+The distinguishing fall-back fixture returns the earlier occurrence for
+the merged reference and the higher-ranked local-time tie for the
+materialized reference.
+
+A separate joined query still differs. When a sort follows a join between
+merged and materialized references, MySQL's audited plan streams the joined
+rows into a sort and compares the merged reference's session-local values.
+Fsdb compares that reference's stored UTC instants.

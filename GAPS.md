@@ -685,9 +685,9 @@ diagnostics, and table creation from the result are covered. Constant
 envelopes built from point constructors or geometry literals can probe
 the spatial index. Structurally materialized derived tables, CTEs, and
 `ALGORITHM=TEMPTABLE` views enforce the declared polygon subtype.
-`NO_MERGE` also enforces the subtype for derived tables.
-Materialization requested through `NO_MERGE` on CTEs or through
-`optimizer_switch` remains open.
+`NO_MERGE` also enforces the subtype for derived tables and individual
+CTE references. [Predicate pushdown into hinted CTEs](torture/findings/2026-11-27-spatial-make-envelope.md#materialized-sources)
+and materialization through `optimizer_switch` remain open.
 
 [`ST_Validate`](torture/findings/2026-11-27-spatial-validate.md) preserves
 valid geometry and shares topology checks with `ST_IsValid`. The

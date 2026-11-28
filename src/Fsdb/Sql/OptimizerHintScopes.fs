@@ -7,6 +7,7 @@ open Fsdb.Sql
 
 type SourceReference =
     { Alias: string
+      Item: FromItem
       Body: SelectOrUnion
       Recursive: bool }
 
@@ -93,7 +94,7 @@ let collect querySource statement =
             combine (branches @ [expressions scope active ((ordering |> List.map fst) @ Option.toList limit @ Option.toList offset)])
     and source scope active = function
         | _ when nextNumber >= maxHintBlocks -> empty
-        | FromTable table when table.Database.IsNone ->
+        | FromTable table as item when table.Database.IsNone ->
             match lookup scope table.Table with
             | Some(binding, definitionScope) ->
                 let cte = binding.Definition
@@ -104,14 +105,18 @@ let collect querySource statement =
                 else
                     let repeated = binding.Referenced
                     binding.Referenced <- true
-                    let reference = { Alias = table.Alias |> Option.defaultValue table.Table; Body = cte.Body; Recursive = cte.Recursive }
+                    let reference =
+                        { Alias = table.Alias |> Option.defaultValue table.Table
+                          Item = item
+                          Body = cte.Body
+                          Recursive = cte.Recursive }
                     let body = query definitionScope (cte :: active) cte.Body |> fromSource reference
                     if repeated then { body with Context = Reparse cte :: body.Context } else body
             | None -> empty
         | FromTable _ -> empty
         | FromJoinGroup(first, joins) -> combine [ source scope active first; joinBlocks scope active joins ]
-        | FromSubquery(body, alias) | FromLateral(body, alias) ->
-            query scope active body |> fromSource { Alias = alias; Body = body; Recursive = false }
+        | (FromSubquery(body, alias) | FromLateral(body, alias)) as item ->
+            query scope active body |> fromSource { Alias = alias; Item = item; Body = body; Recursive = false }
         | FromJsonTable(value, _, _, _) -> expressions scope active [value]
     and joinBlocks scope active joins =
         joins |> List.collect (fun join -> [source scope active join.Table; expressions scope active [join.On]]) |> combine

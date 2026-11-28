@@ -62,7 +62,15 @@ An empty source or an unused CTE can skip validation. A union of an
 envelope and bare NULL uses the general geometry type and accepts both
 values. [MySQL derived-table materialization](https://dev.mysql.com/doc/refman/8.4/en/derived-table-optimization.html)
 
-An eligible derived table materialized through `NO_MERGE` also returns
-error 1416 in Fsdb and MySQL. MySQL applies the same check to a CTE
-reference materialized by the hint. Fsdb still returns the point in that
-case. Disabling `derived_merge` through `optimizer_switch` remains open.
+An eligible derived table or CTE reference materialized through
+`NO_MERGE` returns error 1416 in Fsdb and MySQL. The CTE hint targets the
+reference alias. A zero limit or a constant false filter skips the hinted
+materialization. The audited UPDATE, DELETE, and INSERT SELECT statements
+return 1416 and leave their target rows intact, including UPDATE and DELETE
+through a writable view. These results match the pinned MySQL 8.4.11 oracle
+in memory and WAL mode.
+
+MySQL can push an outer key predicate into a singly referenced materialized
+CTE. A filter that matches no source rows can then bypass the geometry
+check. Fsdb still validates the CTE before applying that filter. Disabling
+`derived_merge` through `optimizer_switch` also remains open.

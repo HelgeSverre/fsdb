@@ -5568,6 +5568,8 @@ let tests =
                     $"SELECT id FROM ({source} LIMIT 1) AS d WHERE id=3"
                     $"SELECT /*+ NO_MERGE(d) */ ST_AsText(shape) FROM ({source}) AS d ORDER BY id"
                     $"WITH e AS ({source} LIMIT 1) SELECT id FROM e"
+                    $"WITH e AS ({source}) SELECT /*+ NO_MERGE(e) */ id FROM e"
+                    $"WITH e AS ({source}) SELECT /*+ NO_MERGE(b) */ a.id FROM e a JOIN e b ON a.id=b.id"
                     $"SELECT ST_AsText(shape) FROM (SELECT DISTINCT {shape} AS shape FROM envelope_ids) AS d"
                     $"SELECT ST_AsText(shape) FROM ({source} WHERE id=1 UNION ALL {source} WHERE id=2) AS d"
                     "SELECT ST_AsText(shape) FROM (SELECT ST_MakeEnvelope(POINT(0,0),POINT(0,0)) AS shape FROM DUAL) AS d"
@@ -5583,10 +5585,23 @@ let tests =
 
               let limited = $"SELECT ST_AsText(shape) AS wkt FROM ({source} LIMIT 0) AS d"
               Expect.equal (run limited) (ResultSet([ "wkt" ], [])) limited
+              for tail in [ "LIMIT 0"; "WHERE FALSE"; "WHERE 1=2" ] do
+                  let skipped = $"WITH e AS ({source}) SELECT /*+ NO_MERGE(e) */ id FROM e {tail}"
+                  Expect.equal (run skipped) (ResultSet([ "id" ], [])) skipped
               let union = $"SELECT ST_AsText(shape) AS wkt FROM (SELECT {shape} AS shape FROM envelope_ids WHERE id=1 UNION ALL SELECT NULL) AS d"
               Expect.equal (run union) (ResultSet([ "wkt" ], [ [ Some "POINT(1 0)" ]; [ None ] ])) union
               let valid = "SELECT ST_AsText(shape) AS wkt FROM (SELECT ST_MakeEnvelope(POINT(1,0),POINT(2,1)) AS shape UNION ALL SELECT ST_MakeEnvelope(NULL,POINT(1,0))) AS d"
               Expect.equal (run valid) (ResultSet([ "wkt" ], [ [ Some "POLYGON((1 0,2 0,2 1,1 1,1 0))" ]; [ None ] ])) valid
+
+              run "CREATE TABLE envelope_audit (id INT PRIMARY KEY, visits INT)" |> ignore
+              run "INSERT INTO envelope_audit VALUES(1,0),(2,0)" |> ignore
+              for sql in
+                  [ $"WITH e AS ({source}) UPDATE /*+ NO_MERGE(e) */ envelope_audit a JOIN e ON e.id=a.id SET a.visits=1"
+                    $"WITH e AS ({source}) DELETE /*+ NO_MERGE(e) */ a FROM envelope_audit a JOIN e ON e.id=a.id"
+                    $"INSERT INTO envelope_audit WITH e AS ({source}) SELECT /*+ NO_MERGE(e) */ id+100,0 FROM e" ] do
+                  TestSupport.Sql.expectError 1416 (run sql) sql
+                  Expect.equal (run "SELECT id,visits FROM envelope_audit ORDER BY id")
+                      (ResultSet([ "id"; "visits" ], [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ] ])) sql
 
           testCase "ST_Validate returns valid geometry and preserves polygon winding"
           <| fun _ ->
