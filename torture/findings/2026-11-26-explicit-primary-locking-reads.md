@@ -163,3 +163,18 @@ and forced non-covering scans, a competing covering index excluded by
 the hint, prefix and functional indexes, composite primary keys,
 qualified stars, and concurrent row locks and pending inserts. Covering
 secondary scans require their own locking rules.
+
+## Filtered primary scans
+
+A predicate that is always true or uses only unindexed payload columns
+can still require the whole primary index. The scanned entries and gaps
+are locked even when the original filter rejects every row. MySQL also
+rules out some predicates before scanning, including a false conjunct,
+contradictory integer equalities, `IS NULL` on a non-nullable column, and
+comparisons outside an integer column's domain. These plans skip row and
+gap locks. Binding failures also return before acquiring row locks.
+
+The MySQL comparison covered inserts into the scanned gaps, updates of
+rows rejected by the filter, and nonblocking reads against an already
+locked row. The remaining differences in these fixtures involve primary
+or secondary range access.

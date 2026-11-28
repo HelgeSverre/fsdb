@@ -478,18 +478,25 @@ type private PhysicalProjectionColumn =
     | ProjectColumn of index: int
     | CalculateColumn of read: (Value[] -> Value) * bounds: (bigint * bigint) * shiftedKey: (int * bigint) option
 
-let private signedIntegerTypeBounds columnType =
-    let bits =
-        match columnType with
-        | TTinyInt false -> Some 8
-        | TSmallInt false -> Some 16
-        | TMediumInt false -> Some 24
-        | TInt false -> Some 32
-        | TBigInt false -> Some 64
-        | _ -> None
-    bits |> Option.map (fun bits ->
-        let limit = 1I <<< (bits - 1)
-        -limit, limit - 1I)
+let private integerTypeShape = function
+    | TTinyInt unsigned -> Some(8, unsigned)
+    | TSmallInt unsigned -> Some(16, unsigned)
+    | TMediumInt unsigned -> Some(24, unsigned)
+    | TInt unsigned -> Some(32, unsigned)
+    | TBigInt unsigned -> Some(64, unsigned)
+    | TBool -> Some(8, false)
+    | _ -> None
+let private integerTypeBounds columnType =
+    integerTypeShape columnType |> Option.map (fun (bits, unsigned) ->
+        if unsigned then 0I, (1I <<< bits) - 1I
+        else
+            let limit = 1I <<< (bits - 1)
+            -limit, limit - 1I)
+
+let private signedIntegerTypeBounds = function
+    | TTinyInt false | TSmallInt false | TMediumInt false | TInt false | TBigInt false as columnType ->
+        integerTypeBounds columnType
+    | _ -> None
 
 let private tryBoundedSignedArithmetic operator (a: bigint, b: bigint) (c: bigint, d: bigint) =
     let calculated =
@@ -39065,15 +39072,84 @@ let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (s
         check delete.From delete.Joins delete.Where delete.Limit singleTarget
     | _ -> Ok()
 
-let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: SelectStmt) =
-    let fullScanShape = select.Where.IsNone && select.OrderBy.IsEmpty && select.Limit.IsNone && select.Offset.IsNone
+// MySQL can discard a scan before taking row or gap locks. The reduced
+// predicate chooses the access path while the original still drives evaluation.
+let private simplifyLockingScanPredicate (context: Lazy<EvalContext>) (column: Expr -> ColumnDef option) predicate =
+    let constant truth = Lit(boolToValue truth)
+    let literalNumber = function
+        | LiteralValue(VUInt value) -> Some(decimal value)
+        | LiteralValue(VDecimal value) -> Some value
+        | value -> trySignedIntegerConstant value |> Option.map decimal
+    let comparison left right =
+        match column left, literalNumber right with
+        | Some definition, Some value ->
+            integerTypeBounds definition.Type
+            |> Option.map (fun (minimum, maximum) -> definition.Name, decimal minimum, decimal maximum, value)
+        | _ -> None
+    let conflictingEqualities terms =
+        let values = Dictionary<string, decimal>(System.StringComparer.OrdinalIgnoreCase)
+        terms |> List.exists (function
+            | BinOp(Eq, left, right) ->
+                comparison left right |> Option.orElseWith (fun () -> comparison right left)
+                |> Option.filter (fun (_, _, _, value) -> System.Decimal.Truncate value = value)
+                |> Option.exists (fun (name, _, _, value) ->
+                    match values.TryGetValue name with
+                    | true, previous -> value <> previous
+                    | _ ->
+                        values.Add(name, value)
+                        false)
+            | _ -> false)
+    let sameNotNullColumn left right =
+        match column left, column right with
+        | Some leftColumn, Some rightColumn ->
+            not leftColumn.Nullable && equalsIgnoreCase leftColumn.Name rightColumn.Name
+        | _ -> false
+    let outsideDomain operator left right =
+        let impossible op (_, minimum, maximum, value) =
+            match op with
+            | Eq -> value < minimum || value > maximum
+            | Lt -> value <= minimum
+            | Lte -> value < minimum
+            | Gt -> value >= maximum
+            | Gte -> value > maximum
+            | _ -> false
+        let reverse = function Lt -> Gt | Lte -> Gte | Gt -> Lt | Gte -> Lte | op -> op
+        (comparison left right |> Option.exists (impossible operator))
+        || (comparison right left |> Option.exists (impossible (reverse operator)))
+    let rec simplify expression =
+        match expression with
+        | BinOp(And, _, _) ->
+            let terms = conjuncts expression |> List.map simplify
+            if List.contains (constant false) terms || conflictingEqualities terms then constant false
+            else terms |> List.filter ((<>) (constant true)) |> combineConjuncts |> Option.defaultValue (constant true)
+        | BinOp(Or, left, right) ->
+            match simplify left, simplify right with
+            | Lit(VInt 1L), _ | _, Lit(VInt 1L) -> constant true
+            | Lit(VInt 0L), other | other, Lit(VInt 0L) -> other
+            | left, right -> BinOp(Or, left, right)
+        | IsNull operand when column operand |> Option.exists (fun definition -> not definition.Nullable) -> constant false
+        | IsNotNull operand when column operand |> Option.exists (fun definition -> not definition.Nullable) -> constant true
+        | BinOp(Eq, left, right) when sameNotNullColumn left right -> constant true
+        | BinOp((Eq | Lt | Lte | Gt | Gte as op), left, right) when outsideDomain op left right -> constant false
+        | other ->
+            tryClosedNumericValue context.Value other
+            |> Option.map (fun value -> constant (truthy value = Some true))
+            |> Option.defaultValue other
+    simplify (boundPlanningExpression predicate)
+
+type internal PrimaryReadPreparation =
+    | NoPrimaryScan of SelectStmt
+    | LockPrimaryRead of Storage.PrimaryReadPlan * SelectStmt * string list
+
+let internal tryPrimaryRead protectGaps wait (store: Store) registry dbName (select: SelectStmt) =
+    let fullScanShape = select.OrderBy.IsEmpty && select.Limit.IsNone && select.Offset.IsNone
     let forcedIndex = function
         | [ { Kind = ForceIndex; Scope = (None | Some IndexJoin); Indexes = [ index ] } ] -> Some index
         | _ -> None
     let isPrimary = equalsIgnoreCase "PRIMARY"
     let supportedHint = function
         | [] -> true
-        | hints -> forcedIndex hints |> Option.exists (fun name -> isPrimary name || (protectGaps && fullScanShape))
+        | hints -> forcedIndex hints |> Option.exists (fun name -> isPrimary name || fullScanShape)
     match select.From with
     | Some(FromTable source) when
         select.Joins.IsEmpty && select.Ctes.IsEmpty && select.Locking.IsEmpty
@@ -39311,9 +39387,31 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
 
             let boundedClusteredScan =
                 select.Limit.IsSome && (select.OrderBy.IsEmpty || wait = SkipLocked)
-            let fullClusteredScan =
-                if not protectGaps || not fullScanShape then false
-                elif primaryIsOnlyChoice then true
+            let secondaries = lazy (
+                table.Indexes |> List.filter (fun index ->
+                    isSecondaryBtree index && (forced |> Option.forall (fun name -> equalsIgnoreCase name index.Name))))
+            let knownHint () = forced.IsNone || primaryIsOnlyChoice || not secondaries.Value.IsEmpty
+            let referencedColumns expression =
+                Expression.collect (function Col _ | QualifiedCol _ as column -> Some column | _ -> None) expression
+            let hasUnboundPredicateColumn () =
+                select.Where |> Option.exists (fun predicate ->
+                    isPlainRowPredicate predicate
+                    && (referencedColumns predicate |> List.exists (function
+                        | Col name when (tryRoutineVariable name).IsSome -> false
+                        | expression -> not (isSourceColumn expression))))
+            let simplifiedPredicate = lazy (
+                select.Where |> Option.bind (fun predicate ->
+                    let column = predicateColumn >> Option.bind columnDefinition
+                    let context = lazy (contextFactory store registry database Map.empty Map.empty None [||])
+                    if isPlainRowPredicate predicate then
+                        if referencedColumns predicate |> List.exists (column >> Option.isNone) then None
+                        else Some(simplifyLockingScanPredicate context column predicate)
+                    else
+                        tryClosedNumericValue context.Value (boundPlanningExpression predicate)
+                        |> Option.map (fun value -> Lit(boolToValue (truthy value = Some true)))))
+            let fullClusteredScan () =
+                if not protectGaps || not fullScanShape || not orderedRangeKeys then false
+                elif primaryIsOnlyChoice && select.Where.IsNone then true
                 else
                     let projectedColumns =
                         select.Projections |> List.collect (fun projection ->
@@ -39326,40 +39424,53 @@ let internal tryPrimaryRead protectGaps wait (store: Store) dbName (select: Sele
                             || (index.KeyColumns |> List.exists (fun key ->
                                 key.PrefixLength.IsNone && key.Transform.IsNone && equalsIgnoreCase column key.Name))
                         List.forall stores projectedColumns
-                    // A predicate-free scan can use a secondary tree only
-                    // when it can return the projection without a row lookup.
-                    match forced with
-                    | None -> not (table.Indexes |> List.exists (fun index -> isSecondaryBtree index && covers index))
-                    | Some name ->
-                        table.Indexes |> List.exists (fun index ->
-                            isSecondaryBtree index && equalsIgnoreCase name index.Name && not (covers index))
-            if keys.IsEmpty || (conditions.IsEmpty && not (boundedClusteredScan || fullClusteredScan))
-               || not (List.forall simpleProjection select.Projections) then None
+                    let isPrimaryKey column = List.exists (equalsIgnoreCase column) keys
+                    let indexed column =
+                        isPrimaryKey column
+                        || (secondaries.Value |> List.exists (fun index ->
+                            index.KeyColumns |> List.exists (fun key -> equalsIgnoreCase column key.Name)))
+                    knownHint ()
+                    && (match select.Where, simplifiedPredicate.Value with
+                        | None, _ | _, Some(Lit(VInt 1L)) -> not (List.exists covers secondaries.Value)
+                        | _, Some reduced ->
+                            let remaining = referencedColumns reduced
+                            not remaining.IsEmpty && List.forall (predicateColumn >> Option.exists (indexed >> not)) remaining
+                        | _ -> false)
+            let forcedSecondary = forced.IsSome && not primaryIsOnlyChoice
+            let prepare (access, (limit: (Storage.PrimaryScanDirection * int) option)) =
+                let plan: Storage.PrimaryReadPlan =
+                    { ReadDatabase = database
+                      ReadTableName = source.Table
+                      ReadSchemaRevision = table.SchemaRevision
+                      ReadAccess = access
+                      ReadGaps = protectGaps
+                      ReadWait = wait
+                      ReadOffset = if limit.IsSome then select.Offset |> Option.map rowCount |> Option.defaultValue 0 else 0
+                      ReadRangeLimit = limit }
+                let readSelect =
+                    if select.OrderBy.IsEmpty && limit.IsSome then
+                        // Evaluate OFFSET and LIMIT in the same physical order used to acquire locks.
+                        let order = keys |> List.map (fun key -> QualifiedCol(qualifier, key), keyDirection key)
+                        { select with OrderBy = order }
+                    else select
+                LockPrimaryRead(plan, readSelect, keys)
+            if not (List.forall simpleProjection select.Projections) then None
             else
-                exact ()
-                |> Option.map (fun access -> access, None)
+                let exactRead = if forcedSecondary || keys.IsEmpty then None else exact ()
+                exactRead
+                |> Option.map (fun access -> prepare (access, None))
                 |> Option.orElseWith (fun () ->
-                    match wait with
-                    | WaitForLocks when protectGaps && orderedRangeKeys -> range ()
-                    | _ when orderedRangeKeys && (primaryIsOnlyChoice || fullClusteredScan) -> range ()
-                    | _ -> None)
-                |> Option.map (fun (access, limit) ->
-                    let plan: Storage.PrimaryReadPlan =
-                        { ReadDatabase = database
-                          ReadTableName = source.Table
-                          ReadSchemaRevision = table.SchemaRevision
-                          ReadAccess = access
-                          ReadGaps = protectGaps
-                          ReadWait = wait
-                          ReadOffset = if limit.IsSome then select.Offset |> Option.map rowCount |> Option.defaultValue 0 else 0
-                          ReadRangeLimit = limit }
-                    let readSelect =
-                        if select.OrderBy.IsEmpty && limit.IsSome then
-                            // Evaluate OFFSET and LIMIT in the same physical order used to acquire locks.
-                            let order = keys |> List.map (fun key -> QualifiedCol(qualifier, key), keyDirection key)
-                            { select with OrderBy = order }
-                        else select
-                    plan, readSelect, keys))
+                    if fullScanShape && select.Where.IsSome && knownHint ()
+                       && (hasUnboundPredicateColumn () || simplifiedPredicate.Value = Some(Lit(VInt 0L))) then
+                        Some(NoPrimaryScan select)
+                    elif keys.IsEmpty then None
+                    elif fullClusteredScan () then Some(prepare (Storage.PrimaryRange(None, None), None))
+                    elif forcedSecondary || (conditions.IsEmpty && not boundedClusteredScan) then None
+                    else
+                        match wait with
+                        | WaitForLocks when protectGaps && orderedRangeKeys -> range () |> Option.map prepare
+                        | _ when orderedRangeKeys && primaryIsOnlyChoice -> range () |> Option.map prepare
+                        | _ -> None))
     | _ -> None
 
 let internal selectLockedPrimaryKeys consumedInIndexOrder qualifier keys values (select: SelectStmt) =

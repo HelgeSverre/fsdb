@@ -8637,6 +8637,44 @@ let tests =
                   Expect.equal wasBlocked (isolation <> "READ COMMITTED") $"{isolation}{indexes}{hint}{locking}"
                   Expect.equal (snd pending.Result) (Affected 1UL) "the final gap is writable after release"
 
+          testCase "filtered primary locking scans protect gaps only when the scan runs"
+          <| fun _ ->
+              let cases =
+                  [ "TRUE", [ [ Some "11" ]; [ Some "22" ] ], true
+                    "id=id AND n>11", [ [ Some "22" ] ], true
+                    "n BETWEEN 20 AND 10", [], true
+                    "n>11 AND 1=0", [], false
+                    "n=11 AND n=22", [], false
+                    "n IS NULL", [], false
+                    "n > 2000000000000", [], false ]
+              for predicate, rows, expectedWait in cases do
+                  let store = Fsdb.Storage.create ()
+                  let run session sql expected =
+                      let next, result = handle session sql
+                      Expect.equal result expected sql
+                      next
+                  let reader = run (create 1 store) "CREATE TABLE t(id INT PRIMARY KEY,k INT,n INT NOT NULL,KEY ix(k))" (Affected 0UL)
+                  let reader = run reader "INSERT INTO t VALUES(10,1,11),(20,2,22)" (Affected 2UL)
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  let writer = create 2 store
+                  let writer =
+                      if expectedWait then writer
+                      else
+                          let writer = run writer "BEGIN" (Affected 0UL)
+                          run writer "UPDATE t SET n=23 WHERE id=20" (Affected 1UL)
+                  let reader = run reader $"SELECT n FROM t WHERE {predicate} FOR SHARE NOWAIT" (ResultSet([ "n" ], rows))
+                  let writer =
+                      if expectedWait then writer else run writer "ROLLBACK" (Affected 0UL)
+                  let pending = Threading.Tasks.Task.Run(fun () -> handle writer "INSERT INTO t VALUES(80,3,33)")
+                  let blocked () = lock store.LockWaits.SyncRoot (fun () -> store.LockWaits.Edges.Count > 0)
+                  let observed = Threading.SpinWait.SpinUntil((fun () -> blocked () || pending.IsCompleted), TimeSpan.FromSeconds 3.0)
+                  let wasBlocked = blocked ()
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+                  Expect.isTrue (pending.Wait(TimeSpan.FromSeconds 4.0)) predicate
+                  Expect.isTrue observed predicate
+                  Expect.equal wasBlocked expectedWait predicate
+                  Expect.equal (snd pending.Result) (Affected 1UL) predicate
+
           testCase "exact primary reads with NOWAIT or SKIP LOCKED protect the MySQL gap"
           <| fun _ ->
               let run session sql expected =
