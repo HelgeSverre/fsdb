@@ -354,6 +354,14 @@ the median paired throughput for changes to a secondary unique key
 was 18% lower after routing them through a tracked statement. Payload-only
 updates were within 1% by the same measure.
 
+Ordinary indexed autocommit updates now recheck the committed catalog
+in place. Updates that need private statement state still use the
+tracked path. In an eleven-round paired Debug comparison of the same
+point workload, the in-place path reached 99.7% of the original
+unique-key update throughput. The tracked path reached 83.2%.
+In a separate six-round WAL-backed run, the in-place path reached 96.7%
+of the original throughput and the tracked path reached 83.1%.
+
 ON DUPLICATE KEY UPDATE and its ignored form now recheck the occupied
 destination using the prepared row. They acquire a later candidate's
 incoming locks only after the preceding candidate finishes. A fatal

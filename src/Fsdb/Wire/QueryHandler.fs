@@ -3896,7 +3896,7 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
         let lastInsertId, lastGeneratedId, result, columnMetadata, calculatedFoundRows =
             try
                 DynamicScope.withThreadValue storedFunctionSession (Some session) (fun () ->
-                    Executor.withCommittedFullTextStore session.Store (fun () ->
+                    Executor.withCommittedStatementStore session.Store (fun () ->
                         let strictConversion = store.ExecutionSettings.SqlMode.Strict && isDataChangeStatement stmt && not (ignoresDataChangeErrors stmt)
                         Diagnostics.withStrictNumericConversion strictConversion (fun () ->
                             Diagnostics.withDivisionByZeroPolicy (divisionByZeroPolicy store stmt) evaluateWithLockingView)))
@@ -4218,7 +4218,8 @@ let private autocommitExecution (session: Session) dbName statement =
             | Update _ | Delete _ ->
                 let isolation = configuredIsolation session
                 let protectGaps = isolation = RepeatableRead || isolation = Serializable
-                match Executor.tryUnindexedWriteScan protectGaps store (registryFor session) dbName statement with
+                let registry = registryFor session
+                match Executor.tryUnindexedWriteScan protectGaps store registry dbName statement with
                 | None ->
                     match statement with
                     | Update update ->
@@ -4227,7 +4228,12 @@ let private autocommitExecution (session: Session) dbName statement =
                         let changesKey (column: ColumnDef) =
                             assignments |> List.exists (fun name -> column.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
                             || hasTriggers.Value
-                        if Storage.mayChangeSecondaryUniqueKey target changesKey then TrackStatement else RunDirectly
+                        let needsPrivateRebase =
+                            (Storage.mayChangeSecondaryUniqueKey target changesKey)
+                            && (hasTriggers.Value || Executor.updateCallsCustomFunction registry update
+                                || Storage.hasQualifiedUpdateReferences store database
+                                || (update.Ignore && not (Storage.canBatchIgnoredUpdates store database target.OriginalName)))
+                        if needsPrivateRebase then TrackStatement else RunDirectly
                     | _ -> RunDirectly
                 | Some(database, table) ->
                     let event = match statement with Update _ -> "UPDATE" | _ -> "DELETE"

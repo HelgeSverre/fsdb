@@ -1238,7 +1238,7 @@ let private observedTriggerWrites = System.Threading.AsyncLocal<(Value[] * HashS
 let private viewCheckScope = System.Threading.AsyncLocal<ViewCheckScope option>()
 let private lockingReadRows = System.Threading.AsyncLocal<Map<string, Set<RowId>>>()
 let private suppressReadRowLocks = new System.Threading.ThreadLocal<bool>()
-let private committedFullTextStore = System.Threading.AsyncLocal<Store option>()
+let private committedStatementStore = System.Threading.AsyncLocal<Store option>()
 let private lockingReadStore = System.Threading.AsyncLocal<(Store option * (unit -> Store)) option>()
 let private lockingReadTimeout = System.Threading.AsyncLocal<System.TimeSpan option>()
 let private releaseLockingReadOffsetRows = System.Threading.AsyncLocal<bool>()
@@ -1571,7 +1571,7 @@ let private scalarExecutionStore = System.Threading.AsyncLocal<Store option>()
 
 let internal currentScalarExecutionStore () = scalarExecutionStore.Value
 
-let private updateCallsCustomFunction registry statement =
+let internal updateCallsCustomFunction registry statement =
     Expression.statementExists (function
         | FuncCall(name, _) -> not (Functions.isUnmodifiedBuiltinScalar name registry)
         | _ -> false) (Update statement)
@@ -1694,11 +1694,10 @@ let private temporaryMutationScopeFor (store: Store) =
     temporaryMutationScope.Value
     |> Option.filter (fun scope -> obj.ReferenceEquals(scope.Overlay.Databases, store.Databases))
 
-let internal withCommittedFullTextStore store body =
-    // Keep committed index visibility backed by the shared store when the
-    // statement evaluator itself runs against a session temporary overlay.
+let internal withCommittedStatementStore store body =
+    // Keep the shared root visible when the statement uses a private catalog.
     let committed = temporaryMutationScopeFor store |> Option.map _.Committed |> Option.defaultValue store
-    DynamicScope.withValue committedFullTextStore (Some committed) body
+    DynamicScope.withValue committedStatementStore (Some committed) body
 
 let private permanentMutationPublisher store =
     temporaryMutationScopeFor store |> Option.map _.Publish
@@ -26639,7 +26638,7 @@ and private fullTextScoresForTable
     (matchNodes: Expr list)
     =
     let scoringTable, visibleIds =
-        match committedFullTextStore.Value with
+        match committedStatementStore.Value with
         | None -> table, None
         | Some store ->
             match tableSnapshot store dbName table.OriginalName with
@@ -34870,9 +34869,13 @@ let rec private executeAsWithViewSources
         (triggerRows: ResizeArray<Value[] option * Value[] option>) beforeTriggers afterTriggers =
         let ignoreErrors = statement.Ignore
         let callsCustomFunction = updateCallsCustomFunction registry statement
+        // A live update can refresh a key on the shared root without a transaction rebase.
+        let canWaitInPlace =
+            committedStatementStore.Value
+            |> Option.exists (fun committed -> obj.ReferenceEquals(committed.CatalogPublication, runStore.CatalogPublication))
         let write candidates predicate updater =
             Storage.withPermissiveIndexExpressions ignoreErrors (fun () ->
-                updateRowsWithAssignmentsById runStore db table candidates predicate assignedColumns ignoreErrors updater)
+                updateRowsWithAssignmentsById canWaitInPlace runStore db table candidates predicate assignedColumns ignoreErrors updater)
         let fireAfter changed =
             triggerStorageResult (fireTriggers runStore db table After TriggerUpdate afterTriggers (List.ofSeq triggerRows))
             |> Result.map (fun () -> changed)
@@ -34889,7 +34892,7 @@ let rec private executeAsWithViewSources
             write candidates predicate updater |> Result.bind fireAfter
         elif canBatchIgnoredUpdate runStore db table callsCustomFunction beforeTriggers afterTriggers then
             Storage.withPermissiveIndexExpressions true (fun () ->
-                updateRowsIgnoringConstraintsWithAssignmentsById runStore db table candidates predicate assignedColumns updater)
+                updateRowsIgnoringConstraintsWithAssignmentsById canWaitInPlace runStore db table candidates predicate assignedColumns updater)
         else
             let selected =
                 match candidates with

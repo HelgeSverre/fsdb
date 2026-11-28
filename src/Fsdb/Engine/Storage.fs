@@ -14946,6 +14946,9 @@ let internal upsertRowsDynamically store dbName tableName columns rows prepare r
         upsertRowsInStatement store dbName tableName rows prepareCandidate
             applyUpdate checkChangedRow assignedColumns foundRows ignoreDuplicates ignoreViewCheck)
 
+let internal hasQualifiedUpdateReferences (store: Store) (database: string) =
+    catalogHasQualifiedForeignKeysAffecting store.Catalog (Set.singleton (database.ToLowerInvariant()))
+
 let internal canBatchIgnoredUpdates (store: Store) database table =
     // Referential actions retain per-row publication so later rows see preceding cascades.
     referencingForeignKeys store.Catalog (tableAddress database table) |> List.isEmpty
@@ -14954,6 +14957,7 @@ let internal canBatchIgnoredUpdates (store: Store) database table =
 // Candidate IDs are refreshed under publication locks; fatal failures discard the builder.
 let private updateRowsCore
     (constraintPolicy: UpdateConstraintPolicy)
+    (allowLiveRecheck: bool)
     (ignoreCoercion: bool)
     (assignedColumns: Set<int> option)
     (store: Store)
@@ -15083,7 +15087,7 @@ let private updateRowsCore
                 setCatalogTable address updated cascadeCatalog, batch))
 
     let publish owner =
-        let canWait = dynamicWriteRebaseActive store
+        let canWait = allowLiveRecheck || dynamicWriteRebaseActive store
         let mutable needsRefresh = false
         let resolveConflict table =
             if canWait then recheckOccupiedSecondaryKey owner store dbName tableName table (fun () -> needsRefresh <- true)
@@ -15146,23 +15150,23 @@ let private updateRowsCore
 
 /// Updates matching rows atomically, failing the statement on a constraint violation.
 let updateRows store database table candidates predicate updater =
-    updateRowsCore RejectConstraintViolation false None store database table candidates (fun _ row -> predicate row) updater
+    updateRowsCore RejectConstraintViolation false false None store database table candidates (fun _ row -> predicate row) updater
 
 let internal updateRowsWithAssignments store database table candidates predicate assignedColumns updater =
-    updateRowsCore RejectConstraintViolation false (Some assignedColumns) store database table candidates (fun _ row -> predicate row) updater
+    updateRowsCore RejectConstraintViolation false false (Some assignedColumns) store database table candidates (fun _ row -> predicate row) updater
 
-let internal updateRowsWithAssignmentsById store database table candidates predicate assignedColumns ignoreCoercion updater =
-    updateRowsCore RejectConstraintViolation ignoreCoercion (Some assignedColumns) store database table candidates predicate updater
+let internal updateRowsWithAssignmentsById allowLiveRecheck store database table candidates predicate assignedColumns ignoreCoercion updater =
+    updateRowsCore RejectConstraintViolation allowLiveRecheck ignoreCoercion (Some assignedColumns) store database table candidates predicate updater
 
 /// Skips ignorable constraint failures while retaining accepted rows in one publication.
 let internal updateRowsIgnoringConstraints store database table candidates predicate updater =
-    updateRowsCore SkipConstraintViolation true None store database table candidates (fun _ row -> predicate row) updater
+    updateRowsCore SkipConstraintViolation false true None store database table candidates (fun _ row -> predicate row) updater
 
 let internal updateRowsIgnoringConstraintsWithAssignments store database table candidates predicate assignedColumns updater =
-    updateRowsCore SkipConstraintViolation true (Some assignedColumns) store database table candidates (fun _ row -> predicate row) updater
+    updateRowsCore SkipConstraintViolation false true (Some assignedColumns) store database table candidates (fun _ row -> predicate row) updater
 
-let internal updateRowsIgnoringConstraintsWithAssignmentsById store database table candidates predicate assignedColumns updater =
-    updateRowsCore SkipConstraintViolation true (Some assignedColumns) store database table candidates predicate updater
+let internal updateRowsIgnoringConstraintsWithAssignmentsById allowLiveRecheck store database table candidates predicate assignedColumns updater =
+    updateRowsCore SkipConstraintViolation allowLiveRecheck true (Some assignedColumns) store database table candidates predicate updater
 
 /// Per-snapshot memo of `RowsArray` as a `Value[] list`, keyed by the
 /// `Table` instance itself: `Executor`'s row pipeline is list-based and
