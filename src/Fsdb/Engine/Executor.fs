@@ -22752,6 +22752,73 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
                 | (Col _ | QualifiedCol _) as column ->
                     tryColumnDefForExpr context column |> Option.bind (_.Type >> signedIntegerTypeBounds)
                 | expression -> trySignedIntegerConstant expression |> Option.map (fun value -> value, value)
+
+            let tryBoundedOuterInteger expression =
+                if (tryCorrelatedOuterScope source expression).IsSome && (signedBounds expression).IsSome then
+                    let column =
+                        match expression with
+                        | Col _ | QualifiedCol _ -> tryColumnDefForExpr context expression
+                        | _ -> None
+                    readOuter source context expression column
+                    |> Option.filter (function VInt _ | VNull -> true | _ -> false)
+                else None
+
+            let tryShiftedRange expression =
+                let rec affineKey expression =
+                    let shift operator indexed constant constantFirst =
+                        match trySignedIntegerConstant constant with
+                        | None -> None
+                        | Some value ->
+                            let valueBounds = value, value
+                            affineKey indexed
+                            |> Option.bind (fun (column, coefficient, offset, bounds) ->
+                                let left, right = if constantFirst then valueBounds, bounds else bounds, valueBounds
+                                tryBoundedSignedArithmetic operator left right
+                                |> Option.map (fun (_, resultBounds) ->
+                                    match operator, constantFirst with
+                                    | Sub, true -> column, -coefficient, value - offset, resultBounds
+                                    | Sub, false -> column, coefficient, offset - value, resultBounds
+                                    | _ -> column, coefficient, offset + value, resultBounds))
+                    match expression with
+                    | BinOp((Add | Sub as operator), left, right) ->
+                        shift operator left right false |> Option.orElseWith (fun () -> shift operator right left true)
+                    | Col _ | QualifiedCol _ ->
+                        indexedColumn expression
+                        |> Option.bind (_.Type >> signedIntegerTypeBounds)
+                        |> Option.map (fun bounds -> expression, 1I, 0I, bounds)
+                    | _ -> None
+
+                let shiftedKey = function
+                    | BinOp((Add | Sub), _, _) as key -> affineKey key
+                    | _ -> None
+                let bound = function
+                    | LiteralValue VNull -> Some VNull
+                    | expression ->
+                        match trySignedIntegerConstant expression with
+                        | Some value -> Some(VInt(int64 value))
+                        | None -> tryBoundedOuterInteger expression
+
+                // Translate only the index predicate. Execution still evaluates the original SQL.
+                let translate (range: RangeLookupBounds<_, Value>) =
+                    let column, coefficient, offset, _ = range.Column
+                    let cut isLower (value, inclusive) =
+                        let value =
+                            match value with
+                            | VInt integer ->
+                                // An integer cut outside the stored column's width must not be coerced to a key.
+                                VDecimal(decimal (coefficient * (bigint integer - offset)))
+                            | _ -> value
+                        let operator =
+                            match isLower = (coefficient > 0I), inclusive with
+                            | true, true -> Gte
+                            | true, false -> Gt
+                            | false, true -> Lte
+                            | false, false -> Lt
+                        BinOp(operator, column, Lit value)
+                    [ Option.map (cut true) range.Lower; Option.map (cut false) range.Upper ] |> List.choose id
+
+                rangePredicatesFor shiftedKey bound expression |> List.collect translate |> combineConjuncts
+
             let hasCorrelatedTimestampRange columnName =
                 let timestampColumn expression =
                     indexedColumn expression
@@ -22821,13 +22888,8 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
                             temporalKeyValue column.Type value |> Option.map (fun value -> key column value, Some bound)
                         | _ -> None
                     | BinOp((Add | Sub), _, _)
-                        when (signedIntegerTypeBounds column.Type).IsSome
-                             && (tryCorrelatedOuterScope source bound).IsSome
-                             && (signedBounds bound).IsSome ->
-                        readOuter source context bound None
-                        |> Option.bind (function
-                            | VInt _ | VNull as value -> Some(key column value, Some bound)
-                            | _ -> None)
+                        when (signedIntegerTypeBounds column.Type).IsSome ->
+                        tryBoundedOuterInteger bound |> Option.map (fun value -> key column value, Some bound)
                     | _ -> None)
 
             let tryPrefixPin = function
@@ -22836,14 +22898,16 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
                     tryBoundPin comparison left right |> Option.orElseWith (fun () -> tryBoundPin comparison right left)
                 | _ -> None
 
-            let clauses = predicate |> conjuncts |> List.map (fun expression -> expression, tryPrefixPin expression)
-            let safeClause = function
-                // Only a proven, outer-only computed pin may bypass the plain predicate check.
-                | _, Some(_, Some(BinOp((Add | Sub), _, _))) -> true
-                | expression, pin -> isPlainRowPredicate expression && (pin.IsSome || safeResidual expression)
-            if not (List.forall safeClause clauses) then None
-            else
-                let pins = clauses |> List.choose snd
+            let bindClause expression =
+                let pin = tryPrefixPin expression
+                match pin with
+                | Some(_, Some(BinOp((Add | Sub), _, _))) -> Some(expression, None, pin)
+                | _ when isPlainRowPredicate expression && (pin.IsSome || safeResidual expression) -> Some(expression, None, pin)
+                | _ -> tryShiftedRange expression |> Option.map (fun shifted -> expression, Some shifted, pin)
+
+            predicate |> conjuncts |> List.map bindClause |> tryAllSome
+            |> Option.bind (fun clauses ->
+                let pins = clauses |> List.choose (fun (_, _, pin) -> pin)
                 let safeOrder (term: IndexOrderTerm) =
                     term.Transform.IsNone
                     && (innerColumn term.Column |> Option.exists (fun column ->
@@ -22863,12 +22927,19 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
                             | [] -> false)
                     if not timestampRange && not (pins |> List.exists (snd >> Option.isSome)) then None
                     else
+                        let lookupPredicate =
+                            if clauses |> List.exists (fun (_, shifted, _) -> shifted.IsSome) then
+                                clauses
+                                |> List.map (fun (original, shifted, _) -> Option.defaultValue original shifted)
+                                |> combineConjuncts
+                                |> Option.defaultValue predicate
+                            else predicate
                         Some { Source = source
                                Outer = context
-                               Predicate = predicate
+                               Predicate = lookupPredicate
                                Terms = terms
                                Pins = pins
-                               LeadingTimestampRange = timestampRange })
+                               LeadingTimestampRange = timestampRange }))
 
 and private planCorrelatedTopOrder store registry dbName fromItem (select: SelectStmt) outer readOuter bindPredicate =
     let scopedSource =

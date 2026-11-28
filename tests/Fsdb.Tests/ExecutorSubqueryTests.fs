@@ -11,6 +11,16 @@ let private run = TestSupport.Sql.execute
 let private runDefault = TestSupport.Sql.executeDefault
 let private newStore () = create ()
 
+let private seedOrderedTenantEvents store =
+    for sql in
+        [ "CREATE TABLE digit(d INT PRIMARY KEY)"
+          "INSERT INTO digit VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)"
+          "CREATE TABLE requests(id INT PRIMARY KEY, tenant INT, cutoff INT)"
+          "INSERT INTO requests VALUES (1,1,94),(2,2,44),(3,3,100),(4,NULL,100)"
+          "CREATE TABLE events(id INT PRIMARY KEY, tenant INT, state INT, stamp INT, KEY recent(tenant,state,stamp DESC,id))"
+          "INSERT INTO events SELECT t.d*100+x.d*10+y.d,t.d,1,x.d*10+y.d FROM digit t CROSS JOIN digit x CROSS JOIN digit y" ] do
+        TestSupport.Sql.expectOk (runDefault store sql) sql
+
 let tests =
     testList
         "correlated subqueries"
@@ -49,14 +59,7 @@ let tests =
           testCase "correlated top-N seeks a computed signed integer prefix"
           <| fun _ ->
               let store = newStore ()
-              for sql in
-                  [ "CREATE TABLE digit(d INT PRIMARY KEY)"
-                    "INSERT INTO digit VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)"
-                    "CREATE TABLE requests(id INT PRIMARY KEY, tenant INT, cutoff INT)"
-                    "INSERT INTO requests VALUES (1,1,94),(2,2,44),(3,3,100),(4,NULL,100)"
-                    "CREATE TABLE events(id INT PRIMARY KEY, tenant INT, state INT, stamp INT, KEY recent(tenant,state,stamp DESC,id))"
-                    "INSERT INTO events SELECT t.d*100+x.d*10+y.d,t.d,1,x.d*10+y.d FROM digit t CROSS JOIN digit x CROSS JOIN digit y" ] do
-                  TestSupport.Sql.expectOk (runDefault store sql) sql
+              seedOrderedTenantEvents store
 
               let query predicate hint =
                   "SELECT o.id,(SELECT e.id FROM events e " + hint
@@ -85,6 +88,47 @@ let tests =
               let expectedNullSafe = expected |> List.updateAt 3 [ Some "4"; Some "1000" ]
               Expect.equal (runDefault store nullSafe) (ResultSet([ "id"; "chosen" ], expectedNullSafe))
                   "a NULL-safe computed equality reads matching NULL keys"
+
+          testCase "correlated top-N seeks a shifted signed integer suffix"
+          <| fun _ ->
+              let store = newStore ()
+              seedOrderedTenantEvents store
+
+              let query predicate hint =
+                  "SELECT o.id,(SELECT e.id FROM events e " + hint
+                  + " WHERE e.tenant=o.tenant AND e.state=1 AND " + predicate
+                  + " ORDER BY e.stamp DESC,e.id LIMIT 1 OFFSET 1) AS chosen FROM requests o ORDER BY o.id"
+              let check expected predicate =
+                  let result, rows = withExaminedRows (fun () -> runDefault store (query predicate ""))
+                  Expect.equal result (ResultSet([ "id"; "chosen" ], expected)) "the ordered slice matches MySQL"
+                  Expect.equal (runDefault store (query predicate "IGNORE INDEX (recent)")) result "the scan agrees"
+                  Expect.isLessThan rows 30L "the lookup starts at the translated range boundary"
+
+              let expected = [ [ Some "1"; Some "192" ]; [ Some "2"; Some "242" ]; [ Some "3"; Some "398" ]; [ Some "4"; None ] ]
+              for predicate in
+                  [ "e.stamp+1<=o.cutoff"
+                    "o.cutoff-1>=e.stamp+0"
+                    "100-e.stamp>=101-o.cutoff"
+                    "e.stamp-1 BETWEEN -1 AND o.cutoff-2" ] do
+                  check expected predicate
+
+              let plan = runDefault store ("EXPLAIN " + query "e.stamp+1<=o.cutoff" "") |> TestSupport.Sql.explainRows
+              let access = plan |> List.find (fun row -> row.Table = Some "e")
+              Expect.equal (access.AccessType, access.Key, access.Reference)
+                  (Some "ref", Some "recent", Some "fsdb.o.tenant,const") "the shifted range keeps the equality prefix"
+
+              for sql in
+                  [ "TRUNCATE TABLE requests"
+                    "ALTER TABLE requests MODIFY cutoff BIGINT"
+                    "INSERT INTO requests VALUES (1,1,9223372036854775807),(2,1,-9223372036854775808),(3,1,NULL)"
+                    "INSERT INTO events VALUES (1000,1,1,NULL)" ] do
+                  TestSupport.Sql.expectOk (runDefault store sql) sql
+
+              check [ [ Some "1"; Some "198" ]; [ Some "2"; None ]; [ Some "3"; None ] ] "e.stamp-1<o.cutoff"
+              check [ [ Some "1"; None ]; [ Some "2"; Some "198" ]; [ Some "3"; None ] ] "e.stamp+1>o.cutoff"
+              match runDefault store (query "e.stamp+9223372036854775807<=o.cutoff" "") with
+              | Err(1690, _) -> ()
+              | result -> failtestf "expected signed overflow from the original predicate, got %A" result
 
           testCase "correlated top-N seeks exact decimal keys before applying its limit"
           <| fun _ ->

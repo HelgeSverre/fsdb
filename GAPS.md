@@ -3303,6 +3303,10 @@ implementation effort:
    [Computed signed-integer prefixes](torture/findings/2026-11-27-explain-analyze-correlated-top-n.md#computed-signed-integer-prefixes)
    seek the ordered slice when outer addition or subtraction stays in the
    BIGINT domain. Static plans report the computed reference as `func`.
+   [Shifted signed-integer suffixes](torture/findings/2026-11-27-explain-analyze-correlated-top-n.md#shifted-signed-integer-suffixes)
+   seek directly to an inner range boundary after an exact correlated prefix.
+   The planner handles bounded addition and subtraction on the sort column
+   and keeps the SQL predicate for row filtering.
    [Signed BIGINT overflow](torture/findings/2026-11-27-explain-analyze-correlated-top-n.md#signed-bigint-overflow-and-empty-reads)
    now follows the audited evaluation order for constant-empty filters,
    ordered probes, and result metadata.

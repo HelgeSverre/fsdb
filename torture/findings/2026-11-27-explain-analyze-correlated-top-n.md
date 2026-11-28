@@ -134,6 +134,31 @@ The pinned oracle also agrees on reversed equality, nested arithmetic,
 INT boundaries, NULL-safe equality, repeated bounds, inner column names
 shadowing outer names, and the ignored-index controls.
 
+### Shifted signed-integer suffixes
+
+For `e.tenant = o.tenant AND e.state = 1 AND e.stamp + 1 <= o.cutoff`,
+MySQL 8.4.11 uses the equality prefix of `recent(tenant,state,stamp DESC,id)`
+and sorts the matches. Fsdb previously scanned and sorted. It now seeks to
+`stamp <= cutoff - 1` and reads in index order. It translates the bounds
+of inequalities and `BETWEEN` when the column's signed type proves that
+each addition or subtraction fits in BIGINT. A subtraction such as
+`100 - stamp` reverses the inequality on the stored key. Bounds beyond
+BIGINT are represented exactly to preserve empty and open-ended slices.
+Execution still checks the original predicate before OFFSET and LIMIT.
+
+The pinned comparison matched 74 observations covering both order
+directions, index hints, NULL and BIGINT boundaries, arithmetic overflow,
+derived aliases, and lateral queries. Expressions that may overflow keep
+their ordinary evaluation path. A seeded comparison matched another 300
+queries across all five signed integer widths, with duplicate sort keys,
+NULLs, long offsets, and either index direction.
+
+On the 10,000-event, 50-request fixture, `EXPLAIN ANALYZE` changed from
+`ALL` to an ordered lookup that read two inner rows per request. All
+50 results matched. On native macOS, the median elapsed time across
+seven alternating query pairs was 32.86 ms before and 12.57 ms after.
+Both Release builds ran in memory with three warm-up queries each.
+
 ### Signed BIGINT overflow and empty reads
 
 SQL addition and subtraction over signed BIGINT now raise error 1690
