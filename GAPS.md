@@ -1064,7 +1064,9 @@ transaction retains its isolation and access mode and opens a fresh view
 on its first consistent read.
 [DDL after a read view opens](torture/findings/2026-11-27-repeatable-read-after-write-refresh.md#table-definitions-created-after-the-read-view)
 now binds current table and column names for audited consistent SELECTs.
-Reads of replaced layouts return 1412 without ending the transaction.
+Consistent and locking reads that open replaced layouts return 1412
+without ending the transaction. A plan that eliminates the read can
+still return an empty result.
 Audited single-table SELECTs now distinguish inherited B-tree keys from
 new keys, including renames, covering scans, point misses, and ordered
 limits. Single-table locking reads also check the selected key before

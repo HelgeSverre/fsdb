@@ -159,3 +159,17 @@ The comparison exercises equality hits and misses, range misses,
 covering and noncovering scans, ORDER BY with and without LIMIT, and
 empty predicates. The remaining differences in this fixture concern
 index hints on UPDATE.
+
+### Locking reads of new table layouts
+
+Creating, recreating, or rebuilding a table can leave its current
+definition visible to a repeatable-read transaction whose read view
+cannot open that layout. MySQL 8.4.11 returns 1412 for locking reads
+through either PRIMARY or a secondary key, even on a point miss. Table
+and column binding still runs first. LIMIT 0, false predicates, and
+contradictory index ranges can eliminate the read.
+
+The comparison includes in-place key changes, instant column addition,
+COPY, DROP and CREATE, and a rename that preserves the layout. Joined
+and nested locking reads apply the same check. A metadata probe leaves
+the actual subquery to acquire its locks or report a layout error.

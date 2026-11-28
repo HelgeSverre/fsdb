@@ -16851,6 +16851,51 @@ let tests =
               let reader = run reader "SELECT id FROM t FORCE INDEX(ix) WHERE k=10 FOR UPDATE" (ResultSet([ "id" ], [ [ Some "1" ] ]))
               run reader "ROLLBACK" (Affected 0UL) |> ignore
 
+          testCase "locking reads cannot scan layouts created after their read view"
+          <| fun _ ->
+              for evolution in [ "create"; "replace"; "copy" ] do
+                  let store = Fsdb.Storage.create ()
+                  let run session sql expected =
+                      let next, result = handle session sql
+                      Expect.equal result expected $"{evolution}: {sql}"
+                      next
+                  let definition = "CREATE TABLE t(id INT PRIMARY KEY, k INT, INDEX ix(k))"
+                  let createTable writer =
+                      let writer = run writer definition (Affected 0UL)
+                      run writer "INSERT INTO t VALUES(1,10)" (Affected 1UL)
+                  let writer = create 1 store
+                  let writer = if evolution = "create" then writer else createTable writer
+                  let reader = run (create 2 store) "START TRANSACTION WITH CONSISTENT SNAPSHOT" (Affected 0UL)
+                  let writer =
+                      match evolution with
+                      | "create" -> createTable writer
+                      | "replace" -> run writer "DROP TABLE t" (Affected 0UL) |> createTable
+                      | _ -> run writer "ALTER TABLE t ADD INDEX iy(k), ALGORITHM=COPY" (Affected 1UL)
+                  let unavailable = Err(1412, "Table definition has changed, please retry transaction")
+                  let noRows = ResultSet([ "id" ], [])
+                  let reader = run reader "SELECT id FROM t WHERE id=1 FOR UPDATE" unavailable
+                  let reader = run reader "SELECT id FROM t WHERE id=999 FOR SHARE" unavailable
+                  let reader = run reader "SELECT id FROM t FORCE INDEX(ix) WHERE k=10 FOR UPDATE SKIP LOCKED" unavailable
+                  let reader = run reader "SELECT id FROM t ORDER BY id LIMIT 1 FOR UPDATE NOWAIT" unavailable
+                  let reader = run reader "SELECT id FROM t WHERE id>10 AND id<5 FOR UPDATE" noRows
+                  let reader = run reader "SELECT id FROM t FORCE INDEX(ix) WHERE k>10 AND k<5 FOR UPDATE" noRows
+                  let reader = run reader "SELECT id FROM t WHERE FALSE FOR UPDATE" noRows
+                  let reader = run reader "SELECT id FROM t LIMIT 0 FOR UPDATE" noRows
+                  let reader = run reader "SELECT id FROM t FORCE INDEX(absent) LIMIT 0 FOR UPDATE"
+                                   (Err(1176, "Key 'absent' doesn't exist in table 't'"))
+                  let reader = run reader "SELECT missing FROM t WHERE id=1 FOR UPDATE"
+                                   (Err(1054, "Unknown column 'missing' in 'field list'"))
+                  let reader = run reader "SELECT id FROM t FOR UPDATE OF absent"
+                                   (Err(3568, "Unresolved table name `absent` in locking clause."))
+                  let reader = run reader "SELECT id FROM t FOR UPDATE OF t FOR SHARE OF t"
+                                   (Err(3569, "Table `t` appears in multiple locking clauses."))
+                  let reader = run reader "SELECT (SELECT id FROM t WHERE id=1 FOR UPDATE) AS n" unavailable
+                  let writer = run writer "START TRANSACTION" (Affected 0UL)
+                  let writer = run writer "SELECT id FROM t WHERE id=1 FOR UPDATE NOWAIT" (ResultSet([ "id" ], [ [ Some "1" ] ]))
+                  run writer "ROLLBACK" (Affected 0UL) |> ignore
+                  let reader = run reader "ROLLBACK" (Affected 0UL)
+                  run reader "SELECT id FROM t FOR UPDATE" (ResultSet([ "id" ], [ [ Some "1" ] ])) |> ignore
+
           testCase "transaction access modes, chaining, and SET CHARACTER SET are enforced"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

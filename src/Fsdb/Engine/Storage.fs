@@ -4177,14 +4177,21 @@ let private bindReadIndexes (pinned: Table) (current: Table) =
         let bindings = readIndexBindings.GetValue(pinned, fun _ -> ConcurrentDictionary())
         bindings.GetOrAdd(current.SchemaRevision, fun _ -> lazy (rebindChangedReadIndexes pinned current)).Value
 
+let private findReadLayout catalog database name (current: Table) =
+    let sameLayout (table: Table) = table.ReadLayoutRevision = current.ReadLayoutRevision
+    let previous = tryCatalogDatabase database catalog |> Option.bind (Map.tryFind (normalizeTableName name))
+    match previous with
+    | Some table when sameLayout table -> previous
+    // A table can move between schemas while retaining its physical layout.
+    | _ -> catalog |> Map.values |> Seq.collect Map.values |> Seq.tryFind sameLayout
+
+let internal lockingReadLayoutUnavailable (store: Store) (database: string) name current =
+    not (Map.containsKey (database.ToLowerInvariant(), normalizeTableName name) store.TableShadows)
+    && (tryConsistentReadView store |> Option.exists (fun catalog -> (findReadLayout catalog database name current).IsNone))
+
 let internal lockingReadUnavailableIndexes store database name (current: Table) =
     tryConsistentReadView store
-    |> Option.bind (fun catalog ->
-        let sameLayout (table: Table) = table.ReadLayoutRevision = current.ReadLayoutRevision
-        let previous = tryCatalogDatabase database catalog |> Option.bind (Map.tryFind (normalizeTableName name))
-        match previous with
-        | Some table when sameLayout table -> previous
-        | _ -> catalog |> Map.values |> Seq.collect Map.values |> Seq.tryFind sameLayout)
+    |> Option.bind (fun catalog -> findReadLayout catalog database name current)
     |> Option.filter (fun pinned -> pinned.ReadIndexRevisions <> current.ReadIndexRevisions)
     |> Option.map (fun pinned ->
         let inherited = pinned.ReadIndexRevisions |> Map.values |> Set.ofSeq

@@ -8374,7 +8374,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | Exists select ->
         let ctx = expressionSubqueryContext ctx select
         let indexed =
-            if not (hasReadViewRestrictions ctx.Store) then
+            if select.Locking.IsEmpty && not (hasReadViewRestrictions ctx.Store) then
                 tryCorrelatedExists ctx select |> Option.orElseWith (fun () -> tryDecorrelatedExists ctx select)
             else None
         match indexed with
@@ -8391,7 +8391,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | Subquery select ->
         let ctx = expressionSubqueryContext ctx select
         let shortcut =
-            if not (hasReadViewRestrictions ctx.Store) then
+            if select.Locking.IsEmpty && not (hasReadViewRestrictions ctx.Store) then
                 tryMissingCorrelatedAggregateArgument ctx select
                 |> Option.orElseWith (fun () -> tryCorrelatedCount ctx select)
                 |> Option.orElseWith (fun () -> tryFoldCorrelatedRangeAggregate ctx select)
@@ -10327,6 +10327,7 @@ and private runExpressionSubquery
           RowEqualityMembership = None }
 
     match memo.TryGetValue cacheKey with
+    | _ when not cacheKey.Locking.IsEmpty -> execute (Some ctx)
     // A probe may skip read-view checks that execution must enforce.
     | _ when (metadataProbe.Value || planningProbe.Value) && hasReadViewRestrictions ctx.Store -> execute (Some ctx)
     | true, MemoizedSubquery result -> result
@@ -16674,107 +16675,125 @@ and private prepareLockingRead
 
                 names |> List.map (fun name -> name, locking))
 
-        match
-            targets
-            |> List.tryPick (fun (name, _) ->
-                if Map.containsKey (name.ToLowerInvariant()) byQualifier then None else Some name)
-        with
-        | Some name -> Error(Err(3568, sprintf "Unresolved table name `%s` in locking clause." name))
-        | None ->
+        let validateTargets () =
             match
+                targets
+                |> List.tryPick (fun (name, _) ->
+                    if Map.containsKey (name.ToLowerInvariant()) byQualifier then None else Some name)
+            with
+            | Some name -> Error(Err(3568, sprintf "Unresolved table name `%s` in locking clause." name))
+            | None ->
                 targets
                 |> List.countBy (fun (name, _) -> name.ToLowerInvariant())
                 |> List.tryFind (fun (_, count) -> count > 1)
-            with
-            | Some(name, _) -> Error(Err(3569, sprintf "Table `%s` appears in multiple locking clauses." name))
-            | None when suppressReadRowLocks.Value -> Ok(Map.empty, None)
-            | None ->
-                let unavailableTable =
-                    match sources with
-                    | [ source ] when select.Joins.IsEmpty ->
-                        let database = source.Reference.Database |> Option.defaultValue dbName
-                        let unavailable = Storage.lockingReadUnavailableIndexes store database source.Reference.Table source.Table
-                        if unavailable.IsEmpty then None
-                        else Some { source.Table with UnavailableReadIndexes = unavailable }
-                    | _ -> None
+                |> function
+                    | Some(name, _) -> Error(Err(3569, sprintf "Table `%s` appears in multiple locking clauses." name))
+                    | None -> Ok()
 
-                let checkIndex (source: LockingReadSource) names =
-                    unavailableTable
-                    |> Option.bind (fun table -> snapshotIndexReadError store registry dbName table source.Reference select outer names)
+        let acquire () =
+            let layoutUnavailable (source: LockingReadSource) =
+                let database = source.Reference.Database |> Option.defaultValue dbName
+                Storage.lockingReadLayoutUnavailable store database source.Reference.Table source.Table
 
-                let accessFor (source: LockingReadSource) =
-                    match unavailableTable with
-                    | Some table ->
-                        physicalAccessCandidatesInTableWith CandidateNarrowing store registry table source.Reference select.Where
-                        |> filterSnapshotIndexCandidates table source.Reference select
-                        |> choosePhysicalAccess
-                    | None when sources.Length = 1 && select.Joins.IsEmpty ->
-                        tryPhysicalAccessWith CandidateNarrowing store registry dbName source.Reference select.Where
-                    | None -> None
+            let unavailableTable =
+                match sources with
+                | [ source ] when select.Joins.IsEmpty ->
+                    let database = source.Reference.Database |> Option.defaultValue dbName
+                    let unavailable = Storage.lockingReadUnavailableIndexes store database source.Reference.Table source.Table
+                    if unavailable.IsEmpty then None
+                    else Some { source.Table with UnavailableReadIndexes = unavailable }
+                | _ -> None
 
-                let scanIndexes (source: LockingReadSource) access =
-                    match access with
-                    | Some plan -> physicalAccessKeyNames plan
-                    | None ->
-                        unavailableTable
-                        |> Option.map (fun table ->
-                            tryIndexOrder store registry dbName source.Reference select
-                            |> Option.filter (fun plan ->
-                                not (Storage.readIndexUnavailable table plan.KeyName)
-                                || snapshotIndexCovers table select plan.KeyName
-                                || (select.Limit.IsSome && isForcedIndex IndexOrderBy source.Reference plan.KeyName))
-                            |> Option.map (fun plan -> [ plan.KeyName ])
-                            |> Option.defaultWith (fun () ->
-                                let forced = forcedCoveringSnapshotIndex table source.Reference select
-                                if not forced.IsEmpty || select.Where.IsSome || not select.OrderBy.IsEmpty then forced
-                                else
-                                    let allowed = indexAllowedBy (indexHintsFor IndexJoin source.Reference)
-                                    match table.Indexes |> List.filter (fun index ->
-                                        index.Visible && index.Kind = BTree && not (equalsIgnoreCase index.Name "PRIMARY")
-                                        && allowed index.Name && snapshotIndexCovers table select index.Name) with
-                                    | [ index ] -> [ index.Name ]
-                                    | _ -> []))
-                        |> Option.defaultValue []
+            let checkIndex (source: LockingReadSource) names =
+                unavailableTable
+                |> Option.bind (fun table -> snapshotIndexReadError store registry dbName table source.Reference select outer names)
 
-                let ordered =
-                    match sources, targets with
-                    | [ source ], [ _, locking ] ->
-                        tryOrderedSecondaryLockingRead store registry dbName select source locking (checkIndex source)
-                        |> Option.map (Result.map (fun (current, rows, offset) ->
-                            Map.ofList [ source.Qualifier.ToLowerInvariant(), rows ], Some(current, offset)))
-                    | _ -> None
+            let accessFor (source: LockingReadSource) =
+                match unavailableTable with
+                | Some table ->
+                    physicalAccessCandidatesInTableWith CandidateNarrowing store registry table source.Reference select.Where
+                    |> filterSnapshotIndexCandidates table source.Reference select
+                    |> choosePhysicalAccess
+                | None when sources.Length = 1 && select.Joins.IsEmpty ->
+                    tryPhysicalAccessWith CandidateNarrowing store registry dbName source.Reference select.Where
+                | None -> None
 
-                match ordered with
-                | Some result -> result
+            let scanIndexes (source: LockingReadSource) access =
+                match access with
+                | Some plan -> physicalAccessKeyNames plan
                 | None ->
-                    Storage.withTransactionLockCheckpoint store (fun () ->
-                        targets
-                        |> traverse (fun (name, locking) ->
-                            let source = byQualifier.[name.ToLowerInvariant()]
-                            let database = source.Reference.Database |> Option.defaultValue dbName
-                            let access = accessFor source
-                            match checkIndex source (scanIndexes source access) with
-                            | Some error -> Error error
-                            | None ->
-                                let rowIds =
-                                    access
-                                    |> Option.map (physicalAccessRows >> snd >> List.map fst)
-                                    |> Option.defaultWith (fun () -> source.Table.RowsArray.Indexed |> Seq.map fst |> List.ofSeq)
-                                let timeout = lockingReadTimeout.Value |> Option.defaultValue (Limits.lockWaitTimeout ())
+                    unavailableTable
+                    |> Option.map (fun table ->
+                        tryIndexOrder store registry dbName source.Reference select
+                        |> Option.filter (fun plan ->
+                            not (Storage.readIndexUnavailable table plan.KeyName)
+                            || snapshotIndexCovers table select plan.KeyName
+                            || (select.Limit.IsSome && isForcedIndex IndexOrderBy source.Reference plan.KeyName))
+                        |> Option.map (fun plan -> [ plan.KeyName ])
+                        |> Option.defaultWith (fun () ->
+                            let forced = forcedCoveringSnapshotIndex table source.Reference select
+                            if not forced.IsEmpty || select.Where.IsSome || not select.OrderBy.IsEmpty then forced
+                            else
+                                let allowed = indexAllowedBy (indexHintsFor IndexJoin source.Reference)
+                                match table.Indexes |> List.filter (fun index ->
+                                    index.Visible && index.Kind = BTree && not (equalsIgnoreCase index.Name "PRIMARY")
+                                    && allowed index.Name && snapshotIndexCovers table select index.Name) with
+                                | [ index ] -> [ index.Name ]
+                                | _ -> []))
+                    |> Option.defaultValue []
 
-                                let acquired =
-                                    match access, rowIds with
-                                    | Some(EqualityAccess plan), [ _ ]
-                                        when store.TransactionLocks.IsSome && locking.Strength = UpdateLock
-                                             && plan.Unique && plan.UsesFullKey && not (equalsIgnoreCase plan.KeyName "PRIMARY") ->
-                                        Storage.acquireExactSecondaryUniqueReadTargets
-                                            timeout store database source.Reference.Table source.Table plan.KeyName locking.Wait rowIds
-                                    | _ ->
-                                        Storage.acquireTransactionReadTargets
-                                            timeout store database source.Reference.Table locking.Strength locking.Wait rowIds
+            let ordered =
+                match sources, targets with
+                | [ source ], [ _, locking ] when not (layoutUnavailable source) ->
+                    tryOrderedSecondaryLockingRead store registry dbName select source locking (checkIndex source)
+                    |> Option.map (Result.map (fun (current, rows, offset) ->
+                        Map.ofList [ source.Qualifier.ToLowerInvariant(), rows ], Some(current, offset)))
+                | _ -> None
 
-                                Ok(source.Qualifier.ToLowerInvariant(), Set.ofList acquired))
-                        |> Result.map (fun rows -> Map.ofList rows, None)))
+            match ordered with
+            | Some result -> result
+            | None ->
+                let acquireTargets qualifier (source: LockingReadSource) locking =
+                    let database = source.Reference.Database |> Option.defaultValue dbName
+                    let access = accessFor source
+                    match checkIndex source (scanIndexes source access) with
+                    | Some error -> Error error
+                    | None ->
+                        let rowIds =
+                            access
+                            |> Option.map (physicalAccessRows >> snd >> List.map fst)
+                            |> Option.defaultWith (fun () -> source.Table.RowsArray.Indexed |> Seq.map fst |> List.ofSeq)
+                        let timeout = lockingReadTimeout.Value |> Option.defaultValue (Limits.lockWaitTimeout ())
+                        let acquired =
+                            match access, rowIds with
+                            | Some(EqualityAccess plan), [ _ ]
+                                when store.TransactionLocks.IsSome && locking.Strength = UpdateLock
+                                     && plan.Unique && plan.UsesFullKey && not (equalsIgnoreCase plan.KeyName "PRIMARY") ->
+                                Storage.acquireExactSecondaryUniqueReadTargets
+                                    timeout store database source.Reference.Table source.Table plan.KeyName locking.Wait rowIds
+                            | _ ->
+                                Storage.acquireTransactionReadTargets
+                                    timeout store database source.Reference.Table locking.Strength locking.Wait rowIds
+                        Ok(qualifier, Set.ofList acquired)
+
+                Storage.withTransactionLockCheckpoint store (fun () ->
+                    targets
+                    |> traverse (fun (name, locking) ->
+                        let qualifier = name.ToLowerInvariant()
+                        let source = byQualifier.[qualifier]
+                        // The read can reach this point with an unavailable layout
+                        // only when its access has already been eliminated.
+                        if layoutUnavailable source then Ok(qualifier, Set.empty)
+                        else acquireTargets qualifier source locking)
+                    |> Result.map (fun rows -> Map.ofList rows, None))
+
+        validateTargets ()
+        |> Result.bind (fun () ->
+            if metadataProbe.Value || planningProbe.Value || suppressReadRowLocks.Value then Ok(Map.empty, None)
+            else
+                match snapshotLayoutReadError store registry dbName select outer with
+                | Some error -> Error error
+                | None -> acquire ()))
 
 and private runSelectStmt
     (store: Store)
@@ -16873,6 +16892,14 @@ and private runSelectStmtCore
                 DynamicScope.withValue viewMergeDepth (depth + 1) (fun () -> runSelectStmtWithOutput output store registry dbName merged outer)
         | Ok None -> runUnmergedSelectStmt output store registry dbName select outer
 
+and private numericKeyRangeIsEmpty (table: Table) column (bounds: Lazy<RangeLookupBounds<string, Value> list>) =
+    isDirectNumericIndexColumn table (column, None)
+    && (bounds.Value |> List.exists (fun bound ->
+        match bound.Lower, bound.Upper with
+        | Some(VInt lower, lowerInclusive), Some(VInt upper, upperInclusive) when equalsIgnoreCase bound.Column column ->
+            lower > upper || (lower = upper && not (lowerInclusive && upperInclusive))
+        | _ -> false))
+
 and private snapshotLayoutReadError
     (store: Store)
     (registry: Registry)
@@ -16880,8 +16907,10 @@ and private snapshotLayoutReadError
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult option =
+    let locking = not select.Locking.IsEmpty
     let needsUnavailableLayout =
-        if metadataProbe.Value || planningProbe.Value || Set.isEmpty store.UnavailableReadLayouts
+        if metadataProbe.Value || planningProbe.Value
+           || (store.UnavailableReadLayouts.IsEmpty && (not locking || store.TransactionLocks.IsNone))
            || (not select.CalculateFoundRows && zeroLimitWithoutOffset select.Limit select.Offset) then false
         else
             let context = lazy (contextFactory store registry dbName Map.empty Map.empty None [||])
@@ -16894,14 +16923,17 @@ and private snapshotLayoutReadError
                     tryClosedNumericValue context.Value predicate
                     |> Option.exists (fun value -> truthy value <> Some true)
 
-            let unavailable table = Set.contains table.ReadLayoutRevision store.UnavailableReadLayouts
+            let unavailable schema name table =
+                if locking then Storage.lockingReadLayoutUnavailable store schema name table
+                else Set.contains table.ReadLayoutRevision store.UnavailableReadLayouts
             let physicalSources items =
                 items |> List.collect FromItem.leaves |> List.choose (function
                     | FromTable reference when reference.Database.IsSome
                                                || not ((currentCteScope ()).ContainsKey(reference.Table.ToLowerInvariant())) ->
                         let schema = reference.Database |> Option.defaultValue dbName
                         Storage.tableSnapshot store schema reference.Table
-                        |> Result.toOption |> Option.map (fun table -> reference, table)
+                        |> Result.toOption
+                        |> Option.map (fun table -> reference, table, unavailable schema reference.Table table)
                     | _ -> None)
             let joined = select.Joins |> List.choose (fun join ->
                 if join.Kind = LeftJoin && impossible join.On then None else Some join.Table)
@@ -16910,40 +16942,47 @@ and private snapshotLayoutReadError
                 sources.Length = 1 + select.Joins.Length
                 && (select.Joins |> List.forall (fun join ->
                     join.Kind = InnerJoin || join.Kind = StraightJoin || join.Kind = CrossJoin || join.Kind = NaturalJoin))
-                && (sources |> List.exists (fun (_, table) -> not (unavailable table) && table.RowsArray.IsEmpty))
+                && (sources |> List.exists (fun (_, table, unavailable) -> not unavailable && table.RowsArray.IsEmpty))
             let emptyConstantJoin =
                 match select.Joins, sources with
                 | [ { Kind = InnerJoin; Using = []; On = BinOp(Eq, QualifiedCol(ownerA, nameA), QualifiedCol(ownerB, nameB)) } ],
-                  [ (leftRef, left); (rightRef, right) ] when unavailable left <> unavailable right ->
+                  [ (leftRef, left, leftUnavailable); (rightRef, right, rightUnavailable) ] when leftUnavailable <> rightUnavailable ->
                     let column owner name =
-                        sources |> List.tryPick (fun (reference, table) ->
+                        sources |> List.tryPick (fun (reference, table, _) ->
                             if equalsIgnoreCase owner (reference.Alias |> Option.defaultValue reference.Table) then
                                 table.Columns |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
                             else None)
                     let sameComparisonDomain =
                         Option.map2 compatibleEqualityColumns (column ownerA nameA) (column ownerB nameB)
-                    let reference, table = if unavailable left then rightRef, right else leftRef, left
+                    let reference, table = if leftUnavailable then rightRef, right else leftRef, left
                     // With incompatible join keys a constant miss on the other
                     // side does not turn this lookup into a second constant read.
                     sameComparisonDomain = Some false
                     && (tryEqualityAccessInTableWith CandidateNarrowing store registry table reference select.Where
                         |> Option.exists (fun plan -> plan.Unique && plan.UsesFullKey && plan.CandidateCount = 0))
                 | _ -> false
-            let emptyPrimaryRange reference table =
-                match primaryKeyColumns table with
-                | key :: _ when isDirectNumericIndexColumn table (key, None)
-                                && indexAllowedBy (indexHintsFor IndexJoin reference) "PRIMARY" ->
-                    rangeLookupBounds BareOrQualifiedColumn store registry table reference select.Where
-                    |> List.exists (fun bound ->
-                        match bound.Lower, bound.Upper with
-                        | Some(VInt lower, lowerInclusive), Some(VInt upper, upperInclusive) when equalsIgnoreCase bound.Column key ->
-                            lower > upper || (lower = upper && not (lowerInclusive && upperInclusive))
-                        | _ -> false)
-                | _ -> false
+            let emptyIndexRange reference (table: Table) =
+                let allowed = indexAllowedBy (indexHintsFor IndexJoin reference)
+                let forced =
+                    if locking then
+                        table.Indexes |> List.filter (fun index ->
+                            index.Visible && index.Kind = BTree && not (equalsIgnoreCase "PRIMARY" index.Name)
+                            && isForcedIndex IndexJoin reference index.Name)
+                    else []
+                let column =
+                    match forced with
+                    | [] when allowed "PRIMARY" -> primaryKeyColumns table |> List.tryHead
+                    | [ index ] when allowed index.Name ->
+                        index.KeyColumns |> List.tryHead
+                        |> Option.filter (fun key -> key.Transform.IsNone)
+                        |> Option.map _.Name
+                    | _ -> None
+                let bounds = lazy (rangeLookupBounds BareOrQualifiedColumn store registry table reference select.Where)
+                column |> Option.exists (fun column -> numericKeyRangeIsEmpty table column bounds)
             not (select.Where |> Option.exists impossible)
             && not (emptyInnerSource || emptyConstantJoin)
-            && (sources |> List.exists (fun (reference, table) ->
-                unavailable table && not (select.Joins.IsEmpty && emptyPrimaryRange reference table)))
+            && (sources |> List.exists (fun (reference, table, unavailable) ->
+                unavailable && not (select.Joins.IsEmpty && emptyIndexRange reference table)))
 
     if needsUnavailableLayout then
         match describeQueryColumnDescriptorsInScope store registry dbName (QueryBody(PlainSelect select)) outer (fun _ -> Ok()) with
@@ -16959,15 +16998,13 @@ and private runUnmergedSelectStmt
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
-    match snapshotLayoutReadError store registry dbName select outer with
-    | Some error -> error, [], []
-    | None ->
     DynamicScope.withValue lockingReadRows Map.empty (fun () ->
         if select.Locking.IsEmpty then
-            runUnlockedSelectStmt output store registry dbName select outer
+            match snapshotLayoutReadError store registry dbName select outer with
+            | Some error -> error, [], []
+            | None -> runUnlockedSelectStmt output store registry dbName select outer
         else
             let initial = lockingReadStore.Value |> Option.map (fun (_, refresh) -> refresh ()) |> Option.defaultValue store
-
             match prepareLockingRead initial registry dbName select outer with
             | Error error -> error, [], []
             | Ok(rows, orderedRead) ->
@@ -17400,13 +17437,7 @@ and private snapshotIndexReadError store registry dbName (table: Table) tref (se
                 |> List.tryFind (fun index -> equalsIgnoreCase name index.Name)
                 |> Option.bind (fun index -> List.tryHead index.KeyColumns)
                 |> Option.exists (fun first ->
-                    first.Transform.IsNone && isDirectNumericIndexColumn table (first.Name, None)
-                    && (bounds.Value |> List.exists (fun bound ->
-                        match bound.Lower, bound.Upper with
-                        | Some(VInt lower, lowerInclusive), Some(VInt upper, upperInclusive)
-                            when equalsIgnoreCase bound.Column first.Name ->
-                            lower > upper || (lower = upper && not (lowerInclusive && upperInclusive))
-                        | _ -> false))))
+                    first.Transform.IsNone && numericKeyRangeIsEmpty table first.Name bounds))
         if impossible || impossibleIndexRange then None
         else
             match describeQueryColumnDescriptorsInScope store registry dbName (QueryBody(PlainSelect select)) outer (fun _ -> Ok()) with
@@ -39408,6 +39439,7 @@ let internal tryPrimaryRead protectGaps wait (store: Store) registry dbName (sel
             | expression -> columnName expression
 
         physicalFastPathTable store dbName source
+        |> Option.filter (fun table -> not (Storage.lockingReadLayoutUnavailable store database source.Table table))
         |> Option.bind (fun table ->
             let isSourceColumn expression =
                 columnName expression
