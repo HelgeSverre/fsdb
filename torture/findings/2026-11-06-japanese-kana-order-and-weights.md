@@ -79,3 +79,35 @@ reproduces the asset byte for byte.
 ruby torture/scripts/generate-zh-0900-weights.rb --japanese queries | mysql -NBr > japanese-weights.tsv
 ruby torture/scripts/generate-zh-0900-weights.rb --japanese pack japanese-weights.tsv src/Fsdb/Sql/Japanese0900Weights.bin.gz
 ```
+
+## Three-level Japanese wildcards
+
+The three-level `utf8mb4_ja_0900_as_cs` collation has a separate bigram
+prefix difference on pinned MySQL 8.4.11. In the following fixture,
+`か*`, `カ*`, and `ｶ*` each return IDs 1 through 9 and 12. Fsdb omits
+IDs 2 and 8, which start with precomposed voiced Kana. With `が*` or
+`ガ*`, MySQL returns IDs 2 and 8, while Fsdb also returns the decomposed
+form in row 3. The exact `かな` query returns IDs 1, 4, 5, and 6 on both
+engines.
+
+```sql
+CREATE TABLE kana_prefix (
+  id INT PRIMARY KEY,
+  body TEXT COLLATE utf8mb4_ja_0900_as_cs,
+  FULLTEXT KEY ft(body) WITH PARSER ngram
+);
+INSERT INTO kana_prefix VALUES
+  (1,'かな'), (2,'がな'), (3,CONVERT(0xE3818BE38299E381AA USING utf8mb4)),
+  (4,'ｶﾅ'), (5,'カナ'), (6,'かナ'), (7,'ｶﾞﾅ'), (8,'ガナ'),
+  (9,'かた'), (10,'漢字'), (11,'東京'), (12,'カル');
+SELECT id FROM kana_prefix
+WHERE MATCH(body) AGAINST ('か*' IN BOOLEAN MODE) ORDER BY id;
+SELECT id FROM kana_prefix
+WHERE MATCH(body) AGAINST ('が*' IN BOOLEAN MODE) ORDER BY id;
+```
+
+In a separate weight comparison, the first three levels of
+`utf8mb4_ja_0900_as_cs_ks` matched `utf8mb4_ja_0900_as_cs` byte for byte
+on 734 single characters, 1,624 Kana-plus-mark pairs, and 300 seeded
+mixed strings. This gives a path to reuse the pinned Japanese weights
+while testing the three-level prefix cursor independently.

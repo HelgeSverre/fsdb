@@ -2047,6 +2047,8 @@ shares posting keys with ordinary Kana under `utf8mb4_0900_ai_ci`.
 [Kana-sensitive Japanese wildcards](torture/findings/2026-11-06-japanese-kana-order-and-weights.md#kana-sensitive-full-text-cursors)
 use MySQL's four-level posting keys for cached and flushed cursor traversal.
 The expanded ngram corpus matches through mixed postings and deletions.
+[Three-level Japanese wildcards](torture/findings/2026-11-06-japanese-kana-order-and-weights.md#three-level-japanese-wildcards)
+still differ on voiced and decomposed Kana.
 [Boolean ngram rank cancellation](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#boolean-rank-cancellation)
 now treats a final score of zero as a nonmatch in the audited weighted
 term, phrase, group, and prefix cases. [Single-precision rank accumulation](torture/findings/2026-10-16-ngram-boolean-unicode-ctype.md#single-precision-rank-accumulation)
