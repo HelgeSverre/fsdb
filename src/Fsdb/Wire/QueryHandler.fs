@@ -2596,6 +2596,9 @@ let private publishTransaction (publishFlat: bool) validateSerializable (session
 
         Storage.releaseTransactionLocks tx.Snapshot
 
+let private endLocalTransaction (session: Session) =
+    Session.endTransactionTracking { session with Tx = None; Cursors = Map.empty }
+
 /// Commits the open transaction by publishing its private catalog. Ordinary
 /// isolation levels merge disjoint row changes; SERIALIZABLE validates the
 /// transaction's read snapshot before publication. No open transaction is a
@@ -2606,7 +2609,7 @@ let private commitSessionWithValidation (publishFlat: bool) validateSerializable
         publishTransaction publishFlat validateSerializable session tx
         TableLocks.releaseTransactionAccess session.Store session.ConnectionId
         removeTransactionView session
-        Session.endTransactionTracking { session with Tx = None; Cursors = Map.empty }
+        endLocalTransaction session
     | None -> { session with Cursors = Map.empty }
 
 let private commitSessionWith publishFlat session = commitSessionWithValidation publishFlat true session
@@ -2628,35 +2631,34 @@ let private restoreTemporaryRows (before: Catalog) (checkpoint: Catalog) (curren
                 CatalogOverlay.setTable catalog database name (Some { restored with NextAutoId = max restored.NextAutoId table.NextAutoId })
             | _ -> catalog) catalog) current
 
-/// Discards the open transaction's snapshot — a no-op, matching real MySQL,
-/// if there isn't one open — except for each table's AUTO_INCREMENT
-/// counter, which MySQL never rolls back (an id an aborted INSERT consumed
-/// stays burned). Bumps the shared store's counter up to the snapshot's if
-/// the snapshot ran it ahead (`Storage.bumpAutoIncrementsInto`, same
-/// CAS-safe merge as `commitSession`); leaves everything else (rows,
-/// schema) alone.
-let private rollbackSession (session: Session) : Session =
-    let hadTransaction = session.Tx.IsSome
+let private discardTransaction beforeRelease (session: Session) =
     session.Tx
     |> Option.bind _.Xa
     |> Option.iter (fst >> removeXaAssociation session)
 
-    match session.Tx with
-    | Some tx when not tx.Seeded -> Storage.releaseTransactionLocks tx.Snapshot
-    | Some tx ->
-        Storage.bumpAutoIncrementsIntoChanged session.Store tx.BaseCatalog tx.Snapshot.Catalog
-        Storage.releaseTransactionLocks tx.Snapshot
-    | None -> ()
+    session.Tx |> Option.iter (fun tx ->
+        beforeRelease tx
+        Storage.releaseTransactionLocks tx.Snapshot)
 
     TableLocks.releaseTransactionAccess session.Store session.ConnectionId
     removeTransactionView session
 
-    let temporaryCatalog =
-        session.Tx
-        |> Option.map (fun tx -> restoreTemporaryRows tx.TemporaryRowsBefore Map.empty session.TemporaryCatalog)
-        |> Option.defaultValue session.TemporaryCatalog
-    let session = { session with Tx = None; Cursors = Map.empty; TemporaryCatalog = temporaryCatalog }
-    if hadTransaction then Session.endTransactionTracking session else session
+    match session.Tx with
+    | Some tx ->
+        let temporaryCatalog = restoreTemporaryRows tx.TemporaryRowsBefore Map.empty session.TemporaryCatalog
+        endLocalTransaction { session with TemporaryCatalog = temporaryCatalog }
+    | None -> session
+
+/// Explicit rollback retains AUTO_INCREMENT allocations after discarding rows.
+let private rollbackSession (session: Session) =
+    let preserveAllocations (tx: Transaction) =
+        if tx.Seeded then
+            Storage.bumpAutoIncrementsIntoChanged session.Store tx.BaseCatalog tx.Snapshot.Catalog
+    let ended = discardTransaction preserveAllocations session
+    { ended with Cursors = Map.empty }
+
+// Error recovery releases the transaction without starting another publication.
+let private abortTransaction session = discardTransaction ignore session
 
 /// Starts a new transaction with a provisional snapshot. The real snapshot
 /// is rebound at the first database statement, matching InnoDB's default
@@ -2773,29 +2775,32 @@ let private prepareXa xid session =
         if prepared then
             removeXaAssociation session xid
             removeTransactionView session
-            { session with Tx = None; Cursors = Map.empty }, Affected 0UL
+            endLocalTransaction session, Affected 0UL
         else
             session, Err(1440, "XAER_DUPID: The XID already exists")
     | _, Some(_, Idle) -> session, xaUnknown
     | _ -> session, xaRmFail "NON-EXISTING"
 
 let private completePreparedXa commit xid session =
-    lock session.Store.PreparedXas (fun () ->
-        if commit then
-            if Storage.commitPreparedXaWithTimeout (lockWaitTimeout session) session.Store xid then
-                TableLocks.releasePreparedAccess session.Store xid
-                session, Affected 0UL
-            else
-                session, xaUnknown
-        else
-            match Storage.rollbackPreparedXa session.Store xid with
-            | Some prepared ->
-                try
-                    Storage.bumpAutoIncrementsIntoChanged session.Store prepared.BaseCatalog prepared.Catalog
-                finally
+    match session.Tx with
+    | Some _ -> session, xaRmFail "NON-EXISTING"
+    | None ->
+        lock session.Store.PreparedXas (fun () ->
+            if commit then
+                if Storage.commitPreparedXaWithTimeout (lockWaitTimeout session) session.Store xid then
                     TableLocks.releasePreparedAccess session.Store xid
-                session, Affected 0UL
-            | None -> session, xaUnknown)
+                    session, Affected 0UL
+                else
+                    session, xaUnknown
+            else
+                match Storage.rollbackPreparedXa session.Store xid with
+                | Some prepared ->
+                    try
+                        Storage.bumpAutoIncrementsIntoChanged session.Store prepared.BaseCatalog prepared.Catalog
+                    finally
+                        TableLocks.releasePreparedAccess session.Store xid
+                    session, Affected 0UL
+                | None -> session, xaUnknown)
 
 let private commitXa xid onePhase session =
     match session.Tx, xaAssociation session with
@@ -2804,7 +2809,7 @@ let private commitXa xid onePhase session =
         TableLocks.releaseTransactionAccess session.Store session.ConnectionId
         removeXaAssociation session xid
         removeTransactionView session
-        { session with Tx = None; Cursors = Map.empty }, Affected 0UL
+        endLocalTransaction session, Affected 0UL
     | _, Some(_, state) -> session, xaRmFail (xaStateName state)
     | _ -> completePreparedXa true xid session
 
@@ -2819,7 +2824,7 @@ let private rollbackXa xid session =
         Storage.releaseTransactionLocks transaction.Snapshot
         TableLocks.releaseTransactionAccess session.Store session.ConnectionId
         removeTransactionView session
-        { session with Tx = None; Cursors = Map.empty }, Affected 0UL
+        endLocalTransaction session, Affected 0UL
     | _, Some(_, state) -> session, xaRmFail (xaStateName state)
     | _ -> completePreparedXa false xid session
 
@@ -8794,18 +8799,6 @@ let private recordResult ((session, result): Session * QueryResult) : Session * 
         | TerminalError _ -> { session with LastRowCount = -1L; PendingFoundRows = None }
 
     session, result
-
-let private abortTransaction (session: Session) =
-    let hadTransaction = session.Tx.IsSome
-    session.Tx
-    |> Option.bind _.Xa
-    |> Option.iter (fst >> removeXaAssociation session)
-
-    session.Tx |> Option.iter (fun transaction -> Storage.releaseTransactionLocks transaction.Snapshot)
-    TableLocks.releaseTransactionAccess session.Store session.ConnectionId
-    removeTransactionView session
-    let session = { session with Tx = None }
-    if hadTransaction then Session.endTransactionTracking session else session
 
 /// Converts engine exceptions into ERR results rather than dropping the
 /// connection. Unexpected failures abort the transaction; retryable lock

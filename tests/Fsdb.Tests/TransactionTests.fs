@@ -2137,12 +2137,13 @@ let tests =
               Expect.equal result (Affected 1UL) "the cancelled wait leaves the row lock reusable"
               Expect.equal (handle fresh "COMMIT" |> snd) (Affected 0UL) "the replacement transaction commits"
 
-          testCase "an exception on a transaction's second statement aborts the whole transaction"
+          testCase "an internal exception rolls back permanent and temporary writes"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let session = create 1 store
               let session, _ = handle session "CREATE TABLE tx_abort (id INT PRIMARY KEY, v DECIMAL(10,2))"
               let session, _ = handle session "INSERT INTO tx_abort VALUES (1, 1)"
+              let session, _ = handle session "CREATE TEMPORARY TABLE tx_abort_temp (id INT PRIMARY KEY)"
               let session, _ = handle session "BEGIN"
               // The first write must be discarded if the next statement
               // aborts the transaction.
@@ -2151,6 +2152,8 @@ let tests =
               match firstResult with
               | Affected 1UL -> ()
               | other -> failtestf "expected the first statement to succeed, got %A" other
+              let session, temporaryWrite = handle session "INSERT INTO tx_abort_temp VALUES (1)"
+              Expect.equal temporaryWrite (Affected 1UL) "the temporary write succeeds"
 
               // Second statement: an out-of-range DECIMAL literal throws
               // `OverflowException` straight out of `Storage.coerceValue`'s
@@ -2163,6 +2166,10 @@ let tests =
               | other -> failtestf "expected the overflow to surface as a 1105 internal error, got %A" other
 
               Expect.isTrue session.Tx.IsNone "expected the broken statement to abort the whole transaction"
+              Expect.equal
+                  (handle session "SELECT id FROM tx_abort_temp" |> snd)
+                  (ResultSet([ "id" ], []))
+                  "the temporary table survives and its transaction writes roll back"
 
               // COMMIT after a fatal statement error is a no-op, not a merge
               // of the aborted transaction's stale snapshot.

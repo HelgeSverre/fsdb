@@ -16831,6 +16831,20 @@ let tests =
                   [ TypeLongLong; TypeLongLong; TypeLongLong; TypeVarString ]
                   "recover metadata types"
 
+              let second, started = handle second "BEGIN"
+              Expect.equal started (Affected 0UL) "the resolver starts a local transaction"
+              for command in [ "XA COMMIT 'global', 'branch', 7"; "XA ROLLBACK 'global', 'branch', 7" ] do
+                  let unchanged, result = handle second command
+                  match result with
+                  | Err(1399, message) -> Expect.stringContains message "NON-EXISTING state" command
+                  | other -> failtestf "expected XAER_RMFAIL for %s, got %A" command other
+                  Expect.isSome unchanged.Tx "the resolver still owns its local transaction"
+              Expect.equal (handle second "SELECT COUNT(*) FROM xa_rows" |> snd)
+                  (ResultSet([ "COUNT(*)" ], [ [ Some "0" ] ]))
+                  "rejected completions leave the detached write private"
+              let second, rolledBack = handle second "ROLLBACK"
+              Expect.equal rolledBack (Affected 0UL) "the resolver ends its local transaction"
+
               let second, committed = handle second "XA COMMIT 'global', 'branch', 7"
               Expect.equal committed (Affected 0UL) "another session commits the detached branch"
 
@@ -16895,6 +16909,31 @@ let tests =
               | other -> failtestf "expected a byte-exact converted XID, got %A" other
 
               handle session "XA ROLLBACK X'00FF'" |> ignore
+
+          testCase "XA terminal commands clear transaction tracking in their own reply"
+          <| fun _ ->
+              for terminal in [ "XA PREPARE 'tracked'"; "XA COMMIT 'tracked' ONE PHASE"; "XA ROLLBACK 'tracked'" ] do
+                  let store = Fsdb.Storage.create ()
+                  let session = { create 1 store with Capabilities = ClientProtocol41 ||| ClientSessionTrack }
+                  let run session sql =
+                      let next, result = handle session sql
+                      TestSupport.Sql.expectOk result sql
+                      next
+                  let session = run session "SET SESSION session_track_transaction_info = STATE"
+                  let session = run session "CREATE TABLE t(id INT PRIMARY KEY)"
+                  let session = run session "XA START 'tracked'"
+                  Expect.contains session.SessionStateChanges (TransactionStateChanged "T_______") "the XA branch owns the session"
+                  let session = run session "INSERT INTO t VALUES (1)"
+                  let session = run session "XA END 'tracked'"
+                  Expect.isSome session.Tx "XA END keeps the branch associated"
+                  let session = run session terminal
+                  Expect.isNone session.Tx terminal
+                  Expect.contains session.SessionStateChanges (TransactionStateChanged "________") terminal
+                  let session = run session "DO 0"
+                  Expect.isEmpty session.SessionStateChanges "no later statement repeats the terminal state"
+                  if terminal.StartsWith("XA PREPARE", StringComparison.Ordinal) then
+                      let session = run session "XA COMMIT 'tracked'"
+                      Expect.isEmpty session.SessionStateChanges "detached completion has no local tracking owner"
 
           testCase "XA statements are refused by the prepared protocol"
           <| fun _ ->
