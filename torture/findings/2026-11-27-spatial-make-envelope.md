@@ -100,11 +100,34 @@ integer boundary comparisons, exponent literals, renamed outputs, explicit
 pushdown opt-outs, and text and binary prepared statements. Markers in
 both the CTE and its outer filter bind in SQL text order.
 
-Other computed outputs, grouped and union CTEs, and CTEs materialized without
-an explicit hint still need pushdown coverage. Signed arithmetic that can
-overflow stays outside this optimization. In the overflow control, MySQL
+Other computed outputs and union CTEs still need pushdown coverage.
+Signed arithmetic that can overflow stays outside this optimization.
+In the overflow control, MySQL
 returns error 1690 for `BIGINT` maximum plus one and Fsdb returns the widened
 decimal value. MySQL also skips a shared materialization if an unmaterialized
 join input can prove the result empty. Fsdb can validate that CTE before the
 join discovers the empty input. Disabling `derived_merge` through
 `optimizer_switch` remains open.
+
+### Filters on grouped CTEs
+
+Singly referenced, single-table grouped CTEs can push eligible numeric
+conditions without a materialization hint. Filters on grouping keys run
+in the inner `WHERE`, while filters on aggregate outputs run in `HAVING`.
+An `OR` that mixes a key and an aggregate stays together in `HAVING`.
+Single-group aggregates and `WITH ROLLUP` use `HAVING` so the filters
+preserve empty-input counts and subtotal rows. The replay checks direct
+and aliased keys, positional grouping, and numeric `COUNT`, `MIN`, `MAX`,
+`SUM`, and `AVG` filters. [MySQL derived condition pushdown](https://dev.mysql.com/doc/refman/8.4/en/derived-condition-pushdown-optimization.html)
+
+An indexed grouping-key equality reduced Fsdb's examined rows from
+4,000 to 2 on a 2,000-row fixture, returning the same polygon with and
+without pushdown. MySQL fetched the matching row before execution with
+pushdown and materialized all 2,000 groups with pushdown disabled.
+Shared CTEs, inner `LIMIT`, and explicit pushdown opt-outs
+still materialize before applying eligible outer filters. An impossible
+filter can skip the materialization in the grouped cases described above.
+
+The same replay shows a materialized `AVG` precision gap. MySQL returns
+`4.3333` for a tested rollup row whose average is 13/3. Fsdb returns
+`4.333333333`. The difference also occurs with pushdown disabled.

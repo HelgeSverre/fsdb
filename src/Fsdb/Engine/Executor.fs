@@ -4944,13 +4944,25 @@ let private selectHasMergeableShape registry (select: SelectStmt) =
     && select.Having.IsNone && select.Limit.IsNone && select.Windows.IsEmpty
     && not (select.Projections |> List.exists (_.Expression >> groupedOrWindowed))
 
+let private projectionPreventsMerge registry expression =
+    Expression.exists (function AssignUserVariable _ -> true | _ -> false) expression
+    || (Expression.collectSubqueries expression |> List.exists (scalarSubqueryMaterializes registry))
+
 let private queryBodyCanMerge registry = function
     | PlainSelect select ->
-        let preventsMerge expression =
-            Expression.exists (function AssignUserVariable _ -> true | _ -> false) expression
-            || (Expression.collectSubqueries expression |> List.exists (scalarSubqueryMaterializes registry))
-        selectHasMergeableShape registry select && not (select.Projections |> List.exists (_.Expression >> preventsMerge))
+        selectHasMergeableShape registry select
+        && not (select.Projections |> List.exists (_.Expression >> projectionPreventsMerge registry))
     | UnionSelect _ -> false
+
+let private groupedCteCanPushConditions registry = function
+    | PlainSelect({ From = Some(FromTable _); Distinct = false
+                    Limit = None; Offset = None; Joins = []; Ctes = []; Locking = []; Windows = [] } as select) ->
+        let expressions = (select.Projections |> List.map _.Expression) @ (select.OrderBy |> List.map fst)
+        (not select.GroupBy.IsEmpty || expressions |> List.exists (containsAggregate registry))
+        && (expressions @ select.GroupBy @ Option.toList select.Having
+            |> List.forall (fun expression ->
+                not (projectionPreventsMerge registry expression) && (collectWindowFuncs expression).IsEmpty))
+    | _ -> false
 
 type private RelationMaterialization = AllowMerge | ForceMaterialization
 
@@ -15511,14 +15523,14 @@ and private renameCteColumns (cte: CommonTableExpr) (columns: ColumnDef list) : 
     renameRelationColumns cte.CteColumns _.Name (fun name column -> { column with Name = name }) columns
 
 and private pushMaterializedCteCondition store registry dbName cte condition =
-    let numericProjection qualifier (columns: ColumnDef list) = function
+    let sourceColumn qualifier (columns: ColumnDef list) = function
         | Col name when (tryRoutineVariable name).IsNone ->
             columns |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
         | QualifiedCol(owner, name) when equalsIgnoreCase owner qualifier ->
             columns |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
         | _ -> None
 
-    let specialize (select: SelectStmt) (tableRef: TableRef) =
+    let specialize grouped (select: SelectStmt) (tableRef: TableRef) =
         physicalFastPathTable store dbName tableRef
         |> Option.bind (fun table ->
             let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
@@ -15528,9 +15540,10 @@ and private pushMaterializedCteCondition store registry dbName cte condition =
             if not (sameLength names projections) || (tryDuplicateIgnoreCase id names).IsSome then None
             else
                 let qualified (column: ColumnDef) = QualifiedCol(qualifier, column.Name)
+                let columnIndex = columnIndexOf table.Columns
                 let context =
                     lazy (contextFactory store registry dbName
-                            (columnIndexOf table.Columns) (singleQualifier qualifier table.Columns)
+                            columnIndex (singleQualifier qualifier table.Columns)
                             None (probeRow table.Columns))
                 // MySQL chooses the temporary field by display width, independently of the arithmetic bounds.
                 let temporaryIntegerBounds expression =
@@ -15551,12 +15564,12 @@ and private pushMaterializedCteCondition store registry dbName cte condition =
                         match trySignedIntegerConstant expression with
                         | Some value -> Some(expression, (value, value), false)
                         | None ->
-                            numericProjection qualifier table.Columns expression
+                            sourceColumn qualifier table.Columns expression
                             |> Option.bind (fun column ->
                                 signedIntegerTypeBounds column.Type
                                 |> Option.map (fun bounds -> qualified column, bounds, column.Nullable))
 
-                let numericOutput expression : CteNumericOutput option =
+                let rowOutput expression : CteNumericOutput option =
                     match expression with
                     | BinOp((Add | Sub | SignedSub | Mul), _, _) ->
                         boundArithmetic expression
@@ -15565,12 +15578,49 @@ and private pushMaterializedCteCondition store registry dbName cte condition =
                               MaterializedBounds = temporaryIntegerBounds rewritten
                               Nullable = nullable })
                     | _ ->
-                        numericProjection qualifier table.Columns expression
+                        sourceColumn qualifier table.Columns expression
                         |> Option.filter (_.Type >> isExactNumericIndexType)
                         |> Option.map (fun column ->
                             { Expression = qualified column
                               MaterializedBounds = signedIntegerTypeBounds column.Type
                               Nullable = column.Nullable })
+
+                let groupingKeys =
+                    select.GroupBy
+                    |> traverse (resolveGroupByRef columnIndex select.Projections)
+                    |> Result.defaultValue []
+                    |> List.choose (fun key -> rowOutput key |> Option.map (fun output -> output.Expression, key))
+
+                let aggregateOutput = function
+                    | FuncCall(name, [ argument ]) when Functions.isUnmodifiedBuiltinAggregate name registry ->
+                        let input =
+                            match argument with
+                            | Distinct value -> value
+                            | _ -> argument
+                        let output nullable =
+                            Some { Expression = FuncCall(name, [ argument ]); MaterializedBounds = None; Nullable = nullable }
+                        match name.ToUpperInvariant(), input with
+                        | "COUNT", (Star None | LiteralValue _) -> output false
+                        | "COUNT", _ when (sourceColumn qualifier table.Columns input).IsSome || (rowOutput input).IsSome ->
+                            output false
+                        | ("MIN" | "MAX" | "SUM" | "AVG"), _ when (rowOutput input).IsSome -> output true
+                        | _ -> None
+                    | _ -> None
+
+                let numericOutput expression =
+                    let row = rowOutput expression
+                    if not grouped then row
+                    else
+                        row
+                        |> Option.bind (fun output ->
+                            groupingKeys
+                            |> List.tryPick (fun (normalized, key) ->
+                                if normalized <> output.Expression then None
+                                elif not select.Rollup then Some output
+                                elif resolveHavingRef registry columnIndex select.Projections false key = Ok key then
+                                    Some { output with Expression = key; Nullable = true }
+                                else None))
+                        |> Option.orElseWith (fun () -> aggregateOutput expression)
 
                 let keys =
                     List.zip names projections
@@ -15621,25 +15671,39 @@ and private pushMaterializedCteCondition store registry dbName cte condition =
                             match operator with Lt -> Gt | Lte -> Gte | Gt -> Lt | Gte -> Lte | _ -> operator
                         impossible operator left right || impossible reverse right left
                     | _ -> false
-                let pushed =
-                    if safe condition.Predicate && cannotMatch condition.Predicate then [ Lit(VInt 0L) ]
-                    elif not condition.PushdownEnabled then []
+                let whereTerms, havingTerms =
+                    let globalAggregate = grouped && select.GroupBy.IsEmpty
+                    if not globalAggregate && safe condition.Predicate && cannotMatch condition.Predicate then [ Lit(VInt 0L) ], []
+                    elif not condition.PushdownEnabled then [], []
                     else
                         let rewrite = outputKey >> Option.map (fun output -> output.Expression)
-                        condition.Predicate |> conjuncts
-                        |> List.filter (fun expression -> safe expression && Expression.exists (outputKey >> Option.isSome) expression)
-                        |> List.map (Expression.rewrite rewrite)
-                if pushed.IsEmpty then None
+                        let pushed =
+                            condition.Predicate |> conjuncts
+                            |> List.filter (fun expression -> safe expression && Expression.exists (outputKey >> Option.isSome) expression)
+                            |> List.map (Expression.rewrite rewrite)
+                        if select.Rollup || globalAggregate then [], pushed
+                        elif grouped then pushed |> List.partition (containsAggregate registry >> not)
+                        else pushed, []
+                if whereTerms.IsEmpty && havingTerms.IsEmpty then None
                 else
-                    let where = combineConjuncts ((select.Where |> optionalConjuncts) @ pushed)
-                    Some { cte with Body = PlainSelect { select with Where = where } })
+                    let append terms existing =
+                        if List.isEmpty terms then existing
+                        else combineConjuncts ((optionalConjuncts existing) @ terms)
+                    let revised =
+                        { select with
+                            Where = append whereTerms select.Where
+                            Having = append havingTerms select.Having }
+                    Some { cte with Body = PlainSelect revised })
 
     match cte.Body with
     | PlainSelect({ From = Some(FromTable source) } as select)
-        when queryBodyCanMerge registry cte.Body
-             && select.Ctes.IsEmpty && select.Joins.IsEmpty && select.Locking.IsEmpty
+        when select.Ctes.IsEmpty && select.Joins.IsEmpty && select.Locking.IsEmpty
+             && (source.Database.IsSome || not (Map.containsKey (source.Table.ToLowerInvariant()) (currentCteScope ())))
              && (select.Where |> Option.forall isPlainRowPredicate) ->
-        specialize select source |> Option.defaultValue cte
+        let grouped = groupedCteCanPushConditions registry cte.Body
+        if grouped || queryBodyCanMerge registry cte.Body then
+            specialize grouped select source |> Option.defaultValue cte
+        else cte
     | _ -> cte
 
 and private withCteScope
@@ -27311,7 +27375,23 @@ let private blockJoinPlanning store registry schema (pending: OptimizerHintResol
 let private emitJoinHintDiagnostics store registry schema statement =
     let pending = DynamicScope.valueOrDefault OptimizerHintResolution.emptyExecution joinHintDiagnostics
     let scopes = lazy (OptimizerHintScopes.collect OptimizerHintScopes.BoundStatement statement)
-    if not pending.SourceStrategies.IsEmpty then
+    let rec selectHasCtes (select: SelectStmt) =
+        not select.Ctes.IsEmpty || (select.From |> Option.exists sourceHasCtes)
+        || (select.Joins |> List.exists (_.Table >> sourceHasCtes))
+    and sourceHasCtes = function
+        | FromSubquery(body, _) | FromLateral(body, _) ->
+            match body with
+            | PlainSelect select -> selectHasCtes select
+            | UnionSelect(first, rest, _, _, _) ->
+                selectHasCtes first || (rest |> List.exists (snd >> selectHasCtes))
+        | FromJoinGroup(source, joins) -> sourceHasCtes source || (joins |> List.exists (_.Table >> sourceHasCtes))
+        | _ -> false
+    let rec hasCtes = function
+        | Select select | InsertSelect(_, _, select, _, _) | ReplaceSelect(_, _, select) -> selectHasCtes select
+        | Union(first, rest, _, _, _) -> selectHasCtes first || (rest |> List.exists (snd >> selectHasCtes))
+        | Explain(_, inner) -> hasCtes inner
+        | _ -> false
+    if not pending.SourceStrategies.IsEmpty || hasCtes statement then
         let memo = currentStatementMemo ()
         let blocks = scopes.Value.Numbered |> List.map (fun block -> block.Number, block) |> Map.ofList
         let cteReferences = HashSet<CommonTableExpr>(HashIdentity.Reference)
@@ -27322,18 +27402,18 @@ let private emitJoinHintDiagnostics store registry schema statement =
             | _ -> ()
         for block in scopes.Value.Numbered do
             match block.Source, block.ParentBlock with
-            | Some source, Some parent
-                when sourceStrategy pending parent source.Alias = Some OptimizerHintResolution.MaterializeSource ->
+            | Some source, Some parent ->
+                let forced = sourceStrategy pending parent source.Alias = Some OptimizerHintResolution.MaterializeSource
                 match source.Item with
-                | FromSubquery _ as item -> memo.MaterializedDerivedSources.Add item |> ignore
-                | FromTable reference ->
-                    memo.MaterializedCteReferences.Add reference |> ignore
+                | FromSubquery _ as item when forced -> memo.MaterializedDerivedSources.Add item |> ignore
+                | FromTable reference when forced || (source.Cte.IsSome && groupedCteCanPushConditions registry source.Body) ->
+                    if forced then memo.MaterializedCteReferences.Add reference |> ignore
                     let alias = source.Alias.ToLowerInvariant()
                     let pushdown =
                         Map.tryFind (parent, Some alias) pending.ConditionPushdown
                         |> Option.orElseWith (fun () -> Map.tryFind (parent, None) pending.ConditionPushdown)
                     match source.Cte, blocks.[parent].Query with
-                    | Some cte, Some owner when not (sharedCtes.Contains cte) ->
+                    | Some cte, Some owner when not scopes.Value.BlockLimitReached && not cte.Recursive && not (sharedCtes.Contains cte) ->
                         let sources = blocks.[parent].Sources |> List.collect FromItem.leaves
                         let aliasCount =
                             sources |> List.sumBy (fun item ->

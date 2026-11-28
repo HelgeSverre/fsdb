@@ -688,9 +688,11 @@ the spatial index. Structurally materialized derived tables, CTEs, and
 `NO_MERGE` also enforces the subtype for derived tables and individual
 CTE references. [Numeric predicates](torture/findings/2026-11-27-spatial-make-envelope.md#conditions-on-a-materialized-cte)
 on direct columns and bounded signed integer arithmetic can filter a singly
-referenced hinted CTE before subtype validation. Broader predicate pushdown,
-delayed shared materialization, and materialization through `optimizer_switch`
-remain open.
+referenced hinted CTE before subtype validation. Single-table [grouped and
+aggregate CTEs](torture/findings/2026-11-27-spatial-make-envelope.md#filters-on-grouped-ctes)
+can also push eligible filters without a materialization hint.
+Broader predicate pushdown, delayed shared materialization, and materialization
+through `optimizer_switch` remain open.
 
 [`ST_Validate`](torture/findings/2026-11-27-spatial-validate.md) preserves
 valid geometry and shares topology checks with `ST_IsValid`. The

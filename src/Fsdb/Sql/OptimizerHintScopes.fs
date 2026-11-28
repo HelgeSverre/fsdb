@@ -30,7 +30,8 @@ type ContextStep = BlockHints of Block | Reparse of CommonTableExpr
 type Walk =
     { Numbered: Block list
       Context: ContextStep list
-      Resolution: Block list }
+      Resolution: Block list
+      BlockLimitReached: bool }
 
 type private CteBinding =
     { Definition: CommonTableExpr
@@ -40,11 +41,12 @@ type private Scope =
     { Parent: Scope option
       Definitions: CteBinding list }
 
-let private empty = { Numbered = []; Context = []; Resolution = [] }
+let private empty = { Numbered = []; Context = []; Resolution = []; BlockLimitReached = false }
 let private combine walks =
-    { Numbered = walks |> List.collect _.Numbered
-      Context = walks |> List.collect _.Context
-      Resolution = walks |> List.collect _.Resolution }
+    { empty with
+        Numbered = walks |> List.collect _.Numbered
+        Context = walks |> List.collect _.Context
+        Resolution = walks |> List.collect _.Resolution }
 
 let private withParent parent blocks =
     blocks |> List.map (fun block -> { block with ParentBlock = block.ParentBlock |> Option.orElse parent })
@@ -141,17 +143,19 @@ let collect querySource statement =
                      @ (select.Windows |> List.collect (snd >> OverSpec >> Expression.overExpressions))
                      @ (select.OrderBy |> List.map fst) @ Option.toList select.Limit @ Option.toList select.Offset)
             let nested = withParent (block |> Option.map _.Number)
-            { Numbered = Option.toList block @ nested (projections.Numbered @ from.Numbered @ remaining.Numbered)
-              Context = projections.Context @ from.Context @ remaining.Context @ (block |> Option.toList |> List.map BlockHints)
-              Resolution = Option.toList block @ nested (from.Resolution @ projections.Resolution @ remaining.Resolution) }
+            { empty with
+                Numbered = Option.toList block @ nested (projections.Numbered @ from.Numbered @ remaining.Numbered)
+                Context = projections.Context @ from.Context @ remaining.Context @ (block |> Option.toList |> List.map BlockHints)
+                Resolution = Option.toList block @ nested (from.Resolution @ projections.Resolution @ remaining.Resolution) }
     let scope = { Parent = None; Definitions = [] }
     let mutation ctes from (joins: Join list) values =
         let scope = extend scope ctes
         let block = allocate None (from :: (joins |> List.map _.Table)) None
         let children = combine [source scope [] from; joinBlocks scope [] joins; expressions scope [] values]
-        { Numbered = block :: withParent (Some block.Number) children.Numbered
-          Context = children.Context @ [BlockHints block]
-          Resolution = block :: withParent (Some block.Number) children.Resolution }
+        { empty with
+            Numbered = block :: withParent (Some block.Number) children.Numbered
+            Context = children.Context @ [BlockHints block]
+            Resolution = block :: withParent (Some block.Number) children.Resolution }
     let insertSelect table select assignments =
         let body = selectBlock scope [] select
         let body =
@@ -160,9 +164,10 @@ let collect querySource statement =
             | first :: _ ->
                 let withTarget block =
                     if block.Number = first.Number then { block with Sources = mutationSource table :: block.Sources } else block
-                { Numbered = List.map withTarget body.Numbered
-                  Context = body.Context |> List.map (function BlockHints block -> BlockHints(withTarget block) | Reparse cte -> Reparse cte)
-                  Resolution = List.map withTarget body.Resolution }
+                { body with
+                    Numbered = List.map withTarget body.Numbered
+                    Context = body.Context |> List.map (function BlockHints block -> BlockHints(withTarget block) | Reparse cte -> Reparse cte)
+                    Resolution = List.map withTarget body.Resolution }
         combine [body; expressions scope [] assignments]
     let rec visit = function
         | Select select -> selectBlock scope [] select
@@ -181,4 +186,5 @@ let collect querySource statement =
         | InsertSelect(table, _, select, assignments, _) -> insertSelect table select (assignments |> List.map snd)
         | ReplaceSelect(table, _, select) -> insertSelect table select []
         | _ -> empty
-    visit statement
+    let walk = visit statement
+    { walk with BlockLimitReached = nextNumber >= maxHintBlocks }

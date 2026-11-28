@@ -5634,6 +5634,41 @@ let tests =
                   Expect.equal (run "SELECT id,visits FROM envelope_audit ORDER BY id")
                       (ResultSet([ "id"; "visits" ], [ [ Some "1"; Some "0" ]; [ Some "2"; Some "0" ] ])) sql
 
+          testCase "grouped CTEs filter group keys and aggregate results before geometry validation"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE grouped_envelopes(id INT PRIMARY KEY, bucket INT NULL)"
+                        "INSERT INTO grouped_envelopes VALUES (1,1),(2,2),(3,2),(4,NULL)" ]
+              let shape = "ST_MakeEnvelope(POINT(bucket,0),POINT(IF(bucket>1,bucket+1,bucket),IF(bucket>1,1,0)))"
+              let grouped = $"SELECT bucket AS k,COUNT(*) AS n,{shape} AS g FROM grouped_envelopes GROUP BY bucket"
+              let expected = ResultSet([ "k"; "n" ], [ [ Some "2"; Some "2" ] ])
+              for filter in [ "k=2"; "n>1"; "n=2 AND k=2"; "k=2 OR n>2" ] do
+                  let sql = $"WITH e AS ({grouped}) SELECT k,n FROM e WHERE {filter}"
+                  Expect.equal (run sql) expected sql
+              let renamed = $"WITH e(category,total,shape) AS ({grouped}) SELECT /*+ NO_MERGE(x) */ x.category AS k,x.total AS n FROM e AS x WHERE x.total>1"
+              Expect.equal (run renamed) expected renamed
+              let nested = $"SELECT k,n FROM (WITH e AS ({grouped}) SELECT k,n FROM e WHERE n>1) AS d"
+              Expect.equal (run nested) expected nested
+              let position = $"SELECT bucket AS k,SUM(id) AS total,{shape} AS g FROM grouped_envelopes GROUP BY 1"
+              let sum = $"WITH e AS ({position}) SELECT k,total FROM e WHERE k>=2 AND total=5"
+              Expect.equal (run sum) (ResultSet([ "k"; "total" ], [ [ Some "2"; Some "5" ] ])) sum
+              let rollup = $"WITH e AS ({grouped} WITH ROLLUP) SELECT k,n FROM e WHERE n>1 ORDER BY k IS NULL,k"
+              Expect.equal (run rollup) (ResultSet([ "k"; "n" ], [ [ Some "2"; Some "2" ]; [ None; Some "4" ] ])) rollup
+              let rollupKey = $"WITH e AS ({grouped} WITH ROLLUP) SELECT k,n FROM e WHERE k=2"
+              Expect.equal (run rollupKey) expected rollupKey
+              let single = "SELECT COUNT(*) AS n,ST_MakeEnvelope(POINT(1,0),POINT(1,0)) AS g FROM grouped_envelopes WHERE id=0"
+              let globalEmpty = $"WITH e AS ({single}) SELECT n FROM e WHERE n=1"
+              Expect.equal (run globalEmpty) (ResultSet([ "n" ], [])) globalEmpty
+              for sql in
+                  [ $"WITH e AS ({single}) SELECT n FROM e WHERE n=0"
+                    $"WITH e AS ({single}) SELECT /*+ NO_DERIVED_CONDITION_PUSHDOWN(e) */ n FROM e WHERE n IS NULL"
+                    $"WITH e AS ({grouped}) SELECT /*+ NO_DERIVED_CONDITION_PUSHDOWN(e) */ k,n FROM e WHERE n>1"
+                    $"WITH e AS ({grouped}) SELECT k,n FROM e WHERE n=1"
+                    $"WITH e AS ({grouped} LIMIT 5) SELECT k,n FROM e WHERE k=2"
+                    $"WITH e AS ({grouped}) SELECT a.k,a.n FROM e a JOIN e b ON a.k=b.k WHERE a.k=2" ] do
+                  TestSupport.Sql.expectError 1416 (run sql) sql
+
           testCase "ST_Validate returns valid geometry and preserves polygon winding"
           <| fun _ ->
               let run = queryFixture [ "USE fsdb" ]
