@@ -592,12 +592,12 @@ let rewriteStatement replace statement =
     rewriteStatementWith (plainRewriteRules replace id) statement
 
 /// Names unaliased projections from their original expressions before rewriting.
-let rewriteStatementWithProjectionNames projectionName replace statement =
+let rewriteStatementWithProjectionNames projectionName mapProjection replace statement =
     let retainName (projection: Projection) =
         let alias =
             projection.Alias |> Option.orElseWith (fun () ->
                 if projection.SourceName.IsSome then None else projectionName projection.Expression)
-        { projection with Alias = alias }
+        mapProjection { projection with Alias = alias }
     rewriteStatementWith (plainRewriteRules replace retainName) statement
 
 /// Maps projections throughout a statement, including nested query bodies.

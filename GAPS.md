@@ -691,6 +691,9 @@ on direct columns and bounded signed integer arithmetic can filter a singly
 referenced hinted CTE before subtype validation. Single-table [grouped and
 aggregate CTEs](torture/findings/2026-11-27-spatial-make-envelope.md#filters-on-grouped-ctes)
 can also push eligible filters without a materialization hint.
+[Set-operation CTEs](torture/findings/2026-11-27-spatial-make-envelope.md#filters-on-set-operation-ctes)
+push compatible exact numeric filters through their branches and retain the
+declared decimal scale when a branch is filtered out.
 Broader predicate pushdown, delayed shared materialization, and materialization
 through `optimizer_switch` remain open.
 

@@ -6112,7 +6112,7 @@ let mapPlaceholders (replace: int -> Expr) (statement: Statement) : Statement =
         | _ -> None)
         statement
 
-let private bindParameterExpressions (stmt: Statement) (values: Expr list) : Statement =
+let private bindParameterExpressions retainBinaryMarker (stmt: Statement) (values: Expr list) : Statement =
     let parameterName expression =
         if Expression.exists (function Placeholder _ -> true | _ -> false) expression then
             Some(Executor.exprLabel expression)
@@ -6120,6 +6120,10 @@ let private bindParameterExpressions (stmt: Statement) (values: Expr list) : Sta
             None
 
     let hasParameter = Expression.exists (function Placeholder _ -> true | _ -> false)
+    let retainOrigin (projection: Projection) =
+        match projection.Expression with
+        | Placeholder _ when retainBinaryMarker -> Projection.withExpression projection.Expression projection
+        | _ -> projection
     let rec retainRuntimeInference = function
         | Neg operand when hasParameter operand ->
             Some(Neg(RuntimeExpression(Expression.rewriteTree retainRuntimeInference operand)))
@@ -6142,11 +6146,12 @@ let private bindParameterExpressions (stmt: Statement) (values: Expr list) : Sta
     |> Expression.rewriteStatement retainRuntimeInference
     |> Expression.rewriteStatementWithProjectionNames
         parameterName
+        retainOrigin
         (function Placeholder index -> Some(List.item index values) | _ -> None)
 
 /// Binds literal values while preserving the original projection names.
 let bindPlaceholders statement values =
-    bindParameterExpressions statement (List.map Lit values)
+    bindParameterExpressions false statement (List.map Lit values)
 
 let private preparedStore (session: Session) =
     let store = Session.currentStore session
@@ -6208,7 +6213,7 @@ let private bindPreparedPlaceholders source (session: Session) (prepared: Prepar
                     SchemaDependencies = dependencies
                     DivisionPrecisionIncrement =
                         if bound.Reprepared then sessionDivisionPrecision session else prepared.DivisionPrecisionIncrement }
-            updated, bindParameterExpressions bound.Statement bound.Expressions)
+            updated, bindParameterExpressions (source = PreparedMetadata.ProtocolValues) bound.Statement bound.Expressions)
 
 /// Compacts the parser's SQL-text indices after backtracking. AST traversal
 /// can visit placeholders in a different order, as in WITH and LIMIT.

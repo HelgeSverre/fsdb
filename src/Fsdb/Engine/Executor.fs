@@ -502,14 +502,13 @@ let private tryBoundedSignedArithmetic operator (a: bigint, b: bigint) (c: bigin
     calculated |> Option.filter (fun (_, (lower, upper)) ->
         lower >= bigint System.Int64.MinValue && upper <= bigint System.Int64.MaxValue)
 
-let private trySignedIntegerConstant = function
+let rec private trySignedIntegerConstant = function
     | LiteralValue(VInt value) -> Some(bigint value)
     | Neg(LiteralValue(VInt value)) when value >= 0L -> Some(bigint (-value))
-    | Cast(LiteralValue(VInt value), target) ->
-        let number = bigint value
-        signedIntegerTypeBounds target
-        |> Option.filter (fun (minimum, maximum) -> number >= minimum && number <= maximum)
-        |> Option.map (fun _ -> number)
+    | Cast(expression, target) ->
+        match trySignedIntegerConstant expression, signedIntegerTypeBounds target with
+        | Some number, Some(minimum, maximum) when number >= minimum && number <= maximum -> Some number
+        | _ -> None
     | _ -> None
 
 let private readProjectionColumn (row: Value[]) = function
@@ -600,6 +599,24 @@ let private validateRelationNames schema (cteNames: Set<string>) (ctes: CommonTa
         |> function
             | Some name -> duplicate name
             | None -> Ok()
+
+let rec private predicateRejectsNullRows (qualifier: string) =
+    function
+    | BinOp(And, left, right) -> predicateRejectsNullRows qualifier left || predicateRejectsNullRows qualifier right
+    | BinOp(Or, left, right) -> predicateRejectsNullRows qualifier left && predicateRejectsNullRows qualifier right
+    | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), QualifiedCol(owner, _), LiteralValue _)
+    | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), LiteralValue _, QualifiedCol(owner, _)) ->
+        equalsIgnoreCase owner qualifier
+    | In(QualifiedCol(owner, _), candidates)
+        when candidates |> List.forall (function LiteralValue _ -> true | _ -> false) ->
+        equalsIgnoreCase owner qualifier
+    | Between(QualifiedCol(owner, _), LiteralValue _, LiteralValue _) ->
+        equalsIgnoreCase owner qualifier
+    | Not(BinOp(Eq, QualifiedCol(owner, _), LiteralValue _))
+    | Not(BinOp(Eq, LiteralValue _, QualifiedCol(owner, _))) ->
+        equalsIgnoreCase owner qualifier
+    | IsNotNull(QualifiedCol(owner, _)) -> equalsIgnoreCase owner qualifier
+    | _ -> false
 
 let private nullableJoinQualifiers (select: SelectStmt) =
     let rec sourceScope = function
@@ -941,9 +958,13 @@ type private CteOuterCondition =
       PushdownEnabled: bool
       Predicate: Expr }
 
+type private CteNumericRange =
+    | IntegerRange of bigint * bigint
+    | SignedDecimalRange of exclusiveLimit: bigint
+
 type private CteNumericOutput =
     { Expression: Expr
-      MaterializedBounds: (bigint * bigint) option
+      MaterializedBounds: CteNumericRange option
       Nullable: bool }
 
 type private StatementMemo =
@@ -5066,6 +5087,20 @@ let private declaredDecimalShape (metadata: ColumnMetadata) =
         let sign = if hasMetadataFlag UnsignedFlag metadata then 0 else 1
         { Precision = min 65 (max 1 (int metadata.ColumnLength - sign - (if scale > 0 then 1 else 0)))
           Scale = scale }
+
+let private tryUnionDecimalShape (columns: ColumnMetadata list) =
+    let decimals = columns |> List.filter (fun column -> column.TypeId = TypeNewDecimal)
+    let hasDeclaredScale (column: ColumnMetadata) = column.ColumnLength > 0u && column.Decimals <= 30uy
+    if decimals.IsEmpty || not (List.forall hasDeclaredScale decimals)
+       || not (columns |> List.forall (fun column ->
+           column.TypeId = TypeNull || column.TypeId = TypeNewDecimal
+           || (isIntegerType column.TypeId && hasDeclaredScale column))) then None
+    else
+        let shapes = columns |> List.filter (fun column -> column.TypeId <> TypeNull) |> List.map declaredDecimalShape
+        let whole = shapes |> List.map (fun shape -> shape.Precision - shape.Scale) |> List.max
+        let scale = shapes |> List.map _.Scale |> List.max
+        let precision = whole + scale
+        Some({ Precision = min 65 precision; Scale = scale }, precision <= 65)
 
 let rec private decimalShape expression (metadata: ColumnMetadata option) =
     match expression, metadata with
@@ -15341,7 +15376,7 @@ and private tryMergeDirectView
                         expression, direction
                     let orderBy = select.OrderBy |> List.map rewriteOrder
                     let select = { select with From = None; Projections = expanded }
-                    match Expression.rewriteStatementWithProjectionNames (exprLabel >> Some) replace (Select select) with
+                    match Expression.rewriteStatementWithProjectionNames (exprLabel >> Some) id replace (Select select) with
                     | Select rewritten -> Ok(Some { rewritten with OrderBy = orderBy })
                     | _ -> Ok None
             | Ok((Select definition) as statement) ->
@@ -15530,180 +15565,315 @@ and private pushMaterializedCteCondition store registry dbName cte condition =
             columns |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
         | _ -> None
 
-    let specialize grouped (select: SelectStmt) (tableRef: TableRef) =
-        physicalFastPathTable store dbName tableRef
-        |> Option.bind (fun table ->
-            let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
-            let projections = expandOrderProjections table.Columns (singleQualifier qualifier table.Columns) select.Projections
-            let names =
-                if cte.CteColumns.IsEmpty then projections |> List.map projectionLabel else cte.CteColumns
-            if not (sameLength names projections) || (tryDuplicateIgnoreCase id names).IsSome then None
+    let inspectBranch forUnion grouped (select: SelectStmt) qualifier columns =
+        let qualifiers = singleQualifier qualifier columns
+        let projections = expandOrderProjections columns qualifiers select.Projections
+        let qualified (column: ColumnDef) = QualifiedCol(qualifier, column.Name)
+        let columnIndex = columnIndexOf columns
+        let context =
+            lazy (contextFactory store registry dbName
+                    columnIndex qualifiers None (probeRow columns))
+        // MySQL chooses the temporary field by display width, independently of the arithmetic bounds.
+        let temporaryIntegerBounds expression =
+            metadataOfExpr context.Value expression
+            |> Option.bind (fun metadata ->
+                if metadata.TypeId = TypeLongLong && not (hasMetadataFlag UnsignedFlag metadata) then
+                    signedIntegerTypeBounds (if metadata.ColumnLength < 10u then TInt false else TBigInt false)
+                    |> Option.map IntegerRange
+                else None)
+
+        let rec boundArithmetic expression =
+            match expression with
+            | BinOp((Add | Sub | SignedSub | Mul as operator), left, right) ->
+                Option.map2 (fun left right -> left, right) (boundArithmetic left) (boundArithmetic right)
+                |> Option.bind (fun ((left, leftBounds, leftNullable), (right, rightBounds, rightNullable)) ->
+                    tryBoundedSignedArithmetic operator leftBounds rightBounds
+                    |> Option.map (fun (_, bounds) -> BinOp(operator, left, right), bounds, leftNullable || rightNullable))
+            | _ ->
+                match trySignedIntegerConstant expression with
+                | Some value -> Some(expression, (value, value), false)
+                | None ->
+                    sourceColumn qualifier columns expression
+                    |> Option.bind (fun column ->
+                        signedIntegerTypeBounds column.Type
+                        |> Option.map (fun bounds -> qualified column, bounds, column.Nullable))
+
+        let rowOutput expression : CteNumericOutput option =
+            match expression with
+            | (LiteralValue(VInt _ | VUInt _ | VDecimal _) | Neg(LiteralValue(VDecimal _))) when forUnion ->
+                Some { Expression = expression; MaterializedBounds = None; Nullable = false }
+            | _ when forUnion && (trySignedIntegerConstant expression).IsSome ->
+                Some { Expression = expression; MaterializedBounds = None; Nullable = false }
+            | BinOp((Add | Sub | SignedSub | Mul), _, _) ->
+                boundArithmetic expression
+                |> Option.map (fun (rewritten, _, nullable) ->
+                    { Expression = rewritten
+                      MaterializedBounds = temporaryIntegerBounds rewritten
+                      Nullable = nullable })
+            | _ ->
+                sourceColumn qualifier columns expression
+                |> Option.filter (_.Type >> isExactNumericIndexType)
+                |> Option.map (fun column ->
+                    { Expression = qualified column
+                      MaterializedBounds = signedIntegerTypeBounds column.Type |> Option.map IntegerRange
+                      Nullable = column.Nullable })
+
+        let groupingKeys =
+            select.GroupBy
+            |> traverse (resolveGroupByRef columnIndex select.Projections)
+            |> Result.defaultValue []
+            |> List.choose (fun key -> rowOutput key |> Option.map (fun output -> output.Expression, key))
+
+        let aggregateOutput = function
+            | FuncCall(name, [ argument ]) when Functions.isUnmodifiedBuiltinAggregate name registry ->
+                let input =
+                    match argument with
+                    | Distinct value -> value
+                    | _ -> argument
+                let output nullable =
+                    Some { Expression = FuncCall(name, [ argument ]); MaterializedBounds = None; Nullable = nullable }
+                match name.ToUpperInvariant(), input with
+                | "COUNT", (Star None | LiteralValue _) -> output false
+                | "COUNT", _ when (sourceColumn qualifier columns input).IsSome || (rowOutput input).IsSome ->
+                    output false
+                | ("MIN" | "MAX" | "SUM" | "AVG"), _ when (rowOutput input).IsSome -> output true
+                | _ -> None
+            | _ -> None
+
+        let numericOutput expression =
+            let row = rowOutput expression
+            if not grouped then row
             else
-                let qualified (column: ColumnDef) = QualifiedCol(qualifier, column.Name)
-                let columnIndex = columnIndexOf table.Columns
-                let context =
-                    lazy (contextFactory store registry dbName
-                            columnIndex (singleQualifier qualifier table.Columns)
-                            None (probeRow table.Columns))
-                // MySQL chooses the temporary field by display width, independently of the arithmetic bounds.
-                let temporaryIntegerBounds expression =
-                    metadataOfExpr context.Value expression
-                    |> Option.bind (fun metadata ->
-                        if metadata.TypeId = TypeLongLong && not (hasMetadataFlag UnsignedFlag metadata) then
-                            signedIntegerTypeBounds (if metadata.ColumnLength < 10u then TInt false else TBigInt false)
-                        else None)
+                row
+                |> Option.bind (fun output ->
+                    groupingKeys
+                    |> List.tryPick (fun (normalized, key) ->
+                        if normalized <> output.Expression then None
+                        elif not select.Rollup then Some output
+                        elif resolveHavingRef registry columnIndex select.Projections false key = Ok key then
+                            Some { output with Expression = key; Nullable = true }
+                        else None))
+                |> Option.orElseWith (fun () -> aggregateOutput expression)
 
-                let rec boundArithmetic expression =
-                    match expression with
-                    | BinOp((Add | Sub | SignedSub | Mul as operator), left, right) ->
-                        Option.map2 (fun left right -> left, right) (boundArithmetic left) (boundArithmetic right)
-                        |> Option.bind (fun ((left, leftBounds, leftNullable), (right, rightBounds, rightNullable)) ->
-                            tryBoundedSignedArithmetic operator leftBounds rightBounds
-                            |> Option.map (fun (_, bounds) -> BinOp(operator, left, right), bounds, leftNullable || rightNullable))
-                    | _ ->
-                        match trySignedIntegerConstant expression with
-                        | Some value -> Some(expression, (value, value), false)
-                        | None ->
-                            sourceColumn qualifier table.Columns expression
-                            |> Option.bind (fun column ->
-                                signedIntegerTypeBounds column.Type
-                                |> Option.map (fun bounds -> qualified column, bounds, column.Nullable))
+        let describe (projection: Projection) =
+            let output =
+                match projection.BindingOrigin with
+                // A bare binary marker retains its generic result category for UNION pushdown.
+                | Some(ComputedProjection(Placeholder _)) when forUnion -> None
+                | _ ->
+                    match projection.Expression with
+                    // The materialized scale can round guard digits from AVG.
+                    | FuncCall(name, _) when forUnion && equalsIgnoreCase name "AVG" -> None
+                    | expression -> numericOutput expression
+            let physical = if forUnion then sourceColumn qualifier columns projection.Expression else None
+            let metadata = if forUnion then metadataOfExpr context.Value projection.Expression else None
+            let nullable =
+                match output, physical with
+                | Some output, _ -> output.Nullable
+                | _, Some column -> select.Rollup || column.Nullable
+                | _ -> true
+            projectionLabel projection, (output, metadata, nullable)
+        projections |> List.map describe
 
-                let rowOutput expression : CteNumericOutput option =
-                    match expression with
-                    | BinOp((Add | Sub | SignedSub | Mul), _, _) ->
-                        boundArithmetic expression
-                        |> Option.map (fun (rewritten, _, nullable) ->
-                            { Expression = rewritten
-                              MaterializedBounds = temporaryIntegerBounds rewritten
-                              Nullable = nullable })
-                    | _ ->
-                        sourceColumn qualifier table.Columns expression
-                        |> Option.filter (_.Type >> isExactNumericIndexType)
-                        |> Option.map (fun column ->
-                            { Expression = qualified column
-                              MaterializedBounds = signedIntegerTypeBounds column.Type
-                              Nullable = column.Nullable })
+    let tryBranch forUnion (select: SelectStmt) =
+        let simpleScope =
+            select.Ctes.IsEmpty && select.Joins.IsEmpty && select.Locking.IsEmpty
+            && (select.Where |> Option.forall isPlainRowPredicate)
+        let constantBranch =
+            forUnion && simpleScope && not select.Distinct && select.GroupBy.IsEmpty && select.Having.IsNone
+            && select.Limit.IsNone && select.Offset.IsNone && select.Windows.IsEmpty
+            && (select.Projections |> List.forall (fun projection ->
+                not (containsAggregate registry projection.Expression || projectionPreventsMerge registry projection.Expression)
+                && (collectWindowFuncs projection.Expression).IsEmpty))
+        match select.From with
+        | None when constantBranch -> Some(false, inspectBranch true false select "" [])
+        | Some(FromTable source) when constantBranch && source.Database.IsNone && equalsIgnoreCase source.Table "DUAL"
+                                      && not (Map.containsKey "dual" (currentCteScope ())) ->
+            Some(false, inspectBranch true false select (source.Alias |> Option.defaultValue source.Table) [])
+        | Some(FromTable source) when simpleScope &&
+                                      (source.Database.IsSome || not (Map.containsKey (source.Table.ToLowerInvariant()) (currentCteScope ()))) ->
+            let body = PlainSelect select
+            let grouped = groupedCteCanPushConditions registry body
+            if grouped || queryBodyCanMerge registry body then
+                physicalFastPathTable store dbName source
+                |> Option.map (fun table ->
+                    let qualifier = source.Alias |> Option.defaultValue source.Table
+                    grouped, inspectBranch forUnion grouped select qualifier table.Columns)
+            else None
+        | _ -> None
 
-                let groupingKeys =
-                    select.GroupBy
-                    |> traverse (resolveGroupByRef columnIndex select.Projections)
-                    |> Result.defaultValue []
-                    |> List.choose (fun key -> rowOutput key |> Option.map (fun output -> output.Expression, key))
+    let withOutputNames outputs apply =
+        let names = if cte.CteColumns.IsEmpty then List.map fst outputs else cte.CteColumns
+        if sameLength names outputs && (tryDuplicateIgnoreCase id names).IsNone then
+            apply (names |> List.map (fun name -> name.ToLowerInvariant()))
+        else cte
 
-                let aggregateOutput = function
-                    | FuncCall(name, [ argument ]) when Functions.isUnmodifiedBuiltinAggregate name registry ->
-                        let input =
-                            match argument with
-                            | Distinct value -> value
-                            | _ -> argument
-                        let output nullable =
-                            Some { Expression = FuncCall(name, [ argument ]); MaterializedBounds = None; Nullable = nullable }
-                        match name.ToUpperInvariant(), input with
-                        | "COUNT", (Star None | LiteralValue _) -> output false
-                        | "COUNT", _ when (sourceColumn qualifier table.Columns input).IsSome || (rowOutput input).IsSome ->
-                            output false
-                        | ("MIN" | "MAX" | "SUM" | "AVG"), _ when (rowOutput input).IsSome -> output true
-                        | _ -> None
-                    | _ -> None
+    let outputMap names outputs =
+        List.zip names outputs
+        |> List.choose (fun (name, output) -> output |> Option.map (fun value -> name, value))
+        |> Map.ofList
 
-                let numericOutput expression =
-                    let row = rowOutput expression
-                    if not grouped then row
-                    else
-                        row
-                        |> Option.bind (fun output ->
-                            groupingKeys
-                            |> List.tryPick (fun (normalized, key) ->
-                                if normalized <> output.Expression then None
-                                elif not select.Rollup then Some output
-                                elif resolveHavingRef registry columnIndex select.Projections false key = Ok key then
-                                    Some { output with Expression = key; Nullable = true }
-                                else None))
-                        |> Option.orElseWith (fun () -> aggregateOutput expression)
+    let outputKey keys = function
+        | Col name when condition.AllowsBareColumns && (tryRoutineVariable name).IsNone ->
+            Map.tryFind (name.ToLowerInvariant()) keys
+        | QualifiedCol(owner, name) when equalsIgnoreCase owner condition.Qualifier ->
+            Map.tryFind (name.ToLowerInvariant()) keys
+        | _ -> None
+    let rec safe (lookup: Expr -> CteNumericOutput option) = function
+        | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VNull) -> true
+        | LiteralValue(VDouble value) | Neg(LiteralValue(VDouble value)) -> System.Double.IsFinite value
+        | Neg(LiteralValue(VDecimal _)) -> true
+        | (Col _ | QualifiedCol _) as key -> (lookup key).IsSome
+        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq | And | Or), left, right) -> safe lookup left && safe lookup right
+        | IsNull value | IsNotNull value | Not value -> safe lookup value
+        | In(value, candidates) -> safe lookup value && List.forall (safe lookup) candidates
+        | Between(value, lower, upper) -> safe lookup value && safe lookup lower && safe lookup upper
+        | expression -> (trySignedIntegerConstant expression).IsSome
+    let comparisonInteger expression =
+        let exactDouble value =
+            if abs value <= float (1L <<< 53) && value = System.Math.Truncate value then Some(bigint (int64 value))
+            else None
+        match expression with
+        | LiteralValue(VDouble value) -> exactDouble value
+        | Neg(LiteralValue(VDouble value)) -> exactDouble (-value)
+        | _ -> trySignedIntegerConstant expression
 
-                let keys =
-                    List.zip names projections
-                    |> List.choose (fun (name, projection) ->
-                        numericOutput projection.Expression |> Option.map (fun expression -> name.ToLowerInvariant(), expression))
-                    |> Map.ofList
-                let outputKey = function
-                    | Col name when condition.AllowsBareColumns && (tryRoutineVariable name).IsNone ->
-                        Map.tryFind (name.ToLowerInvariant()) keys
-                    | QualifiedCol(owner, name) when equalsIgnoreCase owner condition.Qualifier ->
-                        Map.tryFind (name.ToLowerInvariant()) keys
-                    | _ -> None
-                let rec safe = function
-                    | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VNull) -> true
-                    | LiteralValue(VDouble value) | Neg(LiteralValue(VDouble value)) -> System.Double.IsFinite value
-                    | Neg(LiteralValue(VDecimal _)) -> true
-                    | (Col _ | QualifiedCol _) as key -> (outputKey key).IsSome
-                    | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq | And | Or), left, right) -> safe left && safe right
-                    | IsNull value | IsNotNull value | Not value -> safe value
-                    | In(value, candidates) -> safe value && List.forall safe candidates
-                    | Between(value, lower, upper) -> safe value && safe lower && safe upper
-                    | expression -> (trySignedIntegerConstant expression).IsSome
-                let comparisonInteger expression =
-                    let exactDouble value =
-                        if abs value <= float (1L <<< 53) && value = System.Math.Truncate value then Some(bigint (int64 value))
-                        else None
-                    match expression with
-                    | LiteralValue(VDouble value) -> exactDouble value
-                    | Neg(LiteralValue(VDouble value)) -> exactDouble (-value)
-                    | _ -> trySignedIntegerConstant expression
+    let rec cannotMatch lookup = function
+        | IsNull expression -> lookup expression |> Option.exists (fun output -> not output.Nullable)
+        | BinOp(And, left, right) -> cannotMatch lookup left || cannotMatch lookup right
+        | BinOp(Or, left, right) -> cannotMatch lookup left && cannotMatch lookup right
+        | BinOp((Lt | Lte | Gt | Gte | Eq | NullSafeEq as operator), left, right) ->
+            let impossible relation key constant =
+                match lookup key |> Option.bind _.MaterializedBounds, comparisonInteger constant with
+                | Some(IntegerRange(minimum, maximum)), Some value ->
+                    match relation with
+                    | Lt -> minimum >= value
+                    | Lte -> minimum > value
+                    | Gt -> maximum <= value
+                    | Gte -> maximum < value
+                    | _ -> value < minimum || value > maximum
+                | Some(SignedDecimalRange limit), Some value ->
+                    match relation with
+                    | Lt | Lte -> value <= -limit
+                    | Gt | Gte -> value >= limit
+                    | _ -> abs value >= limit
+                | _ -> false
+            let reverse =
+                match operator with Lt -> Gt | Lte -> Gte | Gt -> Lt | Gte -> Lte | _ -> operator
+            impossible operator left right || impossible reverse right left
+        | _ -> false
+    let termsFor keys proofKeys allowImpossible =
+        let proof = outputKey proofKeys
+        if allowImpossible && safe proof condition.Predicate && cannotMatch proof condition.Predicate then
+            true, [ Lit(VInt 0L) ]
+        elif not condition.PushdownEnabled then false, []
+        else
+            let lookup = outputKey keys
+            let eligible =
+                condition.Predicate |> conjuncts
+                |> List.filter (fun expression -> safe lookup expression && Expression.exists (lookup >> Option.isSome) expression)
+            false, eligible
 
-                let rec cannotMatch = function
-                    | IsNull expression -> outputKey expression |> Option.exists (fun output -> not output.Nullable)
-                    | BinOp(And, left, right) -> cannotMatch left || cannotMatch right
-                    | BinOp(Or, left, right) -> cannotMatch left && cannotMatch right
-                    | BinOp((Lt | Lte | Gt | Gte | Eq | NullSafeEq as operator), left, right) ->
-                        let impossible relation key constant =
-                            match outputKey key |> Option.bind _.MaterializedBounds, comparisonInteger constant with
-                            | Some(minimum, maximum), Some value ->
-                                match relation with
-                                | Lt -> minimum >= value
-                                | Lte -> minimum > value
-                                | Gt -> maximum <= value
-                                | Gte -> maximum < value
-                                | _ -> value < minimum || value > maximum
-                            | _ -> false
-                        let reverse =
-                            match operator with Lt -> Gt | Lte -> Gte | Gt -> Lt | Gte -> Lte | _ -> operator
-                        impossible operator left right || impossible reverse right left
-                    | _ -> false
-                let whereTerms, havingTerms =
-                    let globalAggregate = grouped && select.GroupBy.IsEmpty
-                    if not globalAggregate && safe condition.Predicate && cannotMatch condition.Predicate then [ Lit(VInt 0L) ], []
-                    elif not condition.PushdownEnabled then [], []
-                    else
-                        let rewrite = outputKey >> Option.map (fun output -> output.Expression)
-                        let pushed =
-                            condition.Predicate |> conjuncts
-                            |> List.filter (fun expression -> safe expression && Expression.exists (outputKey >> Option.isSome) expression)
-                            |> List.map (Expression.rewrite rewrite)
-                        if select.Rollup || globalAggregate then [], pushed
-                        elif grouped then pushed |> List.partition (containsAggregate registry >> not)
-                        else pushed, []
-                if whereTerms.IsEmpty && havingTerms.IsEmpty then None
+    let applyTerms (keys: Map<string, CteNumericOutput>) grouped (impossible, terms) (select: SelectStmt) =
+        let rewrite = outputKey keys >> Option.map (fun output -> output.Expression)
+        let pushed = terms |> List.map (Expression.rewrite rewrite)
+        let whereTerms, havingTerms =
+            if grouped && select.GroupBy.IsEmpty then [], pushed
+            elif impossible then pushed, []
+            elif select.Rollup then [], pushed
+            elif grouped then pushed |> List.partition (containsAggregate registry >> not)
+            else pushed, []
+        let append terms existing =
+            if List.isEmpty terms then existing
+            else combineConjuncts ((optionalConjuncts existing) @ terms)
+        { select with
+            Where = append whereTerms select.Where
+            Having = append havingTerms select.Having }
+
+    let collectOptions inspect values =
+        let present = values |> List.choose inspect
+        if sameLength values present then Some present else None
+
+    let unionColumn name columns =
+        let metadata = columns |> collectOptions (fun (_, metadata, _) -> metadata)
+        let outputs = columns |> collectOptions (fun (output, _, _) -> output)
+        let allIntegers =
+            metadata |> Option.exists (List.forall (fun column ->
+                column.TypeId <> TypeYear && isIntegerType column.TypeId))
+        let allDecimal = metadata |> Option.exists (List.forall (fun column -> column.TypeId = TypeNewDecimal))
+        let decimalShape = metadata |> Option.bind tryUnionDecimalShape
+        let signed = metadata |> Option.exists (List.forall (hasMetadataFlag UnsignedFlag >> not))
+        let integerRange =
+            if allIntegers then
+                let widthOf typeId =
+                    if typeId = TypeTiny then 8
+                    elif typeId = TypeShort then 16
+                    elif typeId = TypeInt24 then 24
+                    elif typeId = TypeLong then 32
+                    else 64
+                let fields = metadata.Value |> List.map (fun column -> widthOf column.TypeId, hasMetadataFlag UnsignedFlag column)
+                let width = fields |> List.map fst |> List.max
+                let unsigned = fields |> List.forall snd
+                let width =
+                    if not signed && not unsigned && List.contains (width, true) fields then
+                        if width < 32 then width + 8 else width * 2
+                    else width
+                if width > 64 then None
+                elif unsigned then Some(IntegerRange(0I, (1I <<< width) - 1I))
                 else
-                    let append terms existing =
-                        if List.isEmpty terms then existing
-                        else combineConjuncts ((optionalConjuncts existing) @ terms)
-                    let revised =
-                        { select with
-                            Where = append whereTerms select.Where
-                            Having = append havingTerms select.Having }
-                    Some { cte with Body = PlainSelect revised })
+                    let limit = 1I <<< (width - 1)
+                    Some(IntegerRange(-limit, limit - 1I))
+            else None
+        let bounds =
+            if allIntegers then integerRange
+            elif signed && allDecimal then
+                decimalShape |> Option.map (fun (shape, _) ->
+                    let limit = pown 10I (shape.Precision - shape.Scale)
+                    if shape.Scale = 0 then IntegerRange(1I - limit, limit - 1I)
+                    else SignedDecimalRange limit)
+            else None
+        let proof =
+            { Expression = Col name
+              MaterializedBounds = bounds
+              Nullable = columns |> List.exists (fun (_, _, nullable) -> nullable) }
+        // Distinct integer widths have the same result family. MySQL keeps a
+        // predicate outside a set operation when the result families differ.
+        let decimalPreservesRange = allDecimal && (decimalShape |> Option.exists snd)
+        let pushable = outputs.IsSome && (integerRange.IsSome || decimalPreservesRange)
+        proof, (if pushable then Some proof else None)
 
     match cte.Body with
-    | PlainSelect({ From = Some(FromTable source) } as select)
-        when select.Ctes.IsEmpty && select.Joins.IsEmpty && select.Locking.IsEmpty
-             && (source.Database.IsSome || not (Map.containsKey (source.Table.ToLowerInvariant()) (currentCteScope ())))
-             && (select.Where |> Option.forall isPlainRowPredicate) ->
-        let grouped = groupedCteCanPushConditions registry cte.Body
-        if grouped || queryBodyCanMerge registry cte.Body then
-            specialize grouped select source |> Option.defaultValue cte
-        else cte
+    | PlainSelect select ->
+        match tryBranch false select with
+        | None -> cte
+        | Some(grouped, outputs) ->
+            withOutputNames outputs (fun names ->
+                let keys = outputs |> List.map (fun (_, (output, _, _)) -> output) |> outputMap names
+                let terms = termsFor keys keys (not grouped || not select.GroupBy.IsEmpty)
+                if (snd terms).IsEmpty then cte
+                else { cte with Body = PlainSelect(applyTerms keys grouped terms select) })
+    | UnionSelect(first, rest, orderBy, None, None) ->
+        let branches = first :: List.map snd rest
+        match branches |> collectOptions (tryBranch true) with
+        | Some((_, firstOutputs) :: _ as inspected)
+            when inspected |> List.forall (snd >> sameLength firstOutputs) ->
+            withOutputNames firstOutputs (fun names ->
+                let common = inspected |> List.map (snd >> List.map snd) |> List.transpose
+                let comparisons = List.map2 unionColumn names common
+                let proofs = comparisons |> List.map (fst >> Some) |> outputMap names
+                let keys = comparisons |> List.map snd |> outputMap names
+                let terms = termsFor keys proofs true
+                if (snd terms).IsEmpty then cte
+                else
+                    let rewrite select (grouped, outputs) =
+                        let keys = outputs |> List.map (fun (_, (output, _, _)) -> output) |> outputMap names
+                        applyTerms keys grouped terms select
+                    match List.map2 rewrite branches inspected with
+                    | first :: restBranches ->
+                        let rest = List.map2 (fun (operator, _) branch -> operator, branch) rest restBranches
+                        { cte with Body = UnionSelect(first, rest, orderBy, None, None) }
+                    | [] -> cte)
+        | _ -> cte
     | _ -> cte
 
 and private withCteScope
@@ -16486,24 +16656,6 @@ and private reorderNullRejectedLeftJoin
     (dbName: string)
     (select: SelectStmt)
     : SelectStmt * Value[] list option =
-    let rec rejectsNull (qualifier: string) =
-        function
-        | BinOp(And, left, right) -> rejectsNull qualifier left || rejectsNull qualifier right
-        | BinOp(Or, left, right) -> rejectsNull qualifier left && rejectsNull qualifier right
-        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), QualifiedCol(owner, _), LiteralValue _)
-        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), LiteralValue _, QualifiedCol(owner, _)) ->
-            equalsIgnoreCase owner qualifier
-        | In(QualifiedCol(owner, _), candidates)
-            when candidates |> List.forall (function LiteralValue _ -> true | _ -> false) ->
-            equalsIgnoreCase owner qualifier
-        | Between(QualifiedCol(owner, _), LiteralValue _, LiteralValue _) ->
-            equalsIgnoreCase owner qualifier
-        | Not(BinOp(Eq, QualifiedCol(owner, _), LiteralValue _))
-        | Not(BinOp(Eq, LiteralValue _, QualifiedCol(owner, _))) ->
-            equalsIgnoreCase owner qualifier
-        | IsNotNull(QualifiedCol(owner, _)) -> equalsIgnoreCase owner qualifier
-        | _ -> false
-
     match select.From, select.Joins with
     | Some(FromTable leftRef as leftSource), [ join ] when
         join.Kind = LeftJoin
@@ -16521,7 +16673,7 @@ and private reorderNullRejectedLeftJoin
                     select.Where
                     |> optionalConjuncts
                     |> List.map normalizeNegatedRangeComparison
-                    |> List.tryFind (rejectsNull rightQualifier)
+                    |> List.tryFind (predicateRejectsNullRows rightQualifier)
                     |> Option.bind (fun predicate ->
                         tryPhysicalTableRef store dbName rightRef
                         |> Result.toOption
@@ -22454,7 +22606,8 @@ and private unionAggregateType (columns: ColumnMetadata list) : ColumnMetadata =
             else TypeFloat
         approximateResultMetadata typeId columns
     elif types |> List.exists (fun t -> t = Value.TypeNewDecimal) then
-        Value.columnMetadata Value.TypeNewDecimal
+        let decimal = Value.columnMetadata Value.TypeNewDecimal
+        tryUnionDecimalShape columns |> Option.map (fun (shape, _) -> withDecimalShape shape decimal) |> Option.defaultValue decimal
     elif mediumInteger.IsSome then mediumInteger.Value
     elif types |> List.forall isInt then
         { Value.columnMetadata Value.TypeLongLong with
@@ -22617,9 +22770,8 @@ and private runUnionStmtWithOuter
                         else metadata) branches branchTypes
                     |> unionAggregateType)
 
-            // A DECIMAL-reconciled column renders at the union's scale —
-            // MySQL shows `SELECT 2 UNION SELECT 1.5` as 1.5 / 2.0, not 2.
-            // The scale is the widest fraction any branch's value carries.
+            // When expression metadata lacks a declared scale, use the
+            // precision carried by evaluated values.
             let decimalScale (v: Value) =
                 match v with
                 | VDecimal _ ->
@@ -22633,22 +22785,19 @@ and private runUnionStmtWithOuter
 
             let rescale (scale: int) (v: Value) : Value =
                 match v with
-                | VDecimal d when scale > 0 ->
-                    VDecimal(
-                        System.Decimal.Parse(
-                            d.ToString("F" + string scale, System.Globalization.CultureInfo.InvariantCulture),
-                            System.Globalization.CultureInfo.InvariantCulture
-                        )
-                    )
+                | VDecimal d ->
+                    let scale = min 28 scale
+                    let culture = System.Globalization.CultureInfo.InvariantCulture
+                    let rounded = System.Decimal.Round(d, scale, System.MidpointRounding.AwayFromZero)
+                    VDecimal(System.Decimal.Parse(rounded.ToString("F" + string scale, culture), culture))
                 | _ -> v
 
             let scales =
-                cols
-                // `List.fold max 0`, not `List.max`: an all-empty union
-                // (`SELECT 1 WHERE FALSE UNION SELECT 2 WHERE FALSE`) has no
-                // rows to take a scale from, and `List.max` throws on the
-                // empty list — a scale of 0 is correct there.
-                |> List.mapi (fun i _ -> allPaired |> List.fold (fun acc (_, typed) -> max acc (decimalScale typed.[i])) 0)
+                reconciled
+                |> List.mapi (fun i column ->
+                    if column.TypeId <> TypeNewDecimal then 0
+                    elif column.ColumnLength > 0u then int column.Decimals
+                    else allPaired |> List.fold (fun acc (_, typed) -> max acc (decimalScale typed.[i])) 0)
 
             let coerceColumn (i: int) (v: Value) : Value =
                 let coerced = coerceUnionValue reconciled.[i] v
@@ -27394,38 +27543,50 @@ let private emitJoinHintDiagnostics store registry schema statement =
     if not pending.SourceStrategies.IsEmpty || hasCtes statement then
         let memo = currentStatementMemo ()
         let blocks = scopes.Value.Numbered |> List.map (fun block -> block.Number, block) |> Map.ofList
+        let sources = HashSet<OptimizerHintScopes.SourceReference>(HashIdentity.Reference)
+        // Multiple UNION branch blocks can carry the same FROM reference.
+        let sourceBlocks =
+            scopes.Value.Numbered
+            |> List.choose (fun block ->
+                match block.Source, block.ParentBlock with
+                | Some source, Some parent when sources.Add source -> Some(source, parent)
+                | _ -> None)
         let cteReferences = HashSet<CommonTableExpr>(HashIdentity.Reference)
         let sharedCtes = HashSet<CommonTableExpr>(HashIdentity.Reference)
-        for block in scopes.Value.Numbered do
-            match block.Source |> Option.bind _.Cte with
+        for source, _ in sourceBlocks do
+            match source.Cte with
             | Some cte when not (cteReferences.Add cte) -> sharedCtes.Add cte |> ignore
             | _ -> ()
-        for block in scopes.Value.Numbered do
-            match block.Source, block.ParentBlock with
-            | Some source, Some parent ->
-                let forced = sourceStrategy pending parent source.Alias = Some OptimizerHintResolution.MaterializeSource
-                match source.Item with
-                | FromSubquery _ as item when forced -> memo.MaterializedDerivedSources.Add item |> ignore
-                | FromTable reference when forced || (source.Cte.IsSome && groupedCteCanPushConditions registry source.Body) ->
-                    if forced then memo.MaterializedCteReferences.Add reference |> ignore
-                    let alias = source.Alias.ToLowerInvariant()
-                    let pushdown =
-                        Map.tryFind (parent, Some alias) pending.ConditionPushdown
-                        |> Option.orElseWith (fun () -> Map.tryFind (parent, None) pending.ConditionPushdown)
-                    match source.Cte, blocks.[parent].Query with
-                    | Some cte, Some owner when not scopes.Value.BlockLimitReached && not cte.Recursive && not (sharedCtes.Contains cte) ->
-                        let sources = blocks.[parent].Sources |> List.collect FromItem.leaves
-                        let aliasCount =
-                            sources |> List.sumBy (fun item ->
-                                if FromItem.tryQualifier item |> Option.exists (equalsIgnoreCase alias) then 1 else 0)
-                        if aliasCount = 1 && not (Set.contains alias (nullableJoinQualifiers owner)) then
-                            owner.Where |> Option.iter (fun predicate ->
+        let canPushCondition (source: OptimizerHintScopes.SourceReference) =
+            source.Cte.IsSome
+            && (match source.Body with
+                | UnionSelect(_, _, _, None, None) -> true
+                | body -> groupedCteCanPushConditions registry body)
+        for source, parent in sourceBlocks do
+            let forced = sourceStrategy pending parent source.Alias = Some OptimizerHintResolution.MaterializeSource
+            match source.Item with
+            | FromSubquery _ as item when forced -> memo.MaterializedDerivedSources.Add item |> ignore
+            | FromTable reference when forced || canPushCondition source ->
+                if forced then memo.MaterializedCteReferences.Add reference |> ignore
+                let alias = source.Alias.ToLowerInvariant()
+                let pushdown =
+                    Map.tryFind (parent, Some alias) pending.ConditionPushdown
+                    |> Option.orElseWith (fun () -> Map.tryFind (parent, None) pending.ConditionPushdown)
+                match source.Cte, blocks.[parent].Query with
+                | Some cte, Some owner when not scopes.Value.BlockLimitReached && not cte.Recursive && not (sharedCtes.Contains cte) ->
+                    let sources = blocks.[parent].Sources |> List.collect FromItem.leaves
+                    let aliasCount =
+                        sources |> List.sumBy (fun item ->
+                            if FromItem.tryQualifier item |> Option.exists (equalsIgnoreCase alias) then 1 else 0)
+                    if aliasCount = 1 then
+                        let nullable = Set.contains alias (nullableJoinQualifiers owner)
+                        owner.Where |> Option.iter (fun predicate ->
+                            if not nullable || predicateRejectsNullRows alias predicate then
                                 memo.MaterializedCteConditions.[cte] <-
                                     { Qualifier = alias
                                       AllowsBareColumns = sources.Length = 1
                                       PushdownEnabled = pushdown <> Some false
                                       Predicate = predicate })
-                    | _ -> ()
                 | _ -> ()
             | _ -> ()
     if not pending.Warnings.IsEmpty then

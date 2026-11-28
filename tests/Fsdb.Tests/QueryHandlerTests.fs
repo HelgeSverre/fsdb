@@ -5669,6 +5669,44 @@ let tests =
                     $"WITH e AS ({grouped}) SELECT a.k,a.n FROM e a JOIN e b ON a.k=b.k WHERE a.k=2" ] do
                   TestSupport.Sql.expectError 1416 (run sql) sql
 
+          testCase "union CTEs filter each branch using the common column names"
+          <| fun _ ->
+              let run =
+                  queryFixture
+                      [ "CREATE TABLE union_envelopes(id INT PRIMARY KEY)"
+                        "INSERT INTO union_envelopes VALUES (1),(2),(3)" ]
+              let shape = "ST_MakeEnvelope(POINT(id,0),POINT(IF(id>1,id+1,id),IF(id>1,1,0)))"
+              let left = $"SELECT id AS k,{shape} AS g FROM union_envelopes WHERE id<=2"
+              let right = $"SELECT id AS other,{shape} AS other_shape FROM union_envelopes WHERE id>=2"
+              let one = [ Some "2"; Some "POLYGON((2 0,3 0,3 1,2 1,2 0))" ]
+              for setOperator, expected in [ "UNION ALL", [ one; one ]; "UNION DISTINCT", [ one ] ] do
+                  let sql = $"WITH e AS ({left} {setOperator} {right}) SELECT k,ST_AsText(g) AS wkt FROM e WHERE k=2"
+                  Expect.equal (run sql) (ResultSet([ "k"; "wkt" ], expected)) sql
+              let renamed = $"WITH e(target,shape) AS ({left} UNION ALL {right}) SELECT x.target FROM e AS x WHERE x.target IN (2,3) ORDER BY x.target"
+              Expect.equal (run renamed) (ResultSet([ "target" ], [ [ Some "2" ]; [ Some "2" ]; [ Some "3" ] ])) renamed
+              let both = $"{left} UNION ALL {right}"
+              let impossible = $"WITH e AS ({both}) SELECT /*+ NO_DERIVED_CONDITION_PUSHDOWN(e) */ k FROM e WHERE k IS NULL"
+              Expect.equal (run impossible) (ResultSet([ "k" ], [])) impossible
+              let outsideInteger = $"WITH e AS ({both}) SELECT /*+ NO_DERIVED_CONDITION_PUSHDOWN(e) */ k FROM e WHERE k>2147483647"
+              Expect.equal (run outsideInteger) (ResultSet([ "k" ], [])) outsideInteger
+              let outerJoin = $"WITH e AS ({both}) SELECT a.id FROM union_envelopes a LEFT JOIN e ON a.id=e.k WHERE e.k=2"
+              Expect.equal (run outerJoin) (ResultSet([ "id" ], [ [ Some "2" ]; [ Some "2" ] ])) outerJoin
+              let constant = $"WITH e AS ({left} UNION ALL SELECT 999,ST_MakeEnvelope(POINT(0,0),POINT(0,0))) SELECT k FROM e WHERE k=2"
+              Expect.equal (run constant) (ResultSet([ "k" ], [ [ Some "2" ] ])) constant
+              run "CREATE TABLE union_amounts (id INT PRIMARY KEY, a DECIMAL(6,2), b DECIMAL(10,4))" |> ignore
+              run "INSERT INTO union_amounts VALUES (1,10.01,20.1234),(2,11.02,21.5678)" |> ignore
+              let scaled = "SELECT id AS k,a AS amount FROM union_amounts WHERE id=1 UNION ALL SELECT id,b FROM union_amounts WHERE id=2"
+              for hint in [ ""; "/*+ NO_DERIVED_CONDITION_PUSHDOWN(e) */" ] do
+                  let sql = $"WITH e AS ({scaled}) SELECT {hint} k,amount FROM e WHERE k=1"
+                  Expect.equal (run sql) (ResultSet([ "k"; "amount" ], [ [ Some "1"; Some "10.0100" ] ])) sql
+              for sql in
+                  [ $"WITH e AS ({both}) SELECT /*+ NO_DERIVED_CONDITION_PUSHDOWN(e) */ k FROM e WHERE k=2"
+                    $"WITH e AS ({both} LIMIT 3) SELECT k FROM e WHERE k=2"
+                    $"WITH e AS ({both}) SELECT a.k FROM e a JOIN e b ON b.k=a.k WHERE a.k=2"
+                    $"WITH e AS ({both}) SELECT a.id FROM union_envelopes a LEFT JOIN e ON a.id=e.k WHERE e.k=2 OR a.id=3"
+                    $"WITH e AS ({left} UNION ALL SELECT id+0.0,{shape} FROM union_envelopes) SELECT k FROM e WHERE k=2" ] do
+                  TestSupport.Sql.expectError 1416 (run sql) sql
+
           testCase "ST_Validate returns valid geometry and preserves polygon winding"
           <| fun _ ->
               let run = queryFixture [ "USE fsdb" ]

@@ -3745,6 +3745,27 @@ let tests =
                   let prepared = createPreparedStatement session sql ast count
                   Expect.equal (executePrepared session prepared [ VInt 1L; VInt 3L ] |> snd) expected sql
 
+          testCase "union filter pushdown distinguishes binary parameters and explicitly typed expressions"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE union_ids (id INT PRIMARY KEY)"
+              let session, _ = handle session "INSERT INTO union_ids VALUES (1), (2)"
+              let sql expression =
+                  let shape = "ST_MakeEnvelope(POINT(id,0),POINT(IF(id>1,id+1,id),IF(id>1,1,0)))"
+                  $"WITH e AS (SELECT id AS k,{shape} AS g FROM union_ids UNION ALL SELECT {expression} AS item,ST_MakeEnvelope(POINT(0,0),POINT(0,0))) SELECT k FROM e WHERE k=?"
+              let execute expression =
+                  let query = sql expression
+                  let ast, count = prepareStatementForSession session query |> Result.defaultWith (fun error -> failtestf "%A" error)
+                  let prepared = createPreparedStatement session query ast count
+                  executePrepared session prepared [ VInt 999L; VInt 2L ] |> snd
+              TestSupport.Sql.expectError 1416 (execute "?") "the binary marker retains its result category"
+              let expected = ResultSet([ "k" ], [ [ Some "2" ] ])
+              Expect.equal (execute "CAST(? AS SIGNED)") expected "an explicit cast permits pushdown"
+              let session, _ = handle session "SET @branch=999,@wanted=2"
+              let statement = sql "?"
+              let session, _ = handle session $"PREPARE text_union FROM '{statement}'"
+              Expect.equal (handle session "EXECUTE text_union USING @branch,@wanted" |> snd) expected "SQL EXECUTE pushes the integer value"
+
           testCase "a prepared ROW predicate binds each constructor field"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

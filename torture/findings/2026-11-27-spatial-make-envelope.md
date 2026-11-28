@@ -100,7 +100,7 @@ integer boundary comparisons, exponent literals, renamed outputs, explicit
 pushdown opt-outs, and text and binary prepared statements. Markers in
 both the CTE and its outer filter bind in SQL text order.
 
-Other computed outputs and union CTEs still need pushdown coverage.
+Other computed outputs still need pushdown coverage.
 Signed arithmetic that can overflow stays outside this optimization.
 In the overflow control, MySQL
 returns error 1690 for `BIGINT` maximum plus one and Fsdb returns the widened
@@ -131,3 +131,31 @@ filter can skip the materialization in the grouped cases described above.
 The same replay shows a materialized `AVG` precision gap. MySQL returns
 `4.3333` for a tested rollup row whose average is 13/3. Fsdb returns
 `4.333333333`. The difference also occurs with pushdown disabled.
+
+### Filters on set-operation CTEs
+
+Singly referenced `UNION ALL` and `UNION DISTINCT` CTEs can push exact
+numeric conditions through eligible branches by output position. The rewrite
+uses the first branch's names or the CTE column list. Different integer widths
+can share a predicate. Comparisons that change result family during type
+reconciliation stay outside, including signed and unsigned `BIGINT`
+that promote to `DECIMAL` in MySQL. An independent conjunct on a compatible
+column can still move before the set operation. [MySQL branch result-type check](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/item.cc#L993-L1058)
+
+The replay covers prepared outer bounds, grouped and constant branches,
+and a left join whose outer predicate rejects unmatched rows. A bare binary
+parameter projected by a branch retains its generic result category for
+pushdown. An explicit signed cast and the audited SQL `EXECUTE` integer
+assignment permit the rewrite. Shared CTEs and branch or set-operation
+`LIMIT` continue to block pushdown. The `INTERSECT ALL` and `EXCEPT ALL`
+controls also agree with MySQL.
+
+On a 2,000-row fixture split across two branches, Fsdb returned the same
+polygon with 3 examined rows, compared with 4,999 when pushdown was
+disabled. MySQL fetched the matching row before execution with pushdown
+and materialized all 2,000 rows when it was disabled.
+
+Decimal set columns use the combined declared scale when branch
+metadata supplies it, even if a branch returns zero rows. For example, a
+`DECIMAL(6,2)` value of `10.01` renders as `10.0100` when paired with a
+`DECIMAL(10,4)` branch. [MySQL decimal result shape](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/sql/item.cc#L7355-L7372)
