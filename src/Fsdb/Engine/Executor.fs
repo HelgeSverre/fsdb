@@ -39409,29 +39409,39 @@ let internal tryPrimaryRead protectGaps wait (store: Store) registry dbName (sel
                     else
                         tryClosedNumericValue context.Value (boundPlanningExpression predicate)
                         |> Option.map (fun value -> Lit(boolToValue (truthy value = Some true)))))
+            let projectionCoveredBySecondary () =
+                let projectedColumns =
+                    select.Projections |> List.collect (fun projection ->
+                        match projection.Expression with
+                        | Star _ -> List.map (fun (column: ColumnDef) -> column.Name) table.Columns
+                        | expression -> columnName expression |> Option.toList)
+                let covers (index: IndexDef) =
+                    let stores column =
+                        List.exists (equalsIgnoreCase column) keys
+                        || (index.KeyColumns |> List.exists (fun key ->
+                            key.PrefixLength.IsNone && key.Transform.IsNone && equalsIgnoreCase column key.Name))
+                    List.forall stores projectedColumns
+                List.exists covers secondaries.Value
+            let secondaryStoresColumn column =
+                secondaries.Value |> List.exists (fun index ->
+                    index.KeyColumns |> List.exists (fun key -> equalsIgnoreCase column key.Name))
+            let uncontestedPrimaryRange () =
+                match select.Where with
+                | Some predicate when fullScanShape && forced.IsNone ->
+                    // A secondary cannot replace this range without a covered projection or a bound of its own.
+                    not (projectionCoveredBySecondary ())
+                    && (referencedColumns predicate
+                        |> List.forall (predicateColumn >> Option.exists (secondaryStoresColumn >> not)))
+                | _ -> false
             let fullClusteredScan () =
                 if not protectGaps || not fullScanShape || not orderedRangeKeys then false
                 elif primaryIsOnlyChoice && select.Where.IsNone then true
                 else
-                    let projectedColumns =
-                        select.Projections |> List.collect (fun projection ->
-                            match projection.Expression with
-                            | Star _ -> List.map (fun (column: ColumnDef) -> column.Name) table.Columns
-                            | expression -> columnName expression |> Option.toList)
-                    let covers (index: IndexDef) =
-                        let stores column =
-                            List.exists (equalsIgnoreCase column) keys
-                            || (index.KeyColumns |> List.exists (fun key ->
-                                key.PrefixLength.IsNone && key.Transform.IsNone && equalsIgnoreCase column key.Name))
-                        List.forall stores projectedColumns
                     let isPrimaryKey column = List.exists (equalsIgnoreCase column) keys
-                    let indexed column =
-                        isPrimaryKey column
-                        || (secondaries.Value |> List.exists (fun index ->
-                            index.KeyColumns |> List.exists (fun key -> equalsIgnoreCase column key.Name)))
+                    let indexed column = isPrimaryKey column || secondaryStoresColumn column
                     knownHint ()
                     && (match select.Where, simplifiedPredicate.Value with
-                        | None, _ | _, Some(Lit(VInt 1L)) -> not (List.exists covers secondaries.Value)
+                        | None, _ | _, Some(Lit(VInt 1L)) -> not (projectionCoveredBySecondary ())
                         | _, Some reduced ->
                             let remaining = referencedColumns reduced
                             not remaining.IsEmpty && List.forall (predicateColumn >> Option.exists (indexed >> not)) remaining
@@ -39470,6 +39480,7 @@ let internal tryPrimaryRead protectGaps wait (store: Store) registry dbName (sel
                         match wait with
                         | WaitForLocks when protectGaps && orderedRangeKeys -> range () |> Option.map prepare
                         | _ when orderedRangeKeys && primaryIsOnlyChoice -> range () |> Option.map prepare
+                        | NoWait | SkipLocked when orderedRangeKeys && uncontestedPrimaryRange () -> range () |> Option.map prepare
                         | _ -> None))
     | _ -> None
 

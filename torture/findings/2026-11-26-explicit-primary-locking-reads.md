@@ -178,3 +178,17 @@ The MySQL comparison covered inserts into the scanned gaps, updates of
 rows rejected by the filter, and nonblocking reads against an already
 locked row. The remaining differences in these fixtures involve primary
 or secondary range access.
+
+## Nonblocking ranges with secondary indexes
+
+An unordered, unlimited primary-key range can still use the primary
+cursor when no secondary index covers its projection or provides a
+bound for its predicate. `NOWAIT` checks pending inserts and locked
+records in cursor order. `SKIP LOCKED` skips those entries and keeps
+the visited gap locks under REPEATABLE READ. At READ COMMITTED the
+same cursor leaves unrelated inserts free.
+
+The comparison covered ascending, descending, and composite keys, both
+lock strengths and nonblocking modes, and concurrent row updates and
+pending inserts. Covering indexes and indexes that can provide their own
+key bounds remain separate access paths.

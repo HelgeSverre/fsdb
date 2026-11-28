@@ -980,6 +980,9 @@ READ COMMITTED retains row-only locking for the audited reads.
 [Exact `NOWAIT` and `SKIP LOCKED` reads](torture/findings/2026-11-27-missing-primary-write-gaps.md#exact-nowait-and-skip-locked-reads)
 check pending inserts at the requested key and protect the audited gaps
 under REPEATABLE READ and SERIALIZABLE.
+[Nonblocking primary ranges with unrelated secondary indexes](torture/findings/2026-11-26-explicit-primary-locking-reads.md#nonblocking-ranges-with-secondary-indexes)
+take the primary cursor when no eligible secondary covers the projection
+or bounds the scan.
 [Ordered integer primary-key `NOWAIT` ranges with `LIMIT`](torture/findings/2026-11-27-missing-primary-write-gaps.md#ordered-range-limits)
 stop at the limit and keep the visited locks after a conflict. The
 corresponding `SKIP LOCKED` ranges count unlocked rows toward the limit

@@ -8637,6 +8637,43 @@ let tests =
                   Expect.equal wasBlocked (isolation <> "READ COMMITTED") $"{isolation}{indexes}{hint}{locking}"
                   Expect.equal (snd pending.Result) (Affected 1UL) "the final gap is writable after release"
 
+          testCase "nonblocking primary ranges ignore unrelated secondary indexes"
+          <| fun _ ->
+              let cases =
+                  [ "REPEATABLE READ", "FOR UPDATE SKIP LOCKED", true
+                    "READ COMMITTED", "FOR UPDATE SKIP LOCKED", false
+                    "REPEATABLE READ", "FOR SHARE NOWAIT", false
+                    "READ COMMITTED", "FOR SHARE NOWAIT", false ]
+              for isolation, locking, expectedWait in cases do
+                  let store = Fsdb.Storage.create ()
+                  let run session sql expected =
+                      let next, result = handle session sql
+                      Expect.equal result expected sql
+                      next
+                  let holder = run (create 1 store) "CREATE TABLE t(id INT PRIMARY KEY,k INT,n INT,KEY ix(k))" (Affected 0UL)
+                  let holder = run holder "INSERT INTO t VALUES(10,1,100),(20,2,200),(30,3,300),(40,4,400)" (Affected 4UL)
+                  let holder = run holder "BEGIN" (Affected 0UL)
+                  let holder = run holder "INSERT INTO t VALUES(25,5,250)" (Affected 1UL)
+                  let reader = run (create 2 store) $"SET SESSION TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                  let reader = run reader "BEGIN" (Affected 0UL)
+                  let reader, result = handle reader $"SELECT n FROM t WHERE id BETWEEN 11 AND 36 {locking}"
+                  match locking, result with
+                  | "FOR SHARE NOWAIT", Err(3572, _) -> ()
+                  | "FOR UPDATE SKIP LOCKED", ResultSet([ "n" ], rows) ->
+                      Expect.equal (List.sort rows) [ [ Some "200" ]; [ Some "300" ] ] locking
+                  | _ -> failtestf "unexpected result for %s in %s: %A" locking isolation result
+                  let writer = create 3 store
+                  let pending = Threading.Tasks.Task.Run(fun () -> handle writer "INSERT INTO t VALUES(26,6,260)")
+                  let blocked () = lock store.LockWaits.SyncRoot (fun () -> store.LockWaits.Edges.Count > 0)
+                  let observed = Threading.SpinWait.SpinUntil((fun () -> blocked () || pending.IsCompleted), TimeSpan.FromSeconds 3.0)
+                  let wasBlocked = blocked ()
+                  run reader "ROLLBACK" (Affected 0UL) |> ignore
+                  run holder "ROLLBACK" (Affected 0UL) |> ignore
+                  Expect.isTrue (pending.Wait(TimeSpan.FromSeconds 4.0)) "the insert finishes after the locks are released"
+                  Expect.isTrue observed "the insert either waits or finishes while the reader is open"
+                  Expect.equal wasBlocked expectedWait $"{isolation} {locking}"
+                  Expect.equal (snd pending.Result) (Affected 1UL) "insert succeeds"
+
           testCase "filtered primary locking scans protect gaps only when the scan runs"
           <| fun _ ->
               let cases =
