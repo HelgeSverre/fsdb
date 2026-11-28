@@ -980,6 +980,24 @@ let tests =
                         let result = call "ST_Difference" [ geometry left; geometry right ]
                         Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) "the retained ring follows MySQL's contact turns"
 
+                testCase "geographic polygon difference separates rings at inward contacts"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let source = geometry "POLYGON((0 0,4 0,4 1,4 3,4 4,0 4,0 0))"
+                    for clip, expected in
+                        [ "POLYGON((4 2,2 3,2 1,4 2))",
+                          "POLYGON((4 0,4 4,0 4,0 0,4 0),(4 2,2 1,2 3,4 2))"
+                          "MULTIPOLYGON(((4 1,3 1.4,3 0.6,4 1)),((4 3,3 3.4,3 2.6,4 3)))",
+                          "POLYGON((4 0,4 4,0 4,0 0,4 0),(4 1,3 0.6,3 1.4,4 1),(4 3,3 2.6,3 3.4,4 3))"
+                          "MULTIPOLYGON(((4 0.5,4 1.5,3 1.5,3 0.5,4 0.5)),((4 3,3 3.4,3 2.6,4 3)))",
+                          "POLYGON((4 1.5,4 4,0 4,0 0,4 0,4 0.5,3 0.5,3 1.5,4 1.5),(4 3,3 2.6,3 3.4,4 3))"
+                          "POLYGON((0 1.5,4 1.5,4 2.5,0 2.5,0 1.5))",
+                          "MULTIPOLYGON(((0 2.5,4 2.5,4 4,0 4,0 2.5)),((0 1.5,0 0,4 0,4 1,4 1.5,0 1.5)))" ] do
+                        let result = call "ST_Difference" [ source; geometry clip ]
+                        Expect.equal (call "ST_IsValid" [ result ]) (VInt 1L) "inward contacts produce valid rings"
+                        Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) "the rings follow MySQL's traversal"
+
                 testCase "geographic polygon crossings retain separately rounded contacts"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"

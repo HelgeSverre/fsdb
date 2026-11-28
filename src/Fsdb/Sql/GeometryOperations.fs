@@ -3855,7 +3855,7 @@ let private geographicSharedPolygonLines referenceSystem belongsToLeft shared fr
             |> geographicLineFragments referenceSystem true)
         |> distinctGeographicLines referenceSystem
 
-let private geographicDifferenceCrossingRanks flattening belongsToSource indexedPolygons fragments =
+let private rankGeographicDifferenceTurns flattening belongsToSource indexedPolygons turns =
     let sections = ResizeArray()
     let ringSections =
         [ for polygon, rings in indexedPolygons do
@@ -3873,6 +3873,39 @@ let private geographicDifferenceCrossingRanks flattening belongsToSource indexed
                   yield (if clockwise then List.rev indexes else indexes) |> List.toArray ]
         |> List.toArray
     let sectionOf (edge: GeographicPolygonFragment) = ringSections.[edge.Ring].[edge.EdgeIndex]
+
+    let sectionPair source clip = struct (sectionOf source, sectionOf clip)
+    let first, second = sections |> Seq.indexed |> Seq.toList |> List.partition (snd >> fst)
+    let rankOfPair =
+        if List.isEmpty turns || first.Length <= geographicPartitionThreshold
+           || second.Length <= geographicPartitionThreshold then fun _ -> 0L
+        else
+            let pairs = turns |> List.map (fun (_, source, clip) -> sectionPair source clip) |> Set.ofList
+            let ranks = Collections.Generic.Dictionary<struct (int * int), int64>()
+            let mutable position = 0L
+            let visit firstSection secondSection =
+                let pair = struct (firstSection, secondSection)
+                if pairs.Contains pair then ranks.TryAdd(pair, position) |> ignore
+                position <- position + 1L
+            let bounds =
+                List.map (fun (index, (_, edges)) -> index, geographicSectionBounds flattening edges)
+            visitGeographicSectionPairs visit (bounds first) (bounds second)
+            // Positions must stay comparable when separate rings request different pairs.
+            // Use the natural pair order for contacts outside the visited boxes.
+            fun pair ->
+                match ranks.TryGetValue pair with
+                | true, position -> position
+                | _ -> position
+
+    // Boost visits each pair of sections before the edges within it,
+    // with the source clockwise and the clipping ring reversed.
+    turns
+    |> List.map (fun (point, source, clip) ->
+        let pair = sectionPair source clip
+        point, (rankOfPair pair, pair, -source.EdgeIndex, clip.EdgeIndex))
+    |> Map.ofList
+
+let private geographicDifferenceCrossingRanks flattening belongsToSource indexedPolygons fragments =
     let crossings =
         fragments
         |> List.filter (fun fragment -> not fragment.StartsEdge)
@@ -3884,34 +3917,9 @@ let private geographicDifferenceCrossingRanks flattening belongsToSource indexed
             | [ sourceEdge ], [ clipEdge ] -> Some(point, sourceEdge, clipEdge)
             | _ -> None)
 
-    let sectionPair source clip = struct (sectionOf source, sectionOf clip)
-    let first, second = sections |> Seq.indexed |> Seq.toList |> List.partition (snd >> fst)
-    let rankOfPair =
-        if List.isEmpty crossings || first.Length <= geographicPartitionThreshold
-           || second.Length <= geographicPartitionThreshold then fun _ -> 0
-        else
-            let pairs = crossings |> List.map (fun (_, source, clip) -> sectionPair source clip) |> Set.ofList
-            let ranks = Collections.Generic.Dictionary<struct (int * int), int>()
-            let visit firstSection secondSection =
-                let pair = struct (firstSection, secondSection)
-                if pairs.Contains pair then ranks.TryAdd(pair, ranks.Count) |> ignore
-            let bounds =
-                List.map (fun (index, (_, edges)) -> index, geographicSectionBounds flattening edges)
-            visitGeographicSectionPairs visit (bounds first) (bounds second)
-            // Keep any crossing the clipping pass found outside the section boxes.
-            for struct (source, clip) in pairs do visit source clip
-            fun pair -> ranks.[pair]
+    rankGeographicDifferenceTurns flattening belongsToSource indexedPolygons crossings
 
-    // Boost visits each pair of sections before the edges within it,
-    // with the source clockwise and the clipping ring reversed.
-    crossings
-    |> List.map (fun (point, source, clip) ->
-        let pair = sectionPair source clip
-        point, (rankOfPair pair, pair, -source.EdgeIndex, clip.EdgeIndex))
-    |> Map.ofList
-
-let private geographicDifferenceRingContacts referenceSystem belongsToSource fragments =
-    let source, clip = List.partition (_.Polygon >> belongsToSource) fragments
+let private geographicDifferenceRingContacts referenceSystem source clip =
     // The source walks clockwise and the clip counterclockwise. Offer the
     // incoming edge on each side of the contact.
     let clipAtVertex = clip |> List.groupBy (_.Segment >> snd) |> Map.ofList
@@ -3943,6 +3951,83 @@ let private geographicDifferenceRingContacts referenceSystem belongsToSource fra
             let turns = contact |> List.map snd |> Set.ofList
             segments, (start, turns)))
     |> Map.ofList
+
+let private differenceContactSides source clip =
+    let sourceFragments = source |> List.map (fun part -> part.Segment, part) |> Map.ofList
+    let reversedClip = clip |> List.map (fun part -> (snd part.Segment, fst part.Segment), part) |> Map.ofList
+    sourceFragments, reversedClip
+
+let private differenceTouchingHoles (sourceFragments: Map<_,_>) (clipFragments: Map<_,GeographicPolygonFragment>) =
+    let sourceVertices = sourceFragments |> Map.keys |> Seq.map fst |> Set.ofSeq
+    clipFragments
+    |> Map.toList
+    |> List.groupBy (snd >> _.Ring)
+    |> List.choose (fun (ring, fragments) ->
+        let segments = fragments |> List.map fst |> Set.ofList
+        match segments |> Set.map fst |> Set.intersect sourceVertices |> Set.toList with
+        | [ point ] -> Some(segments, (ring, point))
+        | _ -> None)
+    |> Map.ofList
+
+let private splitDifferenceTouchingHoles (touchingHoles: Map<_,_>) ring =
+    let identify points = Map.tryFind (points |> List.pairwise |> Set.ofList) touchingHoles
+    // Peel off only complete reversed clipping rings. The remainder can still
+    // include a notch or another attached hole.
+    let rec separate detached current =
+        let vertices = List.take (List.length current - 1) current
+        let seen = Collections.Generic.Dictionary<_,_>()
+        let cut =
+            vertices
+            |> List.indexed
+            |> List.tryPick (fun (index, point) ->
+                if seen.TryAdd(point, index) then None
+                else
+                    let first = seen.[point]
+                    if index - first < 3 || vertices.Length - (index - first) < 3 then None
+                    else
+                        let prefix, rest = List.splitAt first vertices
+                        let loop, suffix = List.splitAt (index - first) rest
+                        let inner = loop @ [ point ]
+                        let outer = prefix @ suffix @ [ List.head current ]
+                        match identify inner, identify outer with
+                        | Some(id, _), None -> Some(outer, (id, inner))
+                        | None, Some(id, _) -> Some(inner, (id, outer))
+                        | _ -> None)
+        match cut with
+        | Some(rest, hole) -> separate (hole :: detached) rest
+        | None -> current :: (detached |> List.sortBy fst |> List.map snd)
+    separate [] ring
+
+let private geographicIncomingFragments fragments =
+    fragments
+    |> Map.toList
+    |> List.map (fun ((point, _), (fragment: GeographicPolygonFragment)) -> (fragment.Ring, point), fragment)
+    |> Map.ofList
+
+let private differenceJoinStart rankTurns sourceIncoming clipIncoming (sourceFragments: Map<_,GeographicPolygonFragment>) (clipFragments: Map<_,GeographicPolygonFragment>) ring =
+    let edges = List.pairwise ring
+    let joins = List.pairwise (List.last edges :: edges)
+    let turn point (source: GeographicPolygonFragment) (clip: GeographicPolygonFragment) =
+        let previous incoming (fragment: GeographicPolygonFragment) =
+            Map.tryFind (fragment.Ring, point) incoming |> Option.defaultValue fragment
+        point, previous sourceIncoming source, previous clipIncoming clip
+    let turns =
+        joins
+        |> List.choose (fun (prior, next) ->
+            match Map.tryFind prior clipFragments, Map.tryFind next sourceFragments with
+            | Some clip, Some source -> Some(turn (fst next) source clip)
+            | _ ->
+                match Map.tryFind prior sourceFragments, Map.tryFind next clipFragments with
+                | Some source, Some clip -> Some(turn (fst next) source clip)
+                | _ -> None)
+        |> function
+            | [] -> Map.empty
+            | turns -> rankTurns turns
+    turns
+    |> Map.toList
+    |> List.sortBy snd
+    |> List.tryHead
+    |> Option.map (fun (point, order) -> order, (point, turns |> Map.keys |> Set.ofSeq))
 
 let private walkGeographicRingContacts referenceSystem (start, turns: Set<_>) ring =
     let clockwise = ring |> List.rev |> List.take (ring.Length - 1)
@@ -4044,9 +4129,16 @@ let private tryGeographicPolygonBoundaryOverlay referenceSystem kind srid left r
                 |> List.choose (fun point -> Map.tryFind point differenceCrossings |> Option.map (fun order -> order, point))
                 |> List.sortBy fst
                 |> List.tryHead
-        let contactedRings =
-            if kind = OverlayKind.Difference then geographicDifferenceRingContacts referenceSystem belongsToLeft fragments
-            else Map.empty
+        let sourceParts, clipParts =
+            if kind = OverlayKind.Difference then List.partition (_.Polygon >> belongsToLeft) fragments
+            else [], []
+        let contactedRings = geographicDifferenceRingContacts referenceSystem sourceParts clipParts
+        let sourceFragments, clipFragments = differenceContactSides sourceParts clipParts
+        let sourceIncoming = lazy (geographicIncomingFragments sourceFragments)
+        let clipIncoming = lazy (geographicIncomingFragments clipFragments)
+        let touchingHoles =
+            if Map.isEmpty contactedRings then Map.empty
+            else differenceTouchingHoles sourceFragments clipFragments
         let startOutputRing ring =
             // Keep the original vertex for a complete ring, even when its winding changed.
             let sourceStart = Map.tryFind (Set.ofList ring) sourceRingStarts
@@ -4058,19 +4150,30 @@ let private tryGeographicPolygonBoundaryOverlay referenceSystem kind srid left r
                     let before, after = List.splitAt (List.findIndex ((=) start) vertices) vertices
                     after @ before @ [ start ]
                 | _ -> ring
-            let started =
-                if Map.isEmpty contactedRings then started
+            let contacts =
+                if Map.isEmpty contactedRings then None
                 else
-                    // A complete directed source boundary can keep its fill
-                    // and still require traversal through exterior contacts.
-                    match Map.tryFind (ring |> List.pairwise |> Set.ofList) contactedRings with
-                    | Some contact -> walkGeographicRingContacts referenceSystem contact started
-                    | None -> started
-            Option.map fst crossing, started
+                    let segments = ring |> List.pairwise |> Set.ofList
+                    Map.tryFind segments contactedRings
+                    |> Option.orElseWith (fun () -> Map.tryFind segments touchingHoles |> Option.map (fun (_, point) -> point, Set.singleton point))
+            let joining =
+                if contacts.IsSome || Map.isEmpty sourceFragments || Map.isEmpty clipFragments || sourceStart.IsSome || crossing.IsSome then None
+                else
+                    let rankTurns = rankGeographicDifferenceTurns flattening belongsToLeft indexedPolygons
+                    differenceJoinStart rankTurns sourceIncoming.Value clipIncoming.Value sourceFragments clipFragments ring
+            let started =
+                match contacts |> Option.orElseWith (fun () -> Option.map snd joining) with
+                | Some contact -> walkGeographicRingContacts referenceSystem contact started
+                | None -> started
+            let order = Option.map fst crossing |> Option.orElseWith (fun () -> Option.map fst joining)
+            order, started
         let orderOutputRings rings =
+            let rings =
+                if Map.isEmpty touchingHoles then rings
+                else List.collect (splitDifferenceTouchingHoles touchingHoles) rings
             let started = List.map startOutputRing rings
             // Complete rings come before rings built by walking the crossings.
-            let ordered = if Map.isEmpty differenceCrossings then started else List.sortBy fst started
+            let ordered = if kind = OverlayKind.Difference then List.sortBy fst started else started
             List.map snd ordered
 
         boundary

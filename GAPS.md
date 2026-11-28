@@ -3657,8 +3657,10 @@ implementation effort:
    [Geographic difference ring starts](torture/findings/2026-11-28-spatial-area.md#ring-starts-in-geographic-differences)
    and clipped member order now follow proper crossings in the audited
    cases. [Exterior contacts](torture/findings/2026-11-28-spatial-area.md#exterior-contacts-in-geographic-differences)
-   also follow the start and closing rules on retained rings. Inward
-   contacts, broader member ordering, and polar endpoints remain open.
+   also follow the start and closing rules on retained rings.
+   [Inward contacts](torture/findings/2026-11-28-spatial-area.md#inward-contacts-in-geographic-differences)
+   preserve valid touching holes and order rings from the audited
+   compound clips. Broader member ordering and polar endpoints remain open.
    [Geographic collection difference](torture/findings/2026-11-26-geographic-polygon-union.md#mixed-collection-difference)
    normalizes areas, lines, and points before applying the mask.
    [Geographic collection intersection](torture/findings/2026-11-26-geographic-polygon-union.md#mixed-collection-intersection)

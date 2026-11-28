@@ -202,9 +202,25 @@ vertex matches rose from 248 to 800 without losing any previous match.
 In a separate 192-case run with multiple contacts and existing holes,
 matches rose from 84 to 108. The 24 gains came from clips touching
 the unfilled side of an existing hole.
-The 80 outstanding results in the 880-case replay are inward contacts.
-A point contact can produce a touching hole. All 40 such oracle outputs pass `ST_IsValid`,
-whereas Fsdb currently returns a single self-touching ring that fails it.
-The other 40 results are valid in both engines and differ in how the
-walk through a notch starts and removes collinear vertices.
 [Boost ring traversal and closing cleanup](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/overlay/traversal_ring_creator.hpp)
+
+### Inward contacts in geographic differences
+
+An inward point contact can leave a valid hole that touches another
+ring at one vertex. Fsdb previously walked through both boundaries as
+a single self-touching ring. It now separates a loop when its edges
+match a complete reversed clipping ring at a known contact. The same
+step can separate multiple holes and keep a notch on the remaining
+boundary. All 40 previously invalid outputs in the 880-case replay
+now pass `ST_IsValid` with the same rounded area.
+
+When a clip shares an edge from the inside, the result may switch
+between source and clipping edges or split into multiple polygons.
+Fsdb ranks those switches by the incoming edges in the original rings,
+using the same section order as for proper crossings. It removes
+collinear vertices as the walk reaches each contact.
+
+The 880-case replay now matches all ordered vertices within `1e-8`
+degrees. The 192 compound cases also match, up from 108, including
+two touching holes, two notches, opposite-edge cuts, and a notch
+combined with a separate touching hole.
