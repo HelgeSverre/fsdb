@@ -3611,6 +3611,29 @@ let private formatResultForProtocol metadata (typedRows: Value[] list) result =
         ResultSetWithValues(columns, rows, rawResultColumns result, typedRows)
     | _ -> result
 
+let private safeUpdatesEnabled session =
+    match sessionValue session "sql_safe_updates" with
+    | Some("1" | "ON") -> true
+    | _ -> false
+
+let private bindMutationReadView (session: Session) statement =
+    match session.Tx, Executor.tryDirectMutationRead statement with
+    | Some transaction, Some read when transaction.Isolation = RepeatableRead
+                                       && Storage.hasConsistentReadView transaction.Snapshot
+                                       && not (insideFunctionOrTrigger session) ->
+        let dbName = session.Database |> Option.defaultValue defaultDatabase
+        let database = read.Source.Database |> Option.defaultValue dbName
+        let revision store =
+            Storage.tableSnapshot store database read.Source.Table
+            |> Result.toOption |> Option.map _.SchemaRevision
+        let bound =
+            if revision transaction.Snapshot = revision session.Store then session
+            else
+                let baseCatalog, snapshot = rebaseTransactionSnapshot session transaction
+                { session with Tx = Some { transaction with BaseCatalog = baseCatalog; Snapshot = snapshot } }
+        bound, Executor.planMutationReadView (safeUpdatesEnabled bound) (Session.currentStore bound) (registryFor bound) dbName read statement
+    | _ -> session, Ok(Executor.MutationScan statement)
+
 let private executeParsedStatement readOverlay accesses (session: Session) (stmt: Statement) : Session * QueryResult =
     let stmt = withSqlSelectLimit session stmt
     stmt
@@ -3659,7 +3682,9 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
         if retainsTransactionMetadata current then
             TableLocks.retainOpenedStatementAccess current.Store (Session.currentStore current) current.ConnectionId accesses
 
-    let execute session =
+    let execute statement session =
+        let originalStatement = stmt
+        let stmt = statement
         let store = Session.currentStore session
         let lockingReadView () =
             match session.Tx with
@@ -3840,9 +3865,8 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
                         withExecutionLimits (fun () ->
                             let ids = session.LastInsertId, session.LastGeneratedId
                             let safety =
-                                match sessionValue session "sql_safe_updates" with
-                                | Some("1" | "ON") -> Executor.validateSafeMutation store registry dbName stmt
-                                | _ -> Ok()
+                                if safeUpdatesEnabled session then Executor.validateSafeMutation store registry dbName originalStatement
+                                else Ok()
 
                             match safety with
                             | Ok() -> Executor.executeAs store registry dbName ids foundRows (accountOf session) stmt
@@ -3939,15 +3963,20 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
     | Some _ ->
         let executed, result =
             match access with
-            | Error _ -> execute session
+            | Error _ -> execute stmt session
             | Ok() ->
                 let started = if insideFunctionOrTrigger session then session else startTransactionStatement session
                 let executed, result =
                     try
-                        started
-                        |> prepareTransactionWrite None stmt
-                        |> syncTransactionView
-                        |> execute
+                        match bindMutationReadView started stmt with
+                        | _, Error error -> started, error
+                        | bound, Ok(Executor.EmptyMutationScan statement) ->
+                            bound |> syncTransactionView |> execute statement
+                        | bound, Ok(Executor.MutationScan statement) ->
+                            bound
+                            |> prepareTransactionWrite None statement
+                            |> syncTransactionView
+                            |> execute statement
                     with
                     | Storage.LockWaitTimeout _ | Storage.LockNowait _ ->
                         retainOpenedAccess started
@@ -3981,7 +4010,7 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
                 Storage.bumpAutoIncrementsIntoChanged executed.Store transaction.BaseCatalog transaction.Snapshot.Catalog)
 
         executed, result
-    | None -> execute session
+    | None -> execute stmt session
 
 let private lockedExecutionResult session = function
     | Ok result -> result

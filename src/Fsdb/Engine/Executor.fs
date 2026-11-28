@@ -1243,6 +1243,9 @@ let private directOnlyRestriction = System.Threading.AsyncLocal<string option>()
 
 let private hasReadViewRestrictions (store: Store) =
     store.HasUnavailableReadIndexes || not store.UnavailableReadLayouts.IsEmpty
+
+let private changedReadDefinition =
+    Err(1412, "Table definition has changed, please retry transaction")
 let private triggerRowScope = System.Threading.AsyncLocal<TriggerRowScope option>()
 let private observedTriggerWrites = System.Threading.AsyncLocal<(Value[] * HashSet<int>) option>()
 let private viewCheckScope = System.Threading.AsyncLocal<ViewCheckScope option>()
@@ -16987,7 +16990,7 @@ and private snapshotLayoutReadError
     if needsUnavailableLayout then
         match describeQueryColumnDescriptorsInScope store registry dbName (QueryBody(PlainSelect select)) outer (fun _ -> Ok()) with
         | Error(InvalidDescription error) -> Some error
-        | _ -> Some(Err(1412, "Table definition has changed, please retry transaction"))
+        | _ -> Some changedReadDefinition
     else None
 
 and private runUnmergedSelectStmt
@@ -17442,7 +17445,7 @@ and private snapshotIndexReadError store registry dbName (table: Table) tref (se
         else
             match describeQueryColumnDescriptorsInScope store registry dbName (QueryBody(PlainSelect select)) outer (fun _ -> Ok()) with
             | Error(InvalidDescription error) -> Some error
-            | _ -> Some(Err(1412, "Table definition has changed, please retry transaction"))
+            | _ -> Some changedReadDefinition
 
 and private snapshotIndexCovers (table: Table) (select: SelectStmt) name =
     let indexed =
@@ -40752,6 +40755,132 @@ let internal transactionWritePlan temporaryCatalog store registry dbName stateme
     let pointSearches = ResizeArray<string * string * string>()
     let targets = transactionWriteTargetsIn temporaryCatalog pointSearches.Add store registry dbName statement
     targets, List.ofSeq pointSearches
+
+type internal DirectMutationRead =
+    { Source: TableRef
+      Predicate: Expr option
+      OrderBy: OrderKey list
+      Limit: Expr option
+      WithSource: TableRef -> Statement }
+
+let internal tryDirectMutationRead = function
+    | Update ({ Ctes = []; Joins = [] } as update) ->
+        Some
+            { Source = update.From
+              Predicate = update.Where
+              OrderBy = update.OrderBy
+              Limit = update.Limit
+              WithSource = fun source -> Update { update with From = source } }
+    | Delete ({ Ctes = [] } as delete) ->
+        match delete.Source with
+        | SingleDeleteTable source
+        | MultiDeleteSource(FromTable source, []) ->
+            Some
+                { Source = source
+                  Predicate = delete.Where
+                  OrderBy = delete.OrderBy
+                  Limit = delete.Limit
+                  WithSource = fun source ->
+                      let target =
+                          match delete.Source with
+                          | SingleDeleteTable _ -> SingleDeleteTable source
+                          | MultiDeleteSource _ -> MultiDeleteSource(FromTable source, [])
+                      Delete { delete with Source = target } }
+        | _ -> None
+    | _ -> None
+
+type internal MutationReadPlan =
+    | MutationScan of Statement
+    | EmptyMutationScan of Statement
+
+let internal planMutationReadView safeUpdates store registry dbName (read: DirectMutationRead) statement =
+    let source = read.Source
+    let database = source.Database |> Option.defaultValue dbName
+    match tableSnapshot store database source.Table with
+    | Error _ -> Ok(MutationScan statement)
+    | Ok table ->
+        let unavailableLayout = Storage.lockingReadLayoutUnavailable store database source.Table table
+        let unavailableNames =
+            if unavailableLayout then Set.empty
+            else Storage.lockingReadUnavailableIndexes store database source.Table table
+        if not unavailableLayout && unavailableNames.IsEmpty then Ok(MutationScan statement)
+        else
+            let query =
+                { mutationSourceQuery (Some(FromTable source)) [] [] [] with
+                    Where = read.Predicate
+                    OrderBy = read.OrderBy
+                    Limit = read.Limit }
+            let bindingError (code, message) = Err(code, message)
+            let validate () =
+                validateTableIndexHints source table
+                |> Result.bind (fun () ->
+                    match statement with
+                    | Update update ->
+                        update.Assignments
+                        |> traverse (fun assignment ->
+                            resolveAssignableColumn table.Columns source.Table assignment.Column
+                            |> Result.mapError (function
+                                | UnknownColumn name -> bindingError (unknownColumn name)
+                                | error -> storageErr error))
+                        |> Result.map ignore
+                    | _ -> Ok())
+                |> Result.bind (fun () ->
+                    validatePreparedBindings store registry dbName statement
+                    |> Result.mapError bindingError)
+                |> Result.bind (fun () ->
+                    if read.OrderBy.IsEmpty then Ok()
+                    else validateBindings store registry dbName dbName (Select query) |> Result.mapError bindingError)
+                |> Result.bind (fun () ->
+                    if safeUpdates then validateSafeMutation store registry dbName statement |> Result.mapError bindingError
+                    else Ok())
+
+            validate ()
+            |> Result.bind (fun () ->
+                let impossiblePredicate () =
+                    read.Predicate |> Option.exists (fun predicate ->
+                        let context = contextFactory store registry dbName Map.empty Map.empty None [||]
+                        not ((possibleConditionTruths context predicate).Contains(Some true)))
+                let unavailable (name: string) = Set.contains (name.ToLowerInvariant()) unavailableNames
+                let forcedNew scope name = unavailable name && isForcedIndex scope source name
+                let impossibleRange () =
+                    let bounds = lazy (rangeLookupBounds BareOrQualifiedColumn store registry table source read.Predicate)
+                    let leadingKeys =
+                        table.Indexes
+                        |> List.choose (fun index ->
+                            if index.Visible && index.Kind = BTree
+                               && (unavailableLayout || forcedNew IndexJoin index.Name) then
+                                index.KeyColumns |> List.tryHead |> Option.filter (fun part -> part.Transform.IsNone) |> Option.map _.Name
+                            else None)
+                    (primaryKeyColumns table |> List.truncate 1) @ leadingKeys
+                    |> List.exists (fun column -> numericKeyRangeIsEmpty table column bounds)
+
+                let opensUnavailableIndex () =
+                    let filterAccess =
+                        tryPhysicalAccessInTableWith CandidateNarrowing store registry table source read.Predicate
+                        |> Option.exists (physicalAccessKeyNames >> List.exists (forcedNew IndexJoin))
+                    let orderedAccess =
+                        if filterAccess || read.OrderBy.IsEmpty || read.Limit.IsNone then false
+                        else
+                            tryIndexOrder store registry dbName source query
+                            |> Option.exists (fun plan -> forcedNew IndexOrderBy plan.KeyName)
+                    filterAccess || orderedAccess
+
+                if zeroLimitWithoutOffset read.Limit None || impossiblePredicate () || impossibleRange () then
+                    Ok(EmptyMutationScan statement)
+                elif unavailableLayout || (not source.IndexHints.IsEmpty && opensUnavailableIndex ()) then Error changedReadDefinition
+                else
+                    // A current clustered scan can use the transaction's latest row versions.
+                    let hints =
+                        source.IndexHints |> List.choose (fun hint ->
+                            let names = hint.Indexes |> List.filter (unavailable >> not)
+                            if names.IsEmpty && not hint.Indexes.IsEmpty then None else Some { hint with Indexes = names })
+                    let ignored =
+                        table.Indexes |> List.choose (fun index ->
+                            if index.Visible && unavailable index.Name then Some index.Name else None)
+                    let hints =
+                        if ignored.IsEmpty then hints
+                        else hints @ [ { Kind = IgnoreIndex; Scope = None; Indexes = ignored } ]
+                    Ok(MutationScan(read.WithSource { source with IndexHints = hints })))
 
 let internal tryUnindexedWriteScan protectGaps store registry dbName statement =
     let source =

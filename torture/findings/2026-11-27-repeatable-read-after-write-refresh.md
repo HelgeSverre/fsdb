@@ -157,8 +157,7 @@ NOWAIT and SKIP LOCKED. READ COMMITTED can open the new key.
 
 The comparison exercises equality hits and misses, range misses,
 covering and noncovering scans, ORDER BY with and without LIMIT, and
-empty predicates. The remaining differences in this fixture concern
-index hints on UPDATE.
+empty predicates.
 
 ### Locking reads of new table layouts
 
@@ -173,3 +172,18 @@ The comparison includes in-place key changes, instant column addition,
 COPY, DROP and CREATE, and a rename that preserves the layout. Joined
 and nested locking reads apply the same check. A metadata probe leaves
 the actual subquery to acquire its locks or report a layout error.
+
+### Direct updates and deletes
+
+UPDATE and DELETE bind the current definition before planning row locks.
+An update or delete that opens a layout created after its repeatable-read
+view returns 1412. A forced probe through a new secondary index also
+returns 1412, even if the target row is locked by another transaction.
+Clustered writes can wait on that row and then modify its current version.
+`LIMIT 0`, impossible ranges, and false predicates can eliminate the
+write scan. Column binding and safe-update errors retain their precedence.
+
+The comparison includes ordered UPDATE with LIMIT, DELETE with a single
+source and an explicit target, and clustered writes using USE or IGNORE
+hints. Joined writes, insert sources, and duplicate-handling reads remain
+open.

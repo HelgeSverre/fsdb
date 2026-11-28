@@ -1071,7 +1071,9 @@ Audited single-table SELECTs now distinguish inherited B-tree keys from
 new keys, including renames, covering scans, point misses, and ordered
 limits. Single-table locking reads also check the selected key before
 acquiring row locks while keeping current row versions for clustered
-reads. Broader access plans, mutation hints, and prepared or EXPLAIN
+reads. Direct UPDATE and DELETE bind current index hints and reject
+unavailable access paths before taking row locks. Broader access plans,
+joined mutations, insert and duplicate handling, and prepared or EXPLAIN
 paths still differ.
 [Point UPDATE and DELETE](torture/findings/2026-11-27-current-point-writes.md)
 can seek an exact unique key absent from the transaction's old write

@@ -16896,6 +16896,64 @@ let tests =
                   let reader = run reader "ROLLBACK" (Affected 0UL)
                   run reader "SELECT id FROM t FOR UPDATE" (ResultSet([ "id" ], [ [ Some "1" ] ])) |> ignore
 
+          testCase "writes distinguish a new forced index probe from a clustered write"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let writer = run (create 1 store) "CREATE TABLE t(id INT PRIMARY KEY, k INT, payload INT)" (Affected 0UL)
+              let writer = run writer "INSERT INTO t VALUES(1,10,100),(2,20,200)" (Affected 2UL)
+              let reader = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let reader = run reader "START TRANSACTION WITH CONSISTENT SNAPSHOT" (Affected 0UL)
+              let writer = run writer "UPDATE t SET payload=300 WHERE id=1" (Affected 1UL)
+              let writer = run writer "ALTER TABLE t ADD INDEX ix(k), ALGORITHM=INPLACE" (Affected 0UL)
+              let writer = run writer "START TRANSACTION" (Affected 0UL)
+              let writer = run writer "UPDATE t SET payload=400 WHERE id=1" (Affected 1UL)
+              let unavailable = Err(1412, "Table definition has changed, please retry transaction")
+              let reader = run reader "UPDATE t FORCE INDEX(ix) SET payload=payload+1 WHERE k=10" unavailable
+              let reader = run reader "UPDATE t FORCE INDEX(ix) SET payload=payload+1 WHERE k=999" unavailable
+              let reader = run reader "DELETE t FROM t FORCE INDEX(ix) WHERE k=10" unavailable
+              let reader = run reader "UPDATE t FORCE INDEX(ix) SET payload=payload+1 WHERE k>10 AND k<5" (Affected 0UL)
+              let reader = run reader "UPDATE t FORCE INDEX(ix) SET payload=payload+1 WHERE k=10 LIMIT 0" (Affected 0UL)
+              let reader = run reader "UPDATE t FORCE INDEX(ix) SET payload=payload+1 WHERE id=1"
+                               (Err(1205, "Lock wait timeout exceeded; try restarting transaction"))
+              run writer "ROLLBACK" (Affected 0UL) |> ignore
+              let reader = run reader "UPDATE t FORCE INDEX(ix) SET payload=payload+1 ORDER BY k LIMIT 1" unavailable
+              let reader = run reader "UPDATE t IGNORE INDEX(ix) SET payload=payload+1 WHERE k=10" (Affected 1UL)
+              let reader = run reader "SELECT payload FROM t WHERE id=1" (ResultSet([ "payload" ], [ [ Some "301" ] ]))
+              let reader = run reader "SET SESSION sql_safe_updates=1" (Affected 0UL)
+              let reader = run reader "UPDATE t USE INDEX(ix) SET payload=payload+1 WHERE k=10" (Affected 1UL)
+              run reader "ROLLBACK" (Affected 0UL) |> ignore
+
+          testCase "updates and deletes cannot open a layout created after the read view"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let reader = run (create 1 store) "START TRANSACTION WITH CONSISTENT SNAPSHOT" (Affected 0UL)
+              let writer = run (create 2 store) "CREATE TABLE t(id INT PRIMARY KEY, payload INT)" (Affected 0UL)
+              run writer "INSERT INTO t VALUES(1,100)" (Affected 1UL) |> ignore
+              let unavailable = Err(1412, "Table definition has changed, please retry transaction")
+              let reader = run reader "UPDATE t SET payload=200 WHERE id=1" unavailable
+              let reader = run reader "UPDATE t SET payload=200 WHERE id=999" unavailable
+              let reader = run reader "DELETE FROM t WHERE id=1" unavailable
+              let reader = run reader "UPDATE t SET payload=200 WHERE id>10 AND id<5" (Affected 0UL)
+              let reader = run reader "UPDATE t SET payload=200 WHERE id=1 LIMIT 0" (Affected 0UL)
+              let reader = run reader "DELETE FROM t WHERE FALSE" (Affected 0UL)
+              let reader = run reader "UPDATE t SET absent=5 WHERE id=1"
+                               (Err(1054, "Unknown column 'absent' in 'field list'"))
+              let reader = run reader "UPDATE t SET payload=200 ORDER BY absent LIMIT 1"
+                               (Err(1054, "Unknown column 'absent' in 'order clause'"))
+              let reader = run reader "SET SESSION sql_safe_updates=1" (Affected 0UL)
+              let reader = run reader "DELETE FROM t"
+                               (Err(1175, "You are using safe update mode and you tried to update a table without a WHERE that uses a KEY column. "))
+              let reader = run reader "ROLLBACK" (Affected 0UL)
+              run reader "SELECT payload FROM t WHERE id=1" (ResultSet([ "payload" ], [ [ Some "100" ] ])) |> ignore
+
           testCase "transaction access modes, chaining, and SET CHARACTER SET are enforced"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

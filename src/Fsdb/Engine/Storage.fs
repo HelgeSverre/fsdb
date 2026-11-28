@@ -1194,6 +1194,9 @@ let private tryConsistentReadView (store: Store) =
         | true, catalog -> Some catalog
         | false, _ -> None)
 
+let internal hasConsistentReadView store =
+    (tryConsistentReadView store).IsSome
+
 let internal transactionGapLocks (store: Store) =
     match store.TransactionLocks with
     | None -> []
