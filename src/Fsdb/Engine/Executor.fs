@@ -885,6 +885,7 @@ type private AggregateBindingScope =
 
 type private StatementMemo =
     { FromSubqueries: Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>
+      MaterializedDerivedSources: HashSet<FromItem>
       SharedDerivedGroups: Dictionary<string, (CteGroup * SelectOrUnion) list>
       SharedDerivedRows: Dictionary<CteGroup, Result<ColumnDef list * Value[] list, QueryResult>>
       ExpressionSubqueries: Dictionary<SelectStmt, MemoizedSubquery>
@@ -927,6 +928,7 @@ let private sharedViewCteScope = System.Threading.AsyncLocal<SharedViewCteScope 
 
 let private freshStatementMemo () =
     { FromSubqueries = Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
+      MaterializedDerivedSources = HashSet<FromItem>(HashIdentity.Reference)
       SharedDerivedGroups = Dictionary<string, (CteGroup * SelectOrUnion) list>(System.StringComparer.OrdinalIgnoreCase)
       SharedDerivedRows = Dictionary<CteGroup, Result<ColumnDef list * Value[] list, QueryResult>>()
       ExpressionSubqueries = Dictionary<SelectStmt, MemoizedSubquery>(HashIdentity.Reference)
@@ -4475,6 +4477,19 @@ let private tryDirectColumnForExpr (ctx: EvalContext) (expr: Expr) : (int * Colu
             |> Option.map (fun index -> offset + index, columns.[index]))
     | _ -> None
 
+let private timestampColumnPosition ctx expr =
+    match tryDirectColumnForExpr ctx expr with
+    | Some(index, { Type = TTimestamp _ }) -> Some index
+    | _ -> None
+
+let private storedTimestampAt (row: Value[]) index =
+    match row.[index] with
+    | VTimestamp _ as value -> Some value
+    | _ -> None
+
+let private storedTimestampForExpr ctx expr =
+    timestampColumnPosition ctx expr |> Option.bind (storedTimestampAt ctx.Row)
+
 let rec private tryProjectionAlias (ctx: EvalContext) (name: string) =
     match unqualifiedColumn ctx (name.ToLowerInvariant()) with
     | UnboundColumn when (tryRoutineVariable name).IsNone ->
@@ -4864,6 +4879,11 @@ let private queryBodyCanMerge registry = function
     | UnionSelect _ -> false
 
 type private RelationMaterialization = AllowMerge | ForceMaterialization
+
+type private SelectOutput = ReadValues | MergedRelationValues
+
+let private derivedIsMaterialized source =
+    (currentStatementMemo ()).MaterializedDerivedSources.Contains source
 
 let private withDeclaredGeometryType (column: ColumnDef) (definition: ColumnDef) =
     match column.Type, definition.Type with
@@ -11069,7 +11089,9 @@ and private tryDecorrelatedExists (outer: EvalContext) (select: SelectStmt) : Re
 
 and private evalOrderKey (ctx: EvalContext) (expr: Expr) : Result<Value * Collation.Collation option, EvalError> =
     let orderCtx = { ctx with Clause = OrderClause }
-    evalExpr orderCtx expr |> Result.map (orderValueForExpr orderCtx expr)
+    match storedTimestampForExpr orderCtx expr with
+    | Some value -> Ok(value, None)
+    | None -> evalExpr orderCtx expr |> Result.map (orderValueForExpr orderCtx expr)
 
 and private validateIndexHintNames (tableRef: TableRef) tableName known : Result<unit, QueryResult> =
     tableRef.IndexHints
@@ -11167,7 +11189,7 @@ and private resolveTableRef
                             if equalsIgnoreCase view.Algorithm "TEMPTABLE" then ForceMaterialization
                             else AllowMerge
                         withFunctionDatabase (Some view.Schema) (fun () ->
-                            resolveRelationBody viewStore viewRegistry view.Schema view.Columns materialization body None)
+                            resolveRelationBodyWithOutput MergedRelationValues viewStore viewRegistry view.Schema view.Columns materialization body None)
                         |> Result.mapError (function
                             | Err(1054, _) | Err(1146, _) | Err(1305, _) | Err(1356, _) ->
                                 Err(invalidViewError view.Schema view.Name)
@@ -12484,9 +12506,9 @@ and private resolveFromItem (store: Store) (registry: Registry) (dbName: string)
                     if expectedBody = body then Some group else None)
             | _ -> None
         match sharedGroup with
-        | Some group ->
+        | Some group when not (derivedIsMaterialized item) ->
             getMemoized statement.SharedDerivedRows group (fun () -> resolveFromSubquery store registry dbName item None)
-        | None ->
+        | _ ->
             getMemoized statement.FromSubqueries item (fun () -> resolveFromSubquery store registry dbName item None)
 
 and private resolveFromItemWithOuter store registry dbName outer item =
@@ -12511,7 +12533,9 @@ and private resolveFromSubquery
         |> Result.map (fun source -> source.Columns, List.ofSeq source.Rows)
     | FromTable _
     | FromJsonTable _ -> resolveFromItem store registry dbName item
-    | FromSubquery(body, _) -> resolveRelationBody store registry dbName [] AllowMerge body outer
+    | FromSubquery(body, _) ->
+        let materialization = if derivedIsMaterialized item then ForceMaterialization else AllowMerge
+        resolveRelationBodyWithOutput MergedRelationValues store registry dbName [] materialization body outer
     | FromLateral(body, _) ->
         let enclosing =
             outer |> Option.orElseWith (fun () -> Some(contextFactory store registry dbName Map.empty Map.empty None [||]))
@@ -12530,7 +12554,11 @@ and private materializeRelationValue columnName rowNumber value =
             Value.encodedString charset bytes.[0 .. offset - 1]
     | _ -> Value.materialize value
 
-and private resolveRelationBody store registry dbName columnNames materialization body outer : Result<ColumnDef list * Value[] list, QueryResult> =
+and private resolveRelationBody store registry dbName columnNames materialization body outer =
+    resolveRelationBodyWithOutput ReadValues store registry dbName columnNames materialization body outer
+
+and private resolveRelationBodyWithOutput output store registry dbName columnNames materialization body outer
+    : Result<ColumnDef list * Value[] list, QueryResult> =
     let describedColumns = describeQueryColumnsInScope store registry dbName (QueryBody body) outer (fun _ -> Ok()) |> Result.toOption
     let columnNamesAreValid =
         match describedColumns with
@@ -12542,9 +12570,11 @@ and private resolveRelationBody store registry dbName columnNames materializatio
     match columnNamesAreValid with
     | Error error -> Error error
     | Ok() ->
+        let merged = materialization = AllowMerge && queryBodyCanMerge registry body
         let result, metadata, typedRows =
             match body with
-            | PlainSelect select -> runSelectStmt store registry dbName select outer
+            | PlainSelect select ->
+                runSelectStmtWithOutput (if merged then output else ReadValues) store registry dbName select outer
             | UnionSelect(first, rest, orderBy, limit, offset) ->
                 runUnionStmtWithOuter store registry dbName first rest orderBy limit offset outer
 
@@ -12611,8 +12641,7 @@ and private resolveRelationBody store registry dbName columnNames materializatio
                         | TGeometry _ -> Some(index, column)
                         | _ -> None)
                 let geometryError =
-                    if typedRows.IsEmpty || geometryColumns.IsEmpty
-                       || (materialization = AllowMerge && queryBodyCanMerge registry body) then
+                    if typedRows.IsEmpty || geometryColumns.IsEmpty || merged then
                         None
                     else
                         // Materialized geometry uses the same encoding and subtype rules as stored columns.
@@ -16023,6 +16052,9 @@ and private runSelectStmt
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
+    runSelectStmtWithOutput ReadValues store registry dbName select outer
+
+and private runSelectStmtWithOutput output store registry dbName (select: SelectStmt) outer =
     let pendingBefore =
         if select.Limit.IsSome then Some(pendingCorrelatedNumericWarningCheckpoint ())
         else None
@@ -16034,8 +16066,8 @@ and private runSelectStmt
         if select.Limit.IsSome && not select.CalculateFoundRows && not suppressReadRowLocks.Value
            && zeroLimitWithoutOffset select.Limit select.Offset then
             DynamicScope.withThreadValue suppressReadRowLocks true (fun () ->
-                runSelectStmtCore store registry dbName select outer)
-        else runSelectStmtCore store registry dbName select outer
+                runSelectStmtCore output store registry dbName select outer)
+        else runSelectStmtCore output store registry dbName select outer
     if hasZeroRowLimit select then
         pendingBefore |> Option.iter rollbackCorrelatedNumericWarnings
         rangesBefore |> Option.iter (fun before ->
@@ -16050,6 +16082,7 @@ and private runSelectStmt
     result
 
 and private runSelectStmtCore
+    output
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -16070,11 +16103,11 @@ and private runSelectStmtCore
         elif not select.Ctes.IsEmpty then
             let body = { select with Ctes = [] }
             let ctes = referencedCtes select.Ctes (selectOrUnionTableNames (PlainSelect body))
-            withCteScope store registry dbName ctes outer (fun () -> runSelectStmt store registry dbName body outer)
+            withCteScope store registry dbName ctes outer (fun () -> runSelectStmtWithOutput output store registry dbName body outer)
         elif outer.IsSome then
             let canWarn = not (hasZeroRowLimit select)
             DynamicScope.withValue correlatedNumericWarningScope canWarn (fun () ->
-                runUnmergedSelectStmt store registry dbName select outer)
+                runUnmergedSelectStmt output store registry dbName select outer)
         else
         match tryMergeDirectView store registry dbName select with
         | Error error -> error, [], []
@@ -16084,10 +16117,11 @@ and private runSelectStmtCore
             if depth >= Limits.maxViewMetadataNesting then
                 Err(1436, "Thread stack overrun while expanding stored views"), [], []
             else
-                DynamicScope.withValue viewMergeDepth (depth + 1) (fun () -> runSelectStmt store registry dbName merged outer)
-        | Ok None -> runUnmergedSelectStmt store registry dbName select outer
+                DynamicScope.withValue viewMergeDepth (depth + 1) (fun () -> runSelectStmtWithOutput output store registry dbName merged outer)
+        | Ok None -> runUnmergedSelectStmt output store registry dbName select outer
 
 and private runUnmergedSelectStmt
+    output
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -16096,7 +16130,7 @@ and private runUnmergedSelectStmt
     : QueryResult * ColumnMetadata list * Value[] list =
     DynamicScope.withValue lockingReadRows Map.empty (fun () ->
         if select.Locking.IsEmpty then
-            runUnlockedSelectStmt store registry dbName select outer
+            runUnlockedSelectStmt output store registry dbName select outer
         else
             let initial = lockingReadStore.Value |> Option.map (fun (_, refresh) -> refresh ()) |> Option.defaultValue store
 
@@ -16113,7 +16147,7 @@ and private runUnmergedSelectStmt
                         current, select
 
                 DynamicScope.withValue lockingReadRows rows (fun () ->
-                    runUnlockedSelectStmt current registry dbName selected outer))
+                    runUnlockedSelectStmt output current registry dbName selected outer))
 
 /// SQL comparison negation preserves NULL, so its inverse range is safe for
 /// index planning while the original predicate remains the row-level filter.
@@ -16396,6 +16430,7 @@ and private transferNumericJoinIn
     | _ -> select
 
 and private runUnlockedSelectStmt
+    output
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -16425,13 +16460,13 @@ and private runUnlockedSelectStmt
                   rewritten |> Result.map (fun select -> prepared, select)) with
         | Error error -> error, [], []
         | Ok(prepared, rewritten) ->
-            runSelect store registry dbName prepared.Columns (qualifierRanges prepared.Sources) prepared.Rows ArbitraryGroupRows rewritten outer
+            runSelect output store registry dbName prepared.Columns (qualifierRanges prepared.Sources) prepared.Rows ArbitraryGroupRows rewritten outer
     | Some(FromItem.Grouped(source, joins)) ->
-        runUnlockedSelectStmt store registry dbName { select with From = Some source; Joins = joins @ select.Joins } outer
-    | _ when not matchNodes.IsEmpty -> runFullTextSelect store registry dbName select matchNodes outer
+        runUnlockedSelectStmt output store registry dbName { select with From = Some source; Joins = joins @ select.Joins } outer
+    | _ when not matchNodes.IsEmpty -> runFullTextSelect output store registry dbName select matchNodes outer
     | None ->
         countExaminedRow ()
-        runSelect store registry dbName [] Map.empty [ [||] ] ArbitraryGroupRows select outer
+        runSelect output store registry dbName [] Map.empty [ [||] ] ArbitraryGroupRows select outer
     | Some(FromItem.Qualified baseQualifier as fromItem) ->
         let runResolved
             groupInputOrder
@@ -16504,7 +16539,7 @@ and private runUnlockedSelectStmt
                         match rewritten with
                         | Error error -> error, [], []
                         | Ok select ->
-                            runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows groupInputOrder select outer
+                            runSelect output store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows groupInputOrder select outer
 
         let runArbitrary columns (rows: Value[] seq) physicalTable resolvedSelect =
             runResolved ArbitraryGroupRows columns rows physicalTable resolvedSelect
@@ -18306,7 +18341,7 @@ and private tryPhysicalProjectionUncached
 
     match source with
     | FromTable tableRef -> tableProjection tableRef
-    | FromSubquery(PlainSelect select, _) when simpleSelect select ->
+    | FromSubquery(PlainSelect select, _) when simpleSelect select && not (derivedIsMaterialized source) ->
         match select.From with
         | Some(FromItem.Qualified sourceQualifier as innerSource) ->
             resolveInput innerSource
@@ -22896,7 +22931,10 @@ and private resolveOrderKey
         resolveOrderAliasValue ctx.ColumnIndex ctx.Qualifiers projections name outputCols
         |> Result.bind (function
         | Some(sourceExpr, value) ->
-            Ok(orderValueForExpr { ctx with Clause = OrderClause } sourceExpr value)
+            let orderCtx = { ctx with Clause = OrderClause }
+            match storedTimestampForExpr orderCtx sourceExpr with
+            | Some stored -> Ok(stored, None)
+            | None -> Ok(orderValueForExpr orderCtx sourceExpr value)
         | None -> evalOrderKey ctx (Col name))
     | e -> evalOrderKey ctx e
 
@@ -25465,7 +25503,7 @@ and private runWindowedSelect
                 qualifiers
                 |> Map.add "__fsdb_window__" (syntheticColumns, columns.Length)
 
-            runSelect store registry dbName extendedColumns extendedQualifiers extendedRows ArbitraryGroupRows select' outer
+            runSelect ReadValues store registry dbName extendedColumns extendedQualifiers extendedRows ArbitraryGroupRows select' outer
 
 and private fullTextScoresForTable
     (dbName: string)
@@ -25898,6 +25936,7 @@ and private fullTextMutationSources
 /// the ordinary join and select pipeline, so score evaluation does not
 /// duplicate SQL execution semantics.
 and private runFullTextSelect
+    output
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -25912,7 +25951,7 @@ and private runFullTextSelect
     | None, _ -> unsupported ()
     | _, Error error -> error, [], []
     | Some(FromItem.Grouped(source, joins)), _ ->
-        runFullTextSelect store registry dbName { select with From = Some source; Joins = joins @ select.Joins } matchNodes outer
+        runFullTextSelect output store registry dbName { select with From = Some source; Joins = joins @ select.Joins } matchNodes outer
     | Some(FromItem.Qualified originalQualifier as originalFromItem), Ok sources ->
         match matchNodes |> traverse (fun node -> fullTextOwnerOf sources node |> Result.map (fun owner -> owner, node)) with
         | Error error -> error, [], []
@@ -26387,6 +26426,7 @@ and private runFullTextSelect
                                 // Bind and describe COUNT through the normal aggregate path,
                                 // without fetching rows already counted by the full-text index.
                                 runSelect
+                                    output
                                     store
                                     registry
                                     dbName
@@ -26417,6 +26457,7 @@ and private runFullTextSelect
                             result, metadata, outputRows
 
 and private runSelect
+    output
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -26661,8 +26702,27 @@ and private runSelect
     let outputFormats = outputColumnFormats (ctxFor (probeRow columns)) columns projections
     let outputWireOverrides = outputColumnWireOverrides (ctxFor (probeRow columns)) columns select
 
-    let pairOf (outputCols: (string * Value) list) : string option list * Value[] =
-        renderOutputCols outputFormats outputCols, outputCols |> List.map snd |> Array.ofList
+    // A merged column keeps its UTC instant for subsequent ORDER BY keys.
+    // Its projection and other expressions still read session-local time.
+    let timestampOutputs =
+        match output with
+        | ReadValues -> []
+        | MergedRelationValues ->
+            let context = ctxFor (probeRow columns)
+            orderProjections
+            |> List.indexed
+            |> List.choose (fun (outputIndex, projection) ->
+                timestampColumnPosition context projection.Expression
+                |> Option.map (fun inputIndex -> outputIndex, inputIndex))
+
+    let pairOf row (outputCols: (string * Value) list) : string option list * Value[] =
+        let values = outputCols |> List.map snd |> Array.ofList
+        for outputIndex, inputIndex in timestampOutputs do
+            storedTimestampAt row inputIndex |> Option.iter (fun value -> values.[outputIndex] <- value)
+        renderOutputCols outputFormats outputCols, values
+
+    let projectPaired row =
+        projectRow row |> Result.map (pairOf row)
 
     // DISTINCT uses comparison keys for text while preserving the first row's spelling.
     let distinctKeyOf (row: Value[]) (outputCols: (string * Value) list) : string option list =
@@ -26740,7 +26800,7 @@ and private runSelect
                 else
                     projectRow row
                     |> Result.bind (fun outputCols ->
-                        orderKeysOf row outputCols |> Result.map (fun keys -> Some(keys, pairOf outputCols, distinctKeyOf row outputCols))))
+                        orderKeysOf row outputCols |> Result.map (fun keys -> Some(keys, pairOf row outputCols, distinctKeyOf row outputCols))))
 
         let evalDirectOrderKeys orderExpressions row =
             matches row
@@ -26765,7 +26825,7 @@ and private runSelect
                 matches row
                 |> Result.bind (fun keep ->
                     if keep then
-                        projectRow row |> Result.map (fun outputCols -> distinctKeyOf row outputCols, pairOf outputCols) |> Result.map Some
+                        projectRow row |> Result.map (fun outputCols -> distinctKeyOf row outputCols, pairOf row outputCols) |> Result.map Some
                     else
                         Ok None)
 
@@ -26801,10 +26861,9 @@ and private runSelect
                 | Ok top ->
                     let selected = top |> List.map snd |> applyTrackedLimitOffset select.Offset limit offset
 
-                    match selected |> traverse projectRow with
+                    match selected |> traverse projectPaired with
                     | Error(code, message) -> Err(code, message), [], []
-                    | Ok projected ->
-                        let limited = projected |> List.map pairOf
+                    | Ok limited ->
                         ResultSet(colNames, limited |> List.map fst), typesOf (limited |> List.map snd), limited |> List.map snd
             | None ->
                 match rows |> boundedTopN capacity (fun (ka, _, _) (kb, _, _) -> compareByOrderKeys dirs ka kb) evalKeyed with
@@ -26829,10 +26888,9 @@ and private runSelect
                         slice.CountBeforeProjection <- Some(uint64 sorted.Length)
                         sorted |> applyLimitOffset slice.Limit slice.Offset
                     | _ -> sorted |> applyTrackedLimitOffset select.Offset limit offset
-                match selected |> traverse projectRow with
+                match selected |> traverse projectPaired with
                 | Error(code, message) -> Err(code, message), [], []
-                | Ok projected ->
-                    let limited = projected |> List.map pairOf
+                | Ok limited ->
                     ResultSet(colNames, limited |> List.map fst), typesOf (limited |> List.map snd), limited |> List.map snd
 
         // Honest barrier: `ORDER BY` with no `LIMIT` (nothing to bound a
@@ -26941,11 +26999,13 @@ let private queryJoinPlanning store registry schema originalWhere (select: Selec
 let private sourceCanMerge registry (source: OptimizerHintScopes.SourceReference) =
     not source.Recursive && queryBodyCanMerge registry source.Body
 
+let private sourceStrategy (pending: OptimizerHintResolution.ExecutionDiagnostics) blockNumber (alias: string) =
+    Map.tryFind (blockNumber, Some(alias.ToLowerInvariant())) pending.SourceStrategies
+    |> Option.orElseWith (fun () -> Map.tryFind (blockNumber, None) pending.SourceStrategies)
+
 let private blockSourceMaterializes registry (pending: OptimizerHintResolution.ExecutionDiagnostics) (block: OptimizerHintScopes.Block) =
     block.Source |> Option.exists (fun source ->
-        let strategy = block.ParentBlock |> Option.bind (fun parent ->
-            Map.tryFind (parent, Some(source.Alias.ToLowerInvariant())) pending.SourceStrategies
-            |> Option.orElseWith (fun () -> Map.tryFind (parent, None) pending.SourceStrategies))
+        let strategy = block.ParentBlock |> Option.bind (fun parent -> sourceStrategy pending parent source.Alias)
         strategy = Some OptimizerHintResolution.MaterializeSource || not (sourceCanMerge registry source))
 
 let private blockJoinPlanning store registry schema (pending: OptimizerHintResolution.ExecutionDiagnostics) (block: OptimizerHintScopes.Block) =
@@ -26960,10 +27020,20 @@ let private blockJoinPlanning store registry schema (pending: OptimizerHintResol
 
 let private emitJoinHintDiagnostics store registry schema statement =
     let pending = DynamicScope.valueOrDefault OptimizerHintResolution.emptyExecution joinHintDiagnostics
+    let scopes = lazy (OptimizerHintScopes.collect OptimizerHintScopes.BoundStatement statement)
+    if not pending.SourceStrategies.IsEmpty then
+        let materialized = (currentStatementMemo ()).MaterializedDerivedSources
+        for block in scopes.Value.Numbered do
+            for source in block.Sources do
+                match source with
+                | FromSubquery(_, alias)
+                    when sourceStrategy pending block.Number alias = Some OptimizerHintResolution.MaterializeSource ->
+                    materialized.Add source |> ignore
+                | _ -> ()
     if not pending.Warnings.IsEmpty then
         // A statement can enter the executor again for a mutation rewrite or stored body.
         joinHintDiagnostics.Value <- OptimizerHintResolution.emptyExecution
-        let scopes = OptimizerHintScopes.collect OptimizerHintScopes.BoundStatement statement
+        let scopes = scopes.Value
         let eliminated = HashSet<int>()
         let merged = HashSet<int>()
         let skipped = HashSet<int>()

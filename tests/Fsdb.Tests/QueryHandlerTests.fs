@@ -5566,6 +5566,7 @@ let tests =
                   [ "SELECT id FROM temp_envelopes"
                     "SELECT ST_AsText(shape) FROM constant_envelope"
                     $"SELECT id FROM ({source} LIMIT 1) AS d WHERE id=3"
+                    $"SELECT /*+ NO_MERGE(d) */ ST_AsText(shape) FROM ({source}) AS d ORDER BY id"
                     $"WITH e AS ({source} LIMIT 1) SELECT id FROM e"
                     $"SELECT ST_AsText(shape) FROM (SELECT DISTINCT {shape} AS shape FROM envelope_ids) AS d"
                     $"SELECT ST_AsText(shape) FROM ({source} WHERE id=1 UNION ALL {source} WHERE id=2) AS d"

@@ -43,6 +43,24 @@ FROM picks p LEFT JOIN LATERAL (
     WHERE e.instant=p.instant AND e.enabled>0 ORDER BY e.ordinal DESC,e.id LIMIT 2
 ) q ON TRUE ORDER BY p.id,q.chosen;
 
+SELECT p.id,
+    (SELECT e.id FROM events e IGNORE INDEX(by_slot)
+     WHERE e.instant=p.wall AND e.enabled>0 ORDER BY e.instant,e.ordinal DESC,e.id LIMIT 1) AS direct,
+    (SELECT e.id FROM (SELECT * FROM events IGNORE INDEX(by_slot)) e
+     WHERE e.instant=p.wall AND e.enabled>0 ORDER BY e.instant,e.ordinal DESC,e.id LIMIT 1) AS merged,
+    (SELECT /*+ NO_MERGE(e) */ e.id FROM (SELECT * FROM events IGNORE INDEX(by_slot)) e
+     WHERE e.instant=p.wall AND e.enabled>0 ORDER BY e.instant,e.ordinal DESC,e.id LIMIT 1) AS materialized
+FROM picks p ORDER BY p.id;
+
+CREATE ALGORITHM=MERGE VIEW merged_events AS SELECT * FROM events IGNORE INDEX(by_slot);
+CREATE ALGORITHM=TEMPTABLE VIEW materialized_events AS SELECT * FROM events IGNORE INDEX(by_slot);
+SELECT p.id,
+    (SELECT e.id FROM merged_events e
+     WHERE e.instant=p.wall AND e.enabled>0 ORDER BY e.instant,e.ordinal DESC,e.id LIMIT 1) AS merged,
+    (SELECT e.id FROM materialized_events e
+     WHERE e.instant=p.wall AND e.enabled>0 ORDER BY e.instant,e.ordinal DESC,e.id LIMIT 1) AS materialized
+FROM picks p ORDER BY p.id;
+
 PREPARE timezone_lookup FROM '
     SELECT p.id,(SELECT e.id FROM events e FORCE INDEX(by_slot)
         WHERE e.instant<=>p.instant AND e.enabled>0 ORDER BY e.ordinal DESC,e.id LIMIT 1 OFFSET 1) AS chosen

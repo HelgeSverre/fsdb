@@ -685,8 +685,9 @@ diagnostics, and table creation from the result are covered. Constant
 envelopes built from point constructors or geometry literals can probe
 the spatial index. Structurally materialized derived tables, CTEs, and
 `ALGORITHM=TEMPTABLE` views enforce the declared polygon subtype.
-Materialization requested through `NO_MERGE` or `optimizer_switch`
-remains open.
+`NO_MERGE` also enforces the subtype for derived tables.
+Materialization requested through `NO_MERGE` on CTEs or through
+`optimizer_switch` remains open.
 
 [`ST_Validate`](torture/findings/2026-11-27-spatial-validate.md) preserves
 valid geometry and shares topology checks with `ST_IsValid`. The
@@ -3201,8 +3202,9 @@ implementation effort:
    [Correlated TIMESTAMP equality](torture/findings/2026-11-27-correlated-timestamp-top-n.md)
    uses session-local bounds to seek a UTC key, including the audited
    daylight-saving fold, derived sources, and filesort. The fixture
-   examines 16 rows, down from 5,064. Ordering a scan by the stored
-   TIMESTAMP through a fold and broader TIMESTAMP range seeks remain open.
+   examines 16 rows, down from 5,064. [Filesort through the same fold](torture/findings/2026-11-27-correlated-timestamp-top-n.md#sorting-the-two-occurrences)
+   now uses the stored instant for direct and merged TIMESTAMP columns.
+   Broader TIMESTAMP range seeks remain open.
    [Derived projections with renamed columns](torture/findings/2026-11-27-correlated-derived-top-n.md)
    can retain the physical index order through audited filters and aliases.
    The scalar fixture examines 40 rows, down from 1,610.

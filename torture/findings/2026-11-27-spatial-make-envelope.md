@@ -62,7 +62,7 @@ An empty source or an unused CTE can skip validation. A union of an
 envelope and bare NULL uses the general geometry type and accepts both
 values. [MySQL derived-table materialization](https://dev.mysql.com/doc/refman/8.4/en/derived-table-optimization.html)
 
-MySQL enforces the subtype when an eligible derived table or CTE is
-materialized through `NO_MERGE`. Fsdb currently returns the point in
-those cases. MySQL also supports disabling `derived_merge` through
-`optimizer_switch`. Support for that variable remains open in Fsdb.
+An eligible derived table materialized through `NO_MERGE` also returns
+error 1416 in Fsdb and MySQL. MySQL applies the same check to a CTE
+reference materialized by the hint. Fsdb still returns the point in that
+case. Disabling `derived_merge` through `optimizer_switch` remains open.

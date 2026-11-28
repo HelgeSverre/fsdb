@@ -90,6 +90,38 @@ let tests =
               let fixedOffset = execute session "SET time_zone = '-04:00'"
               check fixedOffset "instant" [ both "13" "13"; both "23" "23"; both "33" "33"; both "43" "43" ]
 
+          testCase "TIMESTAMP filesort distinguishes both occurrences of a repeated local time"
+          <| fun _ ->
+              let session =
+                  [ "SET time_zone = '+00:00'"
+                    "CREATE TABLE events (id INT PRIMARY KEY, instant TIMESTAMP, KEY by_slot(instant))"
+                    "INSERT INTO events VALUES (2,'2024-11-03 05:30:00'),(1,'2024-11-03 06:30:00')"
+                    "CREATE TABLE picks (wall DATETIME)"
+                    "INSERT INTO picks VALUES ('2024-11-03 01:30:00')"
+                    "CREATE ALGORITHM=MERGE VIEW merged_events AS SELECT id,instant FROM events IGNORE INDEX(by_slot)"
+                    "CREATE ALGORITHM=TEMPTABLE VIEW materialized_events AS SELECT id,instant FROM events IGNORE INDEX(by_slot)"
+                    "SET time_zone = 'Fsdb/Test_Eastern'" ]
+                  |> List.fold execute (populatedSession ())
+
+              let check sql ids =
+                  match handle session sql |> snd with
+                  | ResultSet(_, rows) -> Expect.equal (rows |> List.map List.last) (ids |> List.map Some) sql
+                  | other -> failtestf "Expected rows for %s, got %A" sql other
+
+              let direct = "events e IGNORE INDEX(by_slot)"
+              let derived = "(SELECT id,instant AS stamp FROM events IGNORE INDEX(by_slot)) e"
+              check $"SELECT e.instant AS stamp,e.id FROM {direct} ORDER BY stamp,id" [ "2"; "1" ]
+              check $"SELECT e.instant,e.id FROM {direct} ORDER BY 1,id LIMIT 1" [ "2" ]
+              check $"SELECT id FROM {direct} ORDER BY CAST(e.instant AS DATETIME),id" [ "1"; "2" ]
+              check $"SELECT id FROM {derived} ORDER BY e.stamp,id" [ "2"; "1" ]
+              check $"SELECT /*+ NO_MERGE(e) */ id FROM {derived} ORDER BY e.stamp,id" [ "1"; "2" ]
+              check $"SELECT (SELECT id FROM {direct} WHERE e.instant=p.wall ORDER BY e.instant,id LIMIT 1) FROM picks p" [ "2" ]
+              check $"SELECT (SELECT id FROM {derived} WHERE e.stamp=p.wall ORDER BY e.stamp,id LIMIT 1) FROM picks p" [ "2" ]
+              expectRow session
+                  ("SELECT (SELECT id FROM merged_events e WHERE e.instant=p.wall ORDER BY e.instant,id LIMIT 1), "
+                   + "(SELECT id FROM materialized_events e WHERE e.instant=p.wall ORDER BY e.instant,id LIMIT 1) FROM picks p")
+                  [ "2"; "1" ]
+
           testCase "named zones use catalog transitions including daylight saving gaps and folds" <| fun _ ->
               let session = populatedSession ()
               expectRow session
