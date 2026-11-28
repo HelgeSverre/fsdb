@@ -35,6 +35,21 @@ let tests =
                   Expect.sequenceEqual bytes [| 0uy; 255uy |] "caller mutation cannot change stored bytes"
               | other -> failtestf "expected unchanged binary row, got %A" other
 
+          testCase "embedded Execute runs transaction starts directly"
+          <| fun _ ->
+              use connection = Fsdb.Db.create () |> Fsdb.Db.connect
+              Expect.equal (connection.Query "CREATE TABLE t(id INT PRIMARY KEY)") (Affected 0UL) "create fixture"
+              for command in [ "BEGIN"; "START TRANSACTION WITH CONSISTENT SNAPSHOT" ] do
+                  Expect.equal (connection.Execute(command, [])) (Affected 0UL) command
+                  Expect.equal (connection.Execute("INSERT INTO t VALUES (?)", [ VInt 1L ])) (Affected 1UL) "write inside the transaction"
+                  Expect.equal (connection.Execute("ROLLBACK", [])) (Affected 0UL) "roll back through Execute"
+                  Expect.equal (connection.Query "SELECT id FROM t") (ResultSet([ "id" ], [])) "rollback discards the row"
+                  match connection.Prepare command with
+                  | Error error -> Expect.equal error.Code 1295 "transaction starts are unavailable as reusable commands"
+                  | Ok prepared ->
+                      use _command = prepared
+                      failtestf "expected preparation of %s to return 1295" command
+
           testCase "embedded async query observes cancellation and typed values"
           <| fun _ ->
               use conn = Fsdb.Db.create () |> Fsdb.Db.connect

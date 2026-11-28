@@ -5405,6 +5405,16 @@ let private applyTransactionCompletion completion readOnly isolation (characteri
     { session with
         CloseAfterReply = resolveCompletionDirective defaultRelease completion.Release }
 
+let private finishOrdinaryTransaction completion finish (session: Session) =
+    match xaAssociation session with
+    | Some(_, state) -> session, xaRmFail (xaStateName state)
+    | None ->
+        let readOnly = session.Tx |> Option.exists _.ReadOnly
+        let isolation = session.Tx |> Option.map _.Isolation
+        let characteristics = session.TransactionTracking.Characteristics
+        let ended = finish session
+        applyTransactionCompletion completion readOnly isolation characteristics ended, Affected 0UL
+
 let private storedCommentLiteral sqlMode (text: string) =
     let options = SqlMode.parserOptionsFor sqlMode
     let escaped =
@@ -5532,24 +5542,8 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
                         Diagnostics.warning 138 "InnoDB: WITH CONSISTENT SNAPSHOT was ignored because this phrase can only be used with REPEATABLE READ isolation level."
                         started
                 snapshot, Affected 0UL
-    | Commit completion ->
-        match xaAssociation session with
-        | Some(_, state) -> session, xaRmFail (xaStateName state)
-        | None ->
-            let readOnly = session.Tx |> Option.map _.ReadOnly |> Option.defaultValue false
-            let characteristics = session.TransactionTracking.Characteristics
-            let isolation = session.Tx |> Option.map _.Isolation
-            let committed = commitSession session
-            applyTransactionCompletion completion readOnly isolation characteristics committed, Affected 0UL
-    | Rollback completion ->
-        match xaAssociation session with
-        | Some(_, state) -> session, xaRmFail (xaStateName state)
-        | None ->
-            let readOnly = session.Tx |> Option.map _.ReadOnly |> Option.defaultValue false
-            let characteristics = session.TransactionTracking.Characteristics
-            let isolation = session.Tx |> Option.map _.Isolation
-            let rolledBack = rollbackSession session
-            applyTransactionCompletion completion readOnly isolation characteristics rolledBack, Affected 0UL
+    | Commit completion -> finishOrdinaryTransaction completion commitSession session
+    | Rollback completion -> finishOrdinaryTransaction completion rollbackSession session
     | Savepoint name -> savepoint name session
     | Release name -> releaseSavepoint name session
     | Use dbName ->
@@ -6329,17 +6323,25 @@ let renumberPlaceholders (stmt: Statement) : Statement * int =
     let dense = indices |> Seq.mapi (fun index original -> original, index) |> Map.ofSeq
     mapPlaceholders (fun original -> Placeholder dense.[original]) stmt, indices.Count
 
-/// Validates COM_STMT_PREPARE without executing text-probed commands.
+type private PreparationPurpose =
+    | ReusablePreparation
+    | ImmediateExecution
+
+/// Validates SQL before binding parameters or dispatching text-probed commands.
 let private prepareStatementWithOptions
+    purpose
     (options: Parser.ParserOptions)
     (sql: string)
     : Result<Statement option * int, int * string> =
     let trimmed = sql.Trim().TrimEnd(';').Trim()
     let command = Parser.stripVersionCommentsWithOptions options trimmed
     let probe = tryProbe options trimmed
-    let beginsTransaction = match probe with Some(Begin _) -> true | _ -> false
+    let unsupportedCommand =
+        match purpose, probe with
+        | ReusablePreparation, Some(Begin _) -> true
+        | _ -> hasKeywordPrefix "LOAD DATA" command || hasKeywordPrefix "HANDLER" command || hasKeywordPrefix "XA" command
 
-    if beginsTransaction || hasKeywordPrefix "LOAD DATA" command || hasKeywordPrefix "HANDLER" command || hasKeywordPrefix "XA" command then
+    if unsupportedCommand then
         Result.Error(1295, "This command is not supported in the prepared statement protocol yet")
     elif probe.IsSome then
         match probe with
@@ -6377,12 +6379,12 @@ let private prepareStatementWithOptions
             | _ -> Result.Error(1064, "syntax error")
 
 let prepareStatement (sql: string) : Result<Statement option * int, int * string> =
-    prepareStatementWithOptions Parser.defaultOptions sql
+    prepareStatementWithOptions ReusablePreparation Parser.defaultOptions sql
 
-let prepareStatementForSession (session: Session) (sql: string) : Result<Statement option * int, int * string> =
-    prepareStatementWithOptions (parserOptionsForSession session) sql
+let private prepareStatementForSessionWith purpose (session: Session) (sql: string) : Result<Statement option * int, int * string> =
+    let options = parserOptionsForSession session
+    prepareStatementWithOptions purpose options sql
     |> Result.bind (fun (statement, count) ->
-        let options = parserOptionsForSession session
         let hints, hasSyntaxDiagnostics = parsedStatementHints true options sql
         let resolution = resolveStatementHints session options sql hasSyntaxDiagnostics hints
         let hints = resolution.Hints |> Option.defaultValue hints
@@ -6408,8 +6410,10 @@ let prepareStatementForSession (session: Session) (sql: string) : Result<Stateme
                 | _ -> code, message)
             |> Result.map (fun () -> statement, count))
 
-/// Binary preparation starts a new diagnostics area, just as COM_QUERY does.
-let prepareStatementWithDiagnostics (session: Session) sql =
+let prepareStatementForSession session sql =
+    prepareStatementForSessionWith ReusablePreparation session sql
+
+let private prepareWithDiagnostics purpose (session: Session) sql =
     Session.recordGeneralCommand session "Prepare" sql
     let limit =
         sessionValue session "max_error_count"
@@ -6417,12 +6421,19 @@ let prepareStatementWithDiagnostics (session: Session) sql =
         |> Option.defaultValue 1024
     let result, captured =
         Diagnostics.withRetainedLimit limit (fun () ->
-            Diagnostics.captureStatement (fun () -> prepareStatementForSession session sql))
+            Diagnostics.captureStatement (fun () -> prepareStatementForSessionWith purpose session sql))
     let error = result |> function Ok _ -> None | Error(code, message) -> Some(SqlState.create code message)
     { session with
         Diagnostics = Diagnostics.complete error captured
         DiagnosticsCount = captured.Count + (if error.IsSome then 1 else 0)
         DiagnosticsErrorCount = captured.ErrorCount + (if error.IsSome then 1 else 0) }, result
+
+/// Binary preparation starts a new diagnostics area, just as COM_QUERY does.
+let prepareStatementWithDiagnostics session sql =
+    prepareWithDiagnostics ReusablePreparation session sql
+
+let internal prepareExecutionWithDiagnostics session sql =
+    prepareWithDiagnostics ImmediateExecution session sql
 
 let createPreparedStatement (session: Session) sql ast count : PreparedStmt =
     let ast = ast |> Option.map (PreparedVariables.capture session.UserVariables)

@@ -292,10 +292,10 @@ type Connection internal (db: Db) =
                 )
             | Ok None -> QueryHandler.handle session sql)
 
-    /// Executes positional `?` parameters through the same prepared-statement binder as the wire protocol.
+    /// Executes SQL once with positional `?` values, including direct transaction control.
     member this.Execute(sql: string, parameters: Value list) : QueryHandler.QueryResult =
         this.Run(fun session ->
-            let preparedSession, prepared = QueryHandler.prepareStatementWithDiagnostics session sql
+            let preparedSession, prepared = QueryHandler.prepareExecutionWithDiagnostics session sql
             match prepared with
             | Error(code, message) -> preparedSession, Executor.Err(code, message)
             | Ok(ast, count) ->

@@ -158,3 +158,57 @@ macOS with .NET SDK 10.0.401:
 | `just check` | Debug `Fsdb.Tests.dll` (`9f2b3ab0a87b`) | 3,957 tests passed, zero build warnings or errors. |
 | [Geographic oracle](../torture/probes/geographic-endpoints/README.md) | Debug CLI and `Fsdb.dll` (`4fc2666b9d06`) | Zero differences against pinned MySQL 8.4.11 for 3,507 polygon checks across SRIDs 4326, 4258, and 4267, plus 4,000 endpoint and ring controls and all eight long-edge crossing orderings. The SRID 4326 report is identical to the baseline. |
 | `just package-check` | Release library (`b9f5a2df6f517`) | Package and symbols verified, and the isolated consumer returned 42. |
+
+## Transaction control cleanup
+
+The baseline is `1b4c1bb6`. The working changes add explicit consistent
+snapshots and correct chained transaction isolation. This pass covers
+transaction starts and completions, read-view ownership, XA resolution, and
+SQL and wire preparation.
+
+| Owner | Event | Transition and invariant | Evidence |
+| --- | --- | --- | --- |
+| Query handler | `START TRANSACTION` | The old transaction ends before the new owner is installed. The new owner consumes the pending isolation and access settings. | Snapshot command matrix |
+| Query handler and storage | `WITH CONSISTENT SNAPSHOT` | At REPEATABLE READ, the new owner pins its seeded catalog before the command returns. Other levels report warning 138 and use their regular visibility rules. | Visibility schedules and embedded regression |
+| Storage | Commit, rollback, disconnect | Ending the owning transaction releases its read view with its locks. | Lifecycle and concurrency review |
+| Query handler | `COMMIT` or `ROLLBACK` with chaining | End the old transaction first. The successor keeps isolation and access mode and opens its own read view. | Isolation and wire-tracking matrices |
+| Query handler | Prepare a start command | SQL and binary prepare reject transaction starts with 1295. Text execution continues to support them. | Pinned MySQL commands and `PreparedStatementTests.fs` |
+| Query handler | Local XA terminal command | Successful prepare, one-phase commit, and rollback clear the owning session's transaction state in the same response. XA END and failed completions retain it. | XA wire controls and `QueryHandlerTests.fs` |
+| Query handler | Resolve detached XA | A resolver with an active local transaction receives 1399. Its own transaction and the detached branch survive. | Two-session MySQL control and detach regression |
+| Query handler | Fatal execution error | Discard temporary and permanent transaction writes, clear cursors, and release locks and tracking. Explicit rollback follows the same cleanup path and preserves its existing allocation publication. | Temporary-row rollback regression and source review |
+
+The previous server-focused test expected prepared `START TRANSACTION` to
+succeed. The exact SQL and binary MySQL 8.4.11 probes both reject it. The
+regression now checks that error and retains the acceptance checks for
+supported text-probed commands.
+
+Ordinary commit and rollback now share one handler for XA rejection, state
+capture, and chain or release directives. XA operations keep their own
+ownership rules. `endLocalTransaction` owns cursor and tracker teardown,
+and `discardTransaction` owns the cleanup shared by rollback and fatal
+execution errors. The explicit rollback path still publishes allocation
+advances through its own callback.
+
+One-shot embedded `Connection.Execute` retains direct transaction starts.
+Reusable preparation shares the MySQL restriction across the wire, SQL,
+and embedding. The preparation owner selects the rule while keeping
+parameter binding and diagnostics shared.
+
+The three independent reviewers used lifecycle, concurrency, and consumer
+lenses. The correctness pass traced XA termination and detached resolution
+and reproduced temporary writes surviving a fatal abort. The module pass
+checked the shared completion and discard paths and verified the only
+immediate-preparation caller.
+
+The final macOS run used .NET SDK 10.0.401. `just check` passed all 4,294
+tests (Debug test assembly `a492b0541372`). The 151 MySQL 8.4.11 contract
+cases reproduced the same ten normalized differences. The additional
+wire controls matched for ordinary completion, snapshot replay, XA
+terminal state, and detached resolution. `just package-check` passed
+with the Release library `fd0b5b69cacd`.
+
+An embedded cancellation follow-up remains open. The host connection can
+retain and later commit a transaction
+after an asynchronous command throws cancellation. The barrier-controlled
+reproduction covers both text and bound commands. An isolated repair
+passes the focused regression and awaits its own full gate.
