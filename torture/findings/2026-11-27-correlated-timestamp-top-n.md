@@ -54,6 +54,19 @@ and WAL mode. It covered direct and projected sources, ascending and
 descending traversal, open and closed bounds, fractional precision, NULL
 bounds, both DST transitions, and index hints. A seeded half-hour transition
 fixture matched all 4,000 outer-row choices. The regression fixture drops
-from 343 examined rows to fewer than 20. Range searches without an equality
-prefix and tighter disjoint UTC slices through a clock transition remain
-open.
+from 343 examined rows to fewer than 20.
+
+### Leading TIMESTAMP keys
+
+The ordered range also works with TIMESTAMP as the first index column.
+When both layouts are available, Fsdb prefers the eligible equality-prefix
+lookup. Collation-equal spellings in later sort keys share one sort group
+before applying the next key, `OFFSET`, and `LIMIT`. The derived-table
+fallback builds its filtering keys in session-local time while keeping
+the stored UTC values for ordering.
+
+An expanded replay matched 3,024 queries against the pinned oracle in
+memory and WAL mode. On the forced leading-index query, the analyzed plans
+reported 4 rows per invocation in Fsdb and 89 in MySQL 8.4.11. Fsdb's
+regression drops from 173 examined rows to fewer than 20. Tighter disjoint
+UTC slices through a clock transition remain open.

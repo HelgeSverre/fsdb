@@ -3205,9 +3205,9 @@ implementation effort:
    examines 16 rows, down from 5,064. [Filesort through the same fold](torture/findings/2026-11-27-correlated-timestamp-top-n.md#sorting-the-two-occurrences)
    now uses the stored instant for direct and merged TIMESTAMP columns.
    [Correlated TIMESTAMP ranges](torture/findings/2026-11-27-correlated-timestamp-top-n.md#seeking-correlated-timestamp-ranges)
-   now seek an ordered UTC interval after a composite equality prefix and
-   apply the session-local predicate before OFFSET and LIMIT. Range searches
-   without an equality prefix and tighter disjoint UTC slices remain open.
+   now seek an ordered UTC interval with TIMESTAMP as the leading column
+   or after a composite equality prefix. The session-local predicate applies
+   before OFFSET and LIMIT. Tighter disjoint UTC slices remain open.
    [Derived projections with renamed columns](torture/findings/2026-11-27-correlated-derived-top-n.md)
    can retain the physical index order through audited filters and aliases.
    The scalar fixture examines 40 rows, down from 1,610.

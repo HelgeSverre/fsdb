@@ -509,7 +509,12 @@ type private CorrelatedTopOrderPlan =
       Terms: IndexOrderTerm list option
       Pins: PointEquality list
       References: (string * Expr) list
+      LeadingTimestampRange: bool
       Projection: (PhysicalProjection * (Value[] -> bool) list) option }
+
+type private OrderedRangeBounds =
+    | StoredBounds
+    | CorrelatedBounds of leadingTimestampRange: bool
 
 let private projectionFilterColumn (projection: PhysicalProjection) index =
     let column = projection.PhysicalOutputs.[index]
@@ -701,6 +706,10 @@ let private isNumericIndexValue = function
     | VDouble _ -> true
     | _ -> false
 
+let private readTimestampValue (store: Store) = function
+    | VTimestamp utc -> VDateTime(sqlTimeZoneFromUtc store.ExecutionSettings.TimeZone utc)
+    | value -> value
+
 let private materializedRangeLookup
     (store: Store)
     (columns: ColumnDef list)
@@ -711,6 +720,12 @@ let private materializedRangeLookup
     |> Result.toOption
     |> Option.bind (fun columnIndex ->
         let column = columns.[columnIndex]
+        // The memoized lookup narrows WHERE candidates in the session's
+        // local time. The original rows still carry UTC for downstream ordering.
+        let readKey =
+            match column.Type with
+            | TTimestamp _ -> readTimestampValue store
+            | _ -> id
         let validDateBound = function
             | VDate _ -> true
             | VString text ->
@@ -770,7 +785,7 @@ let private materializedRangeLookup
             let sourceRows = List.toArray rows
             let entries =
                 sourceRows
-                |> Array.mapi (fun index row -> row.[columnIndex], index)
+                |> Array.mapi (fun index row -> readKey row.[columnIndex], index)
                 |> Array.filter (fun (value, _) -> value <> VNull)
 
             if entries |> Array.exists (fst >> sourceCompatible >> not) then
@@ -779,6 +794,7 @@ let private materializedRangeLookup
                 Array.sortInPlaceWith (fun (left, _) (right, _) -> compare left right) entries
 
                 let firstMatching bound inclusive =
+                    let bound = readKey bound
                     let mutable lower = 0
                     let mutable upper = entries.Length
 
@@ -4322,7 +4338,7 @@ let private tryColumnDefAt (ctx: EvalContext) (index: int) : ColumnDef option =
 
 let private readColumnValue (store: Store) (column: ColumnDef) (value: Value) : Value =
     match store.ExecutionSettings.SqlMode.PadCharToFullLength, column.Type, value with
-    | _, TTimestamp _, VTimestamp utc -> VDateTime(sqlTimeZoneFromUtc store.ExecutionSettings.TimeZone utc)
+    | _, TTimestamp _, _ -> readTimestampValue store value
     | true, TChar length, VString _ when length > 255 ->
         raise (SqlError(1074, sprintf "Column length too big for column '%s' (max = 255); use BLOB or TEXT instead" column.Name))
     | true, TChar length, VString text ->
@@ -15938,7 +15954,7 @@ and private tryOrderedSecondaryLockingRead store registry dbName (select: Select
                     let matched = resolved.Match
                     if not resolved.PredicateCovered then None
                     else
-                        fixedPrefixOrderDirections terms Set.empty matched
+                        indexPrefixOrderDirections false terms Set.empty matched
                         |> Option.bind (fun directions ->
                             let keyTerms =
                                 List.map2 (fun (term: IndexOrderTerm) direction -> { term with Direction = direction }) matched.Terms directions
@@ -21510,7 +21526,7 @@ and private tryIndexOrder
 
             direct
             |> Option.orElseWith (fun () ->
-                tryFixedPrefixIndexOrder false IndexOrderBy store registry dbName tref select.Where orderedColumns Set.empty []
+                tryIndexPrefixOrder StoredBounds IndexOrderBy store registry dbName tref select.Where orderedColumns Set.empty []
                 |> Option.bind planLookup))
 
 and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull (select: SelectStmt) (outer: EvalContext option) readOuter =
@@ -21677,13 +21693,12 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
                     let terms =
                         indexOrderTerms registry tref select
                         |> Option.filter (fun terms -> not terms.IsEmpty && List.forall safeOrder terms)
-                    let correlatedSuffix =
-                        correlatedPins.IsEmpty
-                        && (terms |> Option.exists (function
+                    let timestampRange =
+                        terms |> Option.exists (function
                             | first :: _ -> hasCorrelatedTimestampRange first.Column
-                            | [] -> false))
-                    if correlatedPins.IsEmpty && not correlatedSuffix then None
-                    else Some(source, context, predicate, terms, List.map fst pins, correlatedPins))
+                            | [] -> false)
+                    if correlatedPins.IsEmpty && not timestampRange then None
+                    else Some(source, context, predicate, terms, List.map fst pins, correlatedPins, timestampRange))
 
 and private planCorrelatedTopOrder store registry dbName fromItem (select: SelectStmt) outer readOuter bindPredicate =
     let scopedSource =
@@ -21708,7 +21723,7 @@ and private planCorrelatedTopOrder store registry dbName fromItem (select: Selec
             // A NULL equality probe can only reject rows. Recheck the actual
             // predicate on nullable keys rather than scanning the projection.
             bindCorrelatedTopOrder registry tref columns projected.IsSome select outer readOuter
-            |> Option.bind (fun (source, context, predicate, terms, pins, references) ->
+            |> Option.bind (fun (source, context, predicate, terms, pins, references, timestampRange) ->
                 let bound = bindPredicate source context predicate
                 let plan tref predicate terms pins references =
                     { TableRef = tref
@@ -21716,6 +21731,7 @@ and private planCorrelatedTopOrder store registry dbName fromItem (select: Selec
                       Terms = terms
                       Pins = pins
                       References = references
+                      LeadingTimestampRange = timestampRange
                       Projection = projected }
 
                 match projected with
@@ -21742,7 +21758,7 @@ and private planCorrelatedTopOrder store registry dbName fromItem (select: Selec
                         terms
                         |> Option.bind (List.map (fun term -> column term.Column |> Option.map (fun name -> { term with Column = name })) >> tryAllSome)
 
-                    if physicalReferences.IsEmpty && (not references.IsEmpty || physicalTerms.IsNone) then None
+                    if physicalReferences.IsEmpty && (not timestampRange || physicalTerms.IsNone) then None
                     else Some(plan physicalRef (combineConjuncts physicalConjuncts) physicalTerms physicalPins physicalReferences)))
 
 and private correlatedOrderAccesses store dbName (plan: CorrelatedTopOrderPlan) =
@@ -21787,7 +21803,8 @@ and private tryCorrelatedTopOrder store registry dbName fromItem select outer =
         plan |> Option.bind (fun plan ->
             correlatedOrderAccesses store dbName plan
             |> Seq.tryPick (fun (scope, terms, correlatedPins) ->
-                tryFixedPrefixIndexOrder true scope store registry dbName plan.TableRef plan.Predicate terms correlatedPins plan.Pins
+                let bounds = CorrelatedBounds(plan.LeadingTimestampRange && not terms.IsEmpty)
+                tryIndexPrefixOrder bounds scope store registry dbName plan.TableRef plan.Predicate terms correlatedPins plan.Pins
                 |> Option.map (fun lookup -> lookup, not terms.IsEmpty))
             |> Option.map (fun (lookup, ordered) ->
                 // A NULL comparison cannot pass a top-level AND. Keep the
@@ -23205,14 +23222,24 @@ and private orderedIndexPrefixMatches
                             |> Option.exists (fun rangeCount -> conjunctCount = pins.Length + rangeCount)) }))))
     |> Option.defaultValue []
 
-and private fixedPrefixOrderDirections (orderedTerms: IndexOrderTerm list) correlatedPins (matched: IndexPrefixMatch) =
+and private preferEqualityPrefix allowLeadingRange (candidates: ResolvedIndexPrefix list) =
+    if allowLeadingRange then
+        let pinned, unpinned = candidates |> List.partition (fun candidate -> candidate.Match.PinnedCount > 0)
+        pinned @ unpinned
+    else candidates
+
+and private indexPrefixOrderDirections allowLeadingRange (orderedTerms: IndexOrderTerm list) correlatedPins (matched: IndexPrefixMatch) =
     let invert = function Asc -> Desc | Desc -> Asc
     let bindsOuterKey =
         Set.isEmpty correlatedPins
         || (matched.Terms |> List.take matched.PinnedCount
             |> List.exists (fun term -> Set.contains (term.Column.ToLowerInvariant()) correlatedPins))
 
-    if matched.PinnedCount = 0 || not bindsOuterKey then
+    let usable =
+        if matched.PinnedCount = 0 then allowLeadingRange
+        else bindsOuterKey
+
+    if not usable then
         None
     else
         let stored = matched.Terms |> List.map _.Direction
@@ -23222,8 +23249,8 @@ and private fixedPrefixOrderDirections (orderedTerms: IndexOrderTerm list) corre
         elif List.map invert storedSuffix = requested then Some(List.map invert stored)
         else None
 
-and private tryFixedPrefixIndexOrder
-    timestampRange
+and private tryIndexPrefixOrder
+    bounds
     (scope: TableIndexHintScope)
     (store: Store)
     (registry: Registry)
@@ -23235,19 +23262,21 @@ and private tryFixedPrefixIndexOrder
     (prefixPins: PointEquality list)
     : Storage.OrderedLookup option =
     let allowed = indexAllowedForOrderedAccess scope tref
+    let allowLeadingRange = bounds = CorrelatedBounds true
 
     orderedIndexPrefixMatches scope store registry dbName tref whereExpr orderedTerms prefixPins
+    |> preferEqualityPrefix allowLeadingRange
     |> List.tryPick (fun resolved ->
         let matched = resolved.Match
-        fixedPrefixOrderDirections orderedTerms correlatedPins matched
+        indexPrefixOrderDirections allowLeadingRange orderedTerms correlatedPins matched
         |> Option.bind (fun directions ->
             let terms =
                 List.map2 (fun (term: IndexOrderTerm) direction -> { term with Direction = direction }) matched.Terms directions
                 |> storageOrderTerms
 
-            let lower, upper = fixedPrefixSuffixBounds timestampRange store registry resolved.Table tref whereExpr matched
+            let lower, upper = fixedPrefixSuffixBounds (bounds <> StoredBounds) store registry resolved.Table tref whereExpr matched
             let tieOffsets =
-                if correlatedPins.IsEmpty then []
+                if bounds = StoredBounds then []
                 else
                     orderedTerms
                     |> List.truncate (max 0 (orderedTerms.Length - 1))
@@ -23258,6 +23287,8 @@ and private tryFixedPrefixIndexOrder
             if not tieOffsets.IsEmpty
                || (not prefixPins.IsEmpty && (resolved.PinnedValues |> List.exists (function VString _ -> true | _ -> false))) then
                 Storage.tryMergedEqualityPrefixOrderWith allowed store resolved.Table terms resolved.PinnedValues lower upper tieOffsets
+            elif matched.PinnedCount = 0 then
+                Storage.tryOrderedIndexRangeInTableWith allowed store resolved.Table terms lower upper
             else
                 Storage.tryOrderedIndexPrefixRangeLookupWith allowed store resolved.Database tref.Table terms resolved.PinnedValues lower upper
                 |> Option.orElseWith (fun () ->
@@ -29775,9 +29806,12 @@ let private explainCorrelatedOrder store registry dbName outer fromItem select =
         let labels = plan.References |> Map.ofList
         let describeAccess (scope, terms, correlatedPins) =
             let allowed = indexAllowedForOrderedAccess scope tref
+            let allowLeadingRange = plan.LeadingTimestampRange && not (List.isEmpty terms)
             orderedIndexPrefixMatches scope store registry dbName tref plan.Predicate terms plan.Pins
+            |> preferEqualityPrefix allowLeadingRange
             |> List.tryPick (fun resolved ->
-                fixedPrefixOrderDirections terms correlatedPins resolved.Match
+                let columns = resolved.Table.Columns
+                indexPrefixOrderDirections allowLeadingRange terms correlatedPins resolved.Match
                 |> Option.bind (fun directions ->
                     let indexTerms =
                         List.map2 (fun (term: IndexOrderTerm) direction -> { term with Direction = direction }) resolved.Match.Terms directions
@@ -29786,8 +29820,8 @@ let private explainCorrelatedOrder store registry dbName outer fromItem select =
                     Storage.tryOrderedIndexNameWith allowed resolved.Table indexTerms
                     |> Option.bind (fun name ->
                         let prefix = List.take resolved.Match.PinnedCount resolved.Match.Terms
-                        let columns = resolved.Table.Columns
-                        prefix
+                        let keys = if prefix.IsEmpty then List.truncate 1 terms else prefix
+                        keys
                         |> traverse (fun term -> resolveColumn columns term.Column)
                         |> Result.toOption
                         |> Option.map (fun indices ->
@@ -30009,13 +30043,14 @@ let rec private explainJoinBlock
                         explainUnionBlocks store registry dbName nextId acc analysis derivedId "DERIVED" first rest binding.Outer
                         |> Result.map ignore)
         | FromTable tref, Some(key, reference) ->
+            let range = key.IsSome && reference.IsEmpty
             acc.Add
                 { Id = Some id
                   SelectType = selectType
                   Table = Some(tref.Alias |> Option.defaultValue tref.Table)
-                  Type = Some "ref"
+                  Type = Some(if range then "range" else "ref")
                   Key = key
-                  Ref = Some reference
+                  Ref = if range then None else Some reference
                   Rows = None
                   Extra = extra }
             Ok()

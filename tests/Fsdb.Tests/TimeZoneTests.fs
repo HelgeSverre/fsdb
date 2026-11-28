@@ -148,6 +148,44 @@ let tests =
               Expect.equal (handle session scanned |> snd) expected scanned
               Expect.isLessThan examined 20L "the index skips the out-of-range rows in the same tenant"
 
+              let session = execute session "ALTER TABLE events ADD KEY by_time(instant,id)"
+              let leading = query "events e FORCE INDEX(by_time)"
+              let rows, leadingExamined = withExaminedRows (fun () -> handle session leading |> snd)
+              Expect.equal rows expected leading
+              Expect.isLessThan leadingExamined 20L "a leading timestamp key also seeks the UTC range"
+
+              let oneSided = leading.Replace(" AND e.instant<p.end_at", "").Replace(" ORDER BY p.id", " WHERE p.id=3 ORDER BY p.id")
+              let rejected, nullExamined = withExaminedRows (fun () -> handle session oneSided |> snd)
+              Expect.equal rejected (ResultSet([ "id"; "chosen" ], [ [ Some "3"; None ] ])) oneSided
+              Expect.isLessThan nullExamined 5L "a NULL one-sided bound can reject the index range without reading it"
+
+              match handle session ("EXPLAIN " + leading) |> snd with
+              | ResultSet(_, [ _; dependent ]) ->
+                  Expect.equal dependent.[4] (Some "range") "no equality prefix is needed"
+                  Expect.equal dependent.[6] (Some "by_time") "EXPLAIN reports the leading timestamp index"
+              | other -> failtestf "Expected a dependent timestamp range, got %A" other
+
+              let projected =
+                  query "(SELECT id,instant AS stamp FROM events IGNORE INDEX(by_slot,by_time)) e"
+                  |> fun sql -> sql.Replace("e.tenant=1 AND ", "").Replace("e.instant", "e.stamp")
+              Expect.equal (handle session projected |> snd) expected projected
+
+          testCase "correlated TIMESTAMP ranges order collation ties by the next key"
+          <| fun _ ->
+              let session =
+                  [ "SET time_zone='+00:00'"
+                    "CREATE TABLE tags (id INT PRIMARY KEY, tenant INT, at TIMESTAMP(2), tag VARCHAR(25) COLLATE utf8mb4_0900_ai_ci, KEY by_time(at,tag,id), KEY by_group(tenant,at,tag,id))"
+                    "INSERT INTO tags VALUES (1,1,'2024-11-03 05:45:00','Résumé'),(2,1,'2024-11-03 05:45:00','resume'),(3,1,'2024-11-03 05:45:00','RESUME')"
+                    "CREATE TABLE picks (lo DATETIME)"
+                    "INSERT INTO picks VALUES('2024-11-03 01:30:00')"
+                    "SET time_zone='Fsdb/Test_Eastern'" ]
+                  |> List.fold execute (populatedSession ())
+
+              for index in [ "by_time"; "by_group" ] do
+                  let sql =
+                      $"SELECT (SELECT e.id FROM tags e FORCE INDEX({index}) WHERE e.tenant=1 AND e.at>=p.lo ORDER BY e.at,e.tag,e.id LIMIT 1) FROM picks p"
+                  expectRow session sql [ "1" ]
+
           testCase "named zones use catalog transitions including daylight saving gaps and folds" <| fun _ ->
               let session = populatedSession ()
               expectRow session

@@ -8980,6 +8980,10 @@ let internal tryOrderedIndexPrefixRangeLookupInTableWith allowed store table ter
     tryOrderedIndexPrefixRangeSliceInTableWith allowed store table terms prefixValues lower upper
     |> Option.map orderedLookup
 
+let internal tryOrderedIndexRangeInTableWith allowed store table terms lower upper =
+    tryOrderedIndexSliceWithPrefix allowed store (Some table) terms [] lower upper
+    |> Option.map orderedLookup
+
 let internal tryOrderedEqualityPrefixRangeRowsInTableWith allowed store table terms prefixValues lower upper =
     if prefixValues |> List.exists (function VString _ -> true | _ -> false) then
         tryOrderedIndexWithPrefix allowed store (Some table) terms prefixValues lower upper
