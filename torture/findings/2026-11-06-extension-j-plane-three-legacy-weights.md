@@ -44,3 +44,17 @@ uv run --with pymysql python torture/scripts/ngram-multicol-oracle.py --legacy-r
 Repeat those commands with `utf8mb4_general_ci` and
 `utf8mb4_unicode_ci`; for the ngram lane also use ranges
 `32C00:32D00` and `33380:33480`.
+
+### Whole-block bigrams
+
+The native MySQL 8.4.11 oracle now covers the entire U+323B0–U+3347F block
+in one two-column index. It indexes one document for each of the 4,304
+positions and searches every position in natural, Boolean, and query
+expansion modes, with quoted and unquoted terms. Membership and relevance
+agree in all 25,824 searches under each of `utf8mb4_unicode_520_ci` and
+`utf8mb4_0900_ai_ci`.
+
+```sh
+uv run --with pymysql python torture/scripts/ngram-multicol-oracle.py --legacy-range 323B0:33480 --all-range-scalars --collation utf8mb4_unicode_520_ci 2
+uv run --with pymysql python torture/scripts/ngram-multicol-oracle.py --legacy-range 323B0:33480 --all-range-scalars --collation utf8mb4_0900_ai_ci 2
+```
