@@ -277,6 +277,8 @@ type Table =
     { OriginalName: string
       /// Process-local schema revision, zero for versions decoded from a snapshot.
       SchemaRevision: int64
+      /// The physical row layout keeps its identity across metadata-only DDL.
+      ReadLayoutRevision: int64
       Columns: ColumnDef list
       /// Published pages are immutable so captured catalog roots remain
       /// valid while a write copies only the pages it changes.
@@ -318,8 +320,11 @@ type Table =
     member this.Rows: Value[] list = List.ofSeq this.RowsArray
 
 let mutable private schemaRevision = 0L
+let mutable private readLayoutRevision = 0L
 
 let private nextSchemaRevision () = Interlocked.Increment(&schemaRevision)
+
+let internal newReadLayoutRevision () = Interlocked.Increment(&readLayoutRevision)
 
 let private isPrimaryIndex (index: IndexDef) =
     String.Equals(index.Name, "PRIMARY", StringComparison.OrdinalIgnoreCase)
@@ -656,6 +661,8 @@ type Store =
       KeyLocks: ConcurrentDictionary<string, KeyLockCache>
       /// Repeatable reads can keep deleted index records as gap boundaries.
       ConsistentReadViews: ConcurrentDictionary<int64, Catalog>
+      /// Current table definitions whose rows cannot be opened by this statement's read view.
+      UnavailableReadLayouts: Set<int64>
       /// Transaction snapshots share identity reservation state so concurrent
       /// inserts cannot assign the same value from an older table root.
       AutoIncrementCounters: ConcurrentDictionary<string, AutoIncrementCounter>
@@ -1000,6 +1007,7 @@ let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : S
       RowLocks = store.RowLocks
       KeyLocks = store.KeyLocks
       ConsistentReadViews = store.ConsistentReadViews
+      UnavailableReadLayouts = store.UnavailableReadLayouts
       AutoIncrementCounters = store.AutoIncrementCounters
       AccountResources = store.AccountResources
       PreparedXas = store.PreparedXas
@@ -4091,7 +4099,7 @@ let private overlayConsistentRows (pinned: Table) (baseline: Table) (working: Ta
 
 /// The write base can advance independently of the committed read view.
 /// Overlay only this transaction's changes on that read view.
-let internal consistentReadSnapshot (working: Store) (writeBase: Catalog) =
+let internal consistentReadSnapshot (working: Store) (writeBase: Catalog) (live: Store) accessedTables =
     let pinned =
         working.TransactionLocks
         |> Option.bind (fun context ->
@@ -4099,14 +4107,9 @@ let internal consistentReadSnapshot (working: Store) (writeBase: Catalog) =
             | true, catalog -> Some catalog
             | false, _ -> None)
 
-    match pinned with
-    | None -> working
-    | Some catalog when catalog.Count = writeBase.Count
-                        && catalog |> Map.forall (fun name db -> Map.tryFind name writeBase |> Option.exists (fun before -> obj.ReferenceEquals(before, db))) -> working
-    | Some catalog ->
-        let visible =
-            working.Catalog
-            |> Map.fold (fun visible dbName workingDb ->
+    let overlayOwnChanges catalog =
+        working.Catalog
+        |> Map.fold (fun visible dbName workingDb ->
                 match Map.tryFind dbName writeBase, Map.tryFind dbName catalog with
                 | Some baseline, Some _ when obj.ReferenceEquals(baseline, workingDb) -> visible
                 | Some baseline, Some pinned ->
@@ -4122,7 +4125,61 @@ let internal consistentReadSnapshot (working: Store) (writeBase: Catalog) =
                 | None, _ -> Map.add dbName workingDb visible
                 | _ -> visible) catalog
 
-        { transactionSnapshotFromCatalog working visible with ExecutionSettings = working.ExecutionSettings }
+    match pinned with
+    | None -> working
+    | Some catalog ->
+        let unchanged = catalog.Count = writeBase.Count
+                        && catalog |> Map.forall (fun name db -> Map.tryFind name writeBase |> Option.exists (fun before -> obj.ReferenceEquals(before, db)))
+        let visible = lazy (if unchanged then working.Catalog else overlayOwnChanges catalog)
+
+        let readLayouts = lazy (
+            catalog |> Map.values |> Seq.collect Map.values
+            |> Seq.map (fun table -> table.ReadLayoutRevision, table) |> Map.ofSeq)
+        let definitionChanges =
+            accessedTables
+            |> List.choose (fun (database, name) ->
+                let original = tryCatalogDatabase database catalog |> Option.bind (Map.tryFind (normalizeTableName name))
+                let current = tableSnapshot live database name |> Result.toOption
+                match original, current with
+                | None, None -> None
+                | Some before, Some current when before.SchemaRevision = current.SchemaRevision
+                                                  && before.ReadLayoutRevision = current.ReadLayoutRevision -> None
+                | _ -> Some(database, normalizeTableName name, original, current))
+
+        if unchanged && definitionChanges.IsEmpty then working
+        else
+            let visible, unavailable =
+                definitionChanges
+                |> List.fold (fun (visible, unavailable) (database, name, original, current) ->
+                    let db = tryCatalogDatabase database visible |> Option.defaultValue Map.empty
+                    match current with
+                    | None -> setCatalogDatabase database (Map.remove name db) visible, unavailable
+                    | Some current ->
+                        let readTable =
+                            match original with
+                            | Some before when before.ReadLayoutRevision = current.ReadLayoutRevision -> Map.tryFind name db
+                            | _ -> Map.tryFind current.ReadLayoutRevision readLayouts.Value
+                        match readTable with
+                        | Some readTable ->
+                            // A rename keeps its pinned rows, even if the definition moved to another name.
+                            let bound = { readTable with OriginalName = current.OriginalName; Columns = current.Columns }
+                            setCatalogDatabase database (Map.add name bound db) visible, unavailable
+                        | None ->
+                            let definition =
+                                { current with
+                                    RowsArray = RowStore.empty
+                                    UniqueIndex = Map.empty
+                                    SecondaryIndex = Map.empty
+                                    SecondaryOrder = Map.empty
+                                    SpatialIndexes = Map.empty
+                                    FullTextIndexes = Map.empty }
+                            setCatalogDatabase database (Map.add name definition db) visible,
+                            Set.add current.ReadLayoutRevision unavailable)
+                    (visible.Value, Set.empty)
+
+            { transactionSnapshotFromCatalog working visible with
+                ExecutionSettings = working.ExecutionSettings
+                UnavailableReadLayouts = unavailable }
 
 let private foreignKeyStorageValue (column: ColumnDef) value =
     match column.Type, value with
@@ -5629,6 +5686,7 @@ let private sysTableWithIndexes (name: string) (columns: ColumnDef list) (indexe
     let table =
         { OriginalName = name
           SchemaRevision = nextSchemaRevision ()
+          ReadLayoutRevision = newReadLayoutRevision ()
           Columns = columns
           RowsArray = RowStore.ofSeq rows
           NextAutoId = 1L
@@ -6044,6 +6102,7 @@ let create () : Store =
       RowLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
       KeyLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
       ConsistentReadViews = ConcurrentDictionary()
+      UnavailableReadLayouts = Set.empty
       AutoIncrementCounters = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
       LockWaits =
         { SyncRoot = obj ()
@@ -10286,6 +10345,7 @@ let createTableSeeded
                                         let table =
                                             { OriginalName = tableName
                                               SchemaRevision = nextSchemaRevision ()
+                                              ReadLayoutRevision = newReadLayoutRevision ()
                                               Columns = columns
                                               RowsArray = RowStore.empty
                                               NextAutoId = autoIncrementSeed |> Option.defaultValue 1L
@@ -10452,6 +10512,7 @@ let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, 
                     let emptied =
                         { table with
                             SchemaRevision = nextSchemaRevision ()
+                            ReadLayoutRevision = newReadLayoutRevision ()
                             RowsArray = RowStore.empty
                             NextAutoId = 1L
                             CreateTime = createTime }
@@ -11195,7 +11256,7 @@ let private foreignKeyColumnChangePreservesLayout (previous: ColumnDef) currentT
         && (oldValues.Length + 7) / 8 = (newValues.Length + 7) / 8
     | _ -> columnTypeChangePreservesLayout previous currentType
 
-let private columnChangePreservesFullText (before: Table) (after: Table) oldName newName =
+let private columnChangePreservesDataLayout (before: Table) (after: Table) oldName newName =
     match resolveColumn before.Columns oldName, resolveColumn after.Columns newName with
     | Ok oldPosition, Ok newPosition when oldPosition = newPosition ->
         let previous = columnStorageDefinition before.Columns.[oldPosition]
@@ -11206,8 +11267,8 @@ let private columnChangePreservesFullText (before: Table) (after: Table) oldName
     | _ -> false
 
 let private alterPreservesFullText before after = function
-    | ModifyColumn(column, _) -> columnChangePreservesFullText before after column.Name column.Name
-    | ChangeColumn(oldName, column, _) -> columnChangePreservesFullText before after oldName column.Name
+    | ModifyColumn(column, _) -> columnChangePreservesDataLayout before after column.Name column.Name
+    | ChangeColumn(oldName, column, _) -> columnChangePreservesDataLayout before after oldName column.Name
     | RenameTo _
     | RenameColumnTo _
     | RenameIndex _
@@ -11220,6 +11281,13 @@ let private alterPreservesFullText before after = function
     | SetAutoIncrement _
     | SetAlterAlgorithm(AlgorithmDefault | AlgorithmInstant | AlgorithmInplace)
     | SetAlterLock _ -> true
+    | _ -> false
+
+let private rebuildsReadLayout before after = function
+    | AddColumn _ | DropColumn _ | AddPrimaryKey _ | DropPrimaryKey
+    | SetAlterAlgorithm AlgorithmCopy -> true
+    | ModifyColumn(column, _) -> not (columnChangePreservesDataLayout before after column.Name column.Name)
+    | ChangeColumn(oldName, column, _) -> not (columnChangePreservesDataLayout before after oldName column.Name)
     | _ -> false
 
 let private reindexAfterAlter size lengths settings actions preserveFullText before after =
@@ -11655,6 +11723,10 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                             | UnknownColumn name when convertsColumns -> unknownAlterColumn table.OriginalName name
                             | error -> error)
                         |> Result.map (fun (tbl', newKey) ->
+                            let tbl' =
+                                if rebuildsReadLayout tbl tbl' action then
+                                    { tbl' with ReadLayoutRevision = newReadLayoutRevision () }
+                                else tbl'
                             (newKey |> Option.defaultValue key), tbl', preserveFullText && alterPreservesFullText tbl tbl' action, droppedIndexes @ Option.toList droppedIndex))
 
                 let validateAutoIncrementKey (_, finalTable: Table, _, _) =

@@ -8370,7 +8370,11 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 |> Result.mapError Storage.toMySqlError)
     | Exists select ->
         let ctx = expressionSubqueryContext ctx select
-        match tryCorrelatedExists ctx select |> Option.orElseWith (fun () -> tryDecorrelatedExists ctx select) with
+        let indexed =
+            if Set.isEmpty ctx.Store.UnavailableReadLayouts then
+                tryCorrelatedExists ctx select |> Option.orElseWith (fun () -> tryDecorrelatedExists ctx select)
+            else None
+        match indexed with
         | Some result -> result
         | None ->
             match (runExpressionSubquery ctx select (existsEarlyExitSelect select)).Result with
@@ -8383,13 +8387,15 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | MultipleResults _ -> Error nestedSubqueryResultsError
     | Subquery select ->
         let ctx = expressionSubqueryContext ctx select
-        match
-            tryMissingCorrelatedAggregateArgument ctx select
-            |> Option.orElseWith (fun () -> tryCorrelatedCount ctx select)
-            |> Option.orElseWith (fun () -> tryFoldCorrelatedRangeAggregate ctx select)
-            |> Option.orElseWith (fun () -> tryDecorrelatedCount ctx select)
-            |> Option.orElseWith (fun () -> trySourceFreeScalarSubquery ctx select)
-        with
+        let shortcut =
+            if Set.isEmpty ctx.Store.UnavailableReadLayouts then
+                tryMissingCorrelatedAggregateArgument ctx select
+                |> Option.orElseWith (fun () -> tryCorrelatedCount ctx select)
+                |> Option.orElseWith (fun () -> tryFoldCorrelatedRangeAggregate ctx select)
+                |> Option.orElseWith (fun () -> tryDecorrelatedCount ctx select)
+                |> Option.orElseWith (fun () -> trySourceFreeScalarSubquery ctx select)
+            else None
+        match shortcut with
         | Some result -> result
         | None ->
             // Reads the subquery's own typed `Value`, not a `VString` re-wrap
@@ -10318,6 +10324,8 @@ and private runExpressionSubquery
           RowEqualityMembership = None }
 
     match memo.TryGetValue cacheKey with
+    // A metadata-only result must not satisfy a later physical read of a changed table.
+    | _ when (metadataProbe.Value || planningProbe.Value) && not (Set.isEmpty ctx.Store.UnavailableReadLayouts) -> execute (Some ctx)
     | true, MemoizedSubquery result -> result
     | true, UnmemoizedSubquery -> execute (Some ctx)
     | _ when isStatementStableSelect ctx.Store ctx.Registry ctx.DbName emptySubqueryScope cacheKey ->
@@ -16809,6 +16817,84 @@ and private runSelectStmtCore
                 DynamicScope.withValue viewMergeDepth (depth + 1) (fun () -> runSelectStmtWithOutput output store registry dbName merged outer)
         | Ok None -> runUnmergedSelectStmt output store registry dbName select outer
 
+and private snapshotLayoutReadError
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (select: SelectStmt)
+    (outer: EvalContext option)
+    : QueryResult option =
+    let needsUnavailableLayout =
+        if metadataProbe.Value || planningProbe.Value || Set.isEmpty store.UnavailableReadLayouts
+           || (not select.CalculateFoundRows && zeroLimitWithoutOffset select.Limit select.Offset) then false
+        else
+            let context = lazy (contextFactory store registry dbName Map.empty Map.empty None [||])
+            let rec impossible = function
+                | BinOp(And, left, right) -> impossible left || impossible right
+                | BinOp(Or, left, right) -> impossible left && impossible right
+                | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), LiteralValue VNull, _)
+                | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), _, LiteralValue VNull) -> true
+                | predicate ->
+                    tryClosedNumericValue context.Value predicate
+                    |> Option.exists (fun value -> truthy value <> Some true)
+
+            let unavailable table = Set.contains table.ReadLayoutRevision store.UnavailableReadLayouts
+            let physicalSources items =
+                items |> List.collect FromItem.leaves |> List.choose (function
+                    | FromTable reference when reference.Database.IsSome
+                                               || not ((currentCteScope ()).ContainsKey(reference.Table.ToLowerInvariant())) ->
+                        let schema = reference.Database |> Option.defaultValue dbName
+                        Storage.tableSnapshot store schema reference.Table
+                        |> Result.toOption |> Option.map (fun table -> reference, table)
+                    | _ -> None)
+            let joined = select.Joins |> List.choose (fun join ->
+                if join.Kind = LeftJoin && impossible join.On then None else Some join.Table)
+            let sources = physicalSources (Option.toList select.From @ joined)
+            let emptyInnerSource =
+                sources.Length = 1 + select.Joins.Length
+                && (select.Joins |> List.forall (fun join ->
+                    join.Kind = InnerJoin || join.Kind = StraightJoin || join.Kind = CrossJoin || join.Kind = NaturalJoin))
+                && (sources |> List.exists (fun (_, table) -> not (unavailable table) && table.RowsArray.IsEmpty))
+            let emptyConstantJoin =
+                match select.Joins, sources with
+                | [ { Kind = InnerJoin; Using = []; On = BinOp(Eq, QualifiedCol(ownerA, nameA), QualifiedCol(ownerB, nameB)) } ],
+                  [ (leftRef, left); (rightRef, right) ] when unavailable left <> unavailable right ->
+                    let column owner name =
+                        sources |> List.tryPick (fun (reference, table) ->
+                            if equalsIgnoreCase owner (reference.Alias |> Option.defaultValue reference.Table) then
+                                table.Columns |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
+                            else None)
+                    let sameComparisonDomain =
+                        Option.map2 compatibleEqualityColumns (column ownerA nameA) (column ownerB nameB)
+                    let reference, table = if unavailable left then rightRef, right else leftRef, left
+                    // With incompatible join keys a constant miss on the other
+                    // side does not turn this lookup into a second constant read.
+                    sameComparisonDomain = Some false
+                    && (tryEqualityAccessInTableWith CandidateNarrowing store registry table reference select.Where
+                        |> Option.exists (fun plan -> plan.Unique && plan.UsesFullKey && plan.CandidateCount = 0))
+                | _ -> false
+            let emptyPrimaryRange reference table =
+                match primaryKeyColumns table with
+                | key :: _ when isDirectNumericIndexColumn table (key, None)
+                                && indexAllowedBy (indexHintsFor IndexJoin reference) "PRIMARY" ->
+                    rangeLookupBounds BareOrQualifiedColumn store registry table reference select.Where
+                    |> List.exists (fun bound ->
+                        match bound.Lower, bound.Upper with
+                        | Some(VInt lower, lowerInclusive), Some(VInt upper, upperInclusive) when equalsIgnoreCase bound.Column key ->
+                            lower > upper || (lower = upper && not (lowerInclusive && upperInclusive))
+                        | _ -> false)
+                | _ -> false
+            not (select.Where |> Option.exists impossible)
+            && not (emptyInnerSource || emptyConstantJoin)
+            && (sources |> List.exists (fun (reference, table) ->
+                unavailable table && not (select.Joins.IsEmpty && emptyPrimaryRange reference table)))
+
+    if needsUnavailableLayout then
+        match describeQueryColumnDescriptorsInScope store registry dbName (QueryBody(PlainSelect select)) outer (fun _ -> Ok()) with
+        | Error(InvalidDescription error) -> Some error
+        | _ -> Some(Err(1412, "Table definition has changed, please retry transaction"))
+    else None
+
 and private runUnmergedSelectStmt
     output
     (store: Store)
@@ -16817,6 +16903,9 @@ and private runUnmergedSelectStmt
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
+    match snapshotLayoutReadError store registry dbName select outer with
+    | Some error -> error, [], []
+    | None ->
     DynamicScope.withValue lockingReadRows Map.empty (fun () ->
         if select.Locking.IsEmpty then
             runUnlockedSelectStmt output store registry dbName select outer

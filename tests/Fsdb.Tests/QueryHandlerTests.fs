@@ -16716,6 +16716,69 @@ let tests =
                   let reader = run reader "SELECT n FROM t WHERE id=1" (row (if repeatable then "300" else "400"))
                   run reader "ROLLBACK" (Affected 0UL) |> ignore
 
+          testCase "a repeatable read cannot scan a replacement table definition"
+          <| fun _ ->
+              for keyType, ddl in
+                  [ "INT", "ALTER TABLE changed ADD COLUMN extra INT, ALGORITHM=INSTANT"
+                    "INT", "ALTER TABLE changed ALTER p SET DEFAULT 20, ALGORITHM=COPY"
+                    "INT", "TRUNCATE TABLE changed"
+                    "VARCHAR(32)", "ALTER TABLE changed ADD COLUMN extra INT, ALGORITHM=INSTANT" ] do
+                  let store = Fsdb.Storage.create ()
+                  let run session sql expected =
+                      let next, result = handle session sql
+                      Expect.equal result expected $"{keyType}, {ddl}: {sql}"
+                      next
+                  let writer = run (create 1 store) "CREATE TABLE anchor(id INT PRIMARY KEY, n INT)" (Affected 0UL)
+                  let writer = run writer "CREATE TABLE empty_rows(id INT PRIMARY KEY)" (Affected 0UL)
+                  let writer = run writer $"CREATE TABLE changed(id {keyType} PRIMARY KEY, p INT, INDEX ix(p))" (Affected 0UL)
+                  let writer = run writer "INSERT INTO anchor VALUES(1,10)" (Affected 1UL)
+                  let writer = run writer "INSERT INTO changed VALUES(1,10)" (Affected 1UL)
+                  let reader = run (create 2 store) "START TRANSACTION WITH CONSISTENT SNAPSHOT" (Affected 0UL)
+                  let writer = run writer "UPDATE anchor SET n=20 WHERE id=1" (Affected 1UL)
+                  let affected = if ddl.Contains("ALGORITHM=COPY") then 1UL else 0UL
+                  run writer ddl (Affected affected) |> ignore
+
+                  let unavailable = Err(1412, "Table definition has changed, please retry transaction")
+                  let reader = run reader "SELECT p FROM changed WHERE FALSE" (ResultSet([ "p" ], []))
+                  let reader = run reader "SELECT p FROM changed LIMIT 0" (ResultSet([ "p" ], []))
+                  let reader =
+                      if ddl.Contains("ADD COLUMN") then
+                          run reader "SELECT extra FROM changed WHERE id=999 AND FALSE" (ResultSet([ "extra" ], []))
+                      else reader
+                  let reader = run reader "SELECT p FROM changed" unavailable
+                  let reader = run reader "SELECT p FROM changed WHERE id=999" unavailable
+                  let reader = run reader "SELECT p FROM changed FORCE INDEX(ix) WHERE p=999" unavailable
+                  let reader = run reader "SELECT p FROM changed LIMIT 0 OFFSET 1" unavailable
+                  let reader = run reader "SELECT p FROM changed WHERE id=NULL" (ResultSet([ "p" ], []))
+                  let contradictory = if keyType = "INT" then ResultSet([ "p" ], []) else unavailable
+                  let reader = run reader "SELECT p FROM changed WHERE id<0 AND id>0" contradictory
+                  let missedJoin = if keyType = "INT" then unavailable else ResultSet([ "id" ], [])
+                  let reader = run reader "SELECT a.id FROM anchor a JOIN changed c ON a.id=c.id WHERE a.id=999" missedJoin
+                  let reader = run reader "SELECT c.p FROM anchor a LEFT JOIN changed c ON FALSE" (ResultSet([ "p" ], [ [ None ] ]))
+                  let reader = run reader "SELECT EXISTS(SELECT p FROM changed WHERE id=999) AS visible" unavailable
+                  let reader = run reader "SELECT id, (SELECT p FROM changed WHERE changed.id=a.id) AS p FROM empty_rows a" (ResultSet([ "id"; "p" ], []))
+                  let reader = run reader "SELECT n FROM anchor WHERE id=1" (ResultSet([ "n" ], [ [ Some "10" ] ]))
+                  let reader = run reader "COMMIT" (Affected 0UL)
+                  run reader "SELECT n FROM anchor WHERE id=1" (ResultSet([ "n" ], [ [ Some "20" ] ])) |> ignore
+
+          testCase "repeatable reads bind a renamed table and column to the pinned rows"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let writer = run (create 1 store) "CREATE TABLE before_rename(id INT PRIMARY KEY, p INT)" (Affected 0UL)
+              let writer = run writer "INSERT INTO before_rename VALUES(1,10)" (Affected 1UL)
+              let reader = run (create 2 store) "START TRANSACTION WITH CONSISTENT SNAPSHOT" (Affected 0UL)
+              let writer = run writer "UPDATE before_rename SET p=20 WHERE id=1" (Affected 1UL)
+              let writer = run writer "ALTER TABLE before_rename RENAME COLUMN p TO n" (Affected 0UL)
+              run writer "RENAME TABLE before_rename TO after_rename" (Affected 0UL) |> ignore
+              let reader = run reader "SELECT n FROM after_rename WHERE id=1" (ResultSet([ "n" ], [ [ Some "10" ] ]))
+              let reader = run reader "SELECT n FROM before_rename" (Err(1146, "Table 'fsdb.before_rename' doesn't exist"))
+              let reader = run reader "COMMIT" (Affected 0UL)
+              run reader "SELECT n FROM after_rename WHERE id=1" (ResultSet([ "n" ], [ [ Some "20" ] ])) |> ignore
+
           testCase "transaction access modes, chaining, and SET CHARACTER SET are enforced"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

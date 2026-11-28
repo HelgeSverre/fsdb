@@ -3727,7 +3727,8 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
                     match consistentReadTransaction session stmt with
                     | Some transaction ->
                         Storage.recordConsistentReadView session.Store store
-                        Storage.consistentReadSnapshot store transaction.BaseCatalog
+                        let tables = accesses |> List.map (fun access -> access.Database, access.Table)
+                        Storage.consistentReadSnapshot store transaction.BaseCatalog session.Store tables
                     | None -> store
 
         let consumeSelectDestination (select: SelectStmt) result types rows =
@@ -4463,9 +4464,14 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
         consistentReadTransaction session stmt
         |> Option.map (fun transaction statementStore ->
             Storage.recordConsistentReadView session.Store baseStore
-            let permanent = Storage.consistentReadSnapshot baseStore transaction.BaseCatalog
+            let tables =
+                TableLocks.accessesForStatement session.Store session.TemporaryCatalog dbName stmt
+                |> List.map (fun access -> access.Database, access.Table)
+            let permanent = Storage.consistentReadSnapshot baseStore transaction.BaseCatalog session.Store tables
             let visible = CatalogOverlay.merge permanent.Catalog session.TemporaryCatalog
-            { Storage.beginTransactionSnapshotFromCatalog statementStore visible with ExecutionSettings = statementStore.ExecutionSettings })
+            { Storage.beginTransactionSnapshotFromCatalog statementStore visible with
+                ExecutionSettings = statementStore.ExecutionSettings
+                UnavailableReadLayouts = permanent.UnavailableReadLayouts })
     // The overlay executes without its own transaction, but permanent writes
     // still share the outer transaction's lock owner and catalog refresh.
     let rebaseOverlayInsert =

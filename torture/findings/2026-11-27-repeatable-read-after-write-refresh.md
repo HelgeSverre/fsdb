@@ -57,7 +57,8 @@ A repeatable-read transaction can establish its view by reading a separate
 table. Another session can then change the target table before the first
 session opens it. Pinned MySQL 8.4.11 returns error 1412 after adding or
 dropping a column, rebuilding the primary key, or truncating and refilling
-the target. Fsdb can read the old definition in these cases.
+the target. Fsdb can return an old definition in paths that do not yet
+check read-view visibility.
 
 In the audited queries, MySQL returned 1412 for both a full scan and an
 index seek that would have found no rows. `LIMIT 0` and a constant false
@@ -93,3 +94,35 @@ p INT)`, with one row in each. In session A, begin a transaction and read
 `anchor`. In session B, run `ALTER TABLE t ADD COLUMN extra INT,
 ALGORITHM=INSTANT`. In session A, `SELECT p FROM t WHERE id=999` returns
 1412 on MySQL, while `SELECT p FROM t WHERE FALSE` returns an empty set.
+
+### Consistent SELECTs after a layout change
+
+Fsdb now keeps a physical layout identity separate from its schema
+revision. An ordinary repeatable-read SELECT binds the live table and
+column names. A table renamed without a layout change still reads its
+pinned rows. A statement that needs a replacement layout returns 1412
+and leaves the original view available to later statements.
+
+The pinned MySQL 8.4.11 comparison matched 93 cases in memory and with
+WAL. It covered an instant column addition, a copy ALTER, and truncation.
+The queries varied full scans, indexed misses, aggregates, `LIMIT 0` with
+and without an offset, joins, scalar and `EXISTS` subqueries, and UNION.
+A separate rename probe combined a newer row value with table and column
+renames and verified the pinned value before rollback and the current
+value afterward. Individual secondary-index changes and broader locking,
+write, and prepared or EXPLAIN paths remain open.
+
+An indexed integer contradiction skipped opening the replacement layout.
+The same numeric comparison against a `VARCHAR` primary key still opened
+the table and returned 1412. A missing outer key skipped the changed side
+of an integer-to-text join, while the equivalent integer-to-integer join
+returned 1412. A WAL-backed control preserved earlier writes, a savepoint,
+and temporary-table shadowing across two 1412 errors and committed only the
+writes preceding the savepoint.
+
+When a secondary index is added in place, static `EXPLAIN` and actual
+execution can choose different paths. In the audited `WHERE k=20` case,
+both a covering projection and a projection including `payload` named
+the new key in static `EXPLAIN`. The covering read returned 1412, while
+`EXPLAIN ANALYZE` showed that the noncovering read used a clustered scan and
+returned the row. The same distinction held for missing keys in the fixture.

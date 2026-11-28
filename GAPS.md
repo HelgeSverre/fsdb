@@ -1063,8 +1063,10 @@ opens that view at transaction start under REPEATABLE READ. A chained
 transaction retains its isolation and access mode and opens a fresh view
 on its first consistent read.
 [DDL after a read view opens](torture/findings/2026-11-27-repeatable-read-after-write-refresh.md#table-definitions-created-after-the-read-view)
-still diverges for physical table or index changes and some metadata-only
-renames. MySQL binds current names and checks visibility at physical access.
+now binds current table and column names for audited consistent SELECTs.
+Reads of replaced layouts return 1412 without ending the transaction.
+Individual index lifetimes, locking reads, mutations, and preparation or
+planning paths still differ.
 [Point UPDATE and DELETE](torture/findings/2026-11-27-current-point-writes.md)
 can seek an exact unique key absent from the transaction's old write
 view. The audited writes wait for a pending key or its current row and

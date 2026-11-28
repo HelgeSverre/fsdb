@@ -2380,6 +2380,7 @@ let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
     let table =
         { OriginalName = originalName
           SchemaRevision = 0L
+          ReadLayoutRevision = newReadLayoutRevision ()
           Columns = columns
           Indexes = indexes
           ForeignKeys = fks
