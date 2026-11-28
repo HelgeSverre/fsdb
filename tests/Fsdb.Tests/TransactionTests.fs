@@ -8887,6 +8887,67 @@ let tests =
                   run setup "SELECT id,u,p FROM jobs ORDER BY id" (ResultSet([ "id"; "u"; "p" ], rows)) |> ignore
                   run writer "SELECT @calls AS calls" (ResultSet([ "calls" ], [ row [ calls ] ])) |> ignore
 
+          testCase "an ignored upsert from a temporary source refreshes only the permanent target"
+          <| fun _ ->
+              for sql, explicitTransaction, ending in
+                  [ for sql in
+                        [ "INSERT IGNORE INTO jobs SELECT feed.id,feed.u,feed.p FROM feed ORDER BY feed.id ON DUPLICATE KEY UPDATE u=7,p=1"
+                          "INSERT IGNORE INTO jobs VALUES(10,5,0),(40,4,0),(60,4,0) ON DUPLICATE KEY UPDATE u=7,p=(SELECT 1 FROM feed WHERE id=40)" ] do
+                        for explicitTransaction in [ false; true ] do
+                            for ending in [ "COMMIT"; "ROLLBACK"; "TIMEOUT" ] do
+                                yield sql, explicitTransaction, ending ] do
+                  let store = Fsdb.Storage.create ()
+                  let run session sql expected =
+                      let next, result = handle session sql
+                      Expect.equal result expected sql
+                      next
+                  let setup = create 1 store
+                  for sql, count in
+                      [ "CREATE TABLE jobs(id INT PRIMARY KEY,u INT UNIQUE,p INT)", 0UL
+                        "INSERT INTO jobs VALUES(30,3,0),(40,4,0)", 2UL
+                        "CREATE TABLE feed(id INT PRIMARY KEY,u INT,p INT)", 0UL
+                        "INSERT INTO feed VALUES(99,99,99)", 1UL ] do
+                      run setup sql (Affected count) |> ignore
+                  let writer = run (create 3 store) "CREATE TEMPORARY TABLE feed(id INT PRIMARY KEY,u INT,p INT)" (Affected 0UL)
+                  let writer = run writer "INSERT INTO feed VALUES(10,5,0),(40,4,0),(60,4,0)" (Affected 3UL)
+                  let limit = if ending = "TIMEOUT" then 1 else 5
+                  let writer = run writer $"SET innodb_lock_wait_timeout={limit}" (Affected 0UL)
+                  let writer = if explicitTransaction then run writer "BEGIN" (Affected 0UL) else writer
+                  let owner = run (create 2 store) "BEGIN" (Affected 0UL)
+                  let owner = run owner "UPDATE jobs SET u=7 WHERE id=30" (Affected 1UL)
+                  let owner = run owner "UPDATE feed SET p=100 WHERE id=99" (Affected 1UL)
+                  let pending = Threading.Tasks.Task.Run(fun () -> handle writer sql)
+                  let blocked () = lock store.LockWaits.SyncRoot (fun () -> store.LockWaits.Edges.Count > 0)
+                  let entered =
+                      Threading.SpinWait.SpinUntil((fun () -> blocked () || pending.IsCompleted), TimeSpan.FromSeconds 3.0)
+                  let wasWaiting = entered && blocked ()
+                  if ending <> "TIMEOUT" then run owner ending (Affected 0UL) |> ignore
+                  Expect.isTrue (pending.Wait(TimeSpan.FromSeconds 6.0)) "the temporary-source batch finishes"
+                  if ending = "TIMEOUT" then run owner "ROLLBACK" (Affected 0UL) |> ignore
+                  Expect.isTrue wasWaiting "the permanent destination waits"
+                  let writer, result = pending.Result
+                  let warnings = if ending = "COMMIT" then [ 1062; 1062 ] else []
+                  let row (values: int list) = values |> List.map (string >> Some)
+                  let finalRows =
+                      match ending with
+                      | "COMMIT" ->
+                          Expect.equal result (Affected 1UL) "the independent insert survives"
+                          [ [ 10; 5; 0 ]; [ 30; 7; 0 ]; [ 40; 4; 0 ] ]
+                      | "ROLLBACK" ->
+                          Expect.equal result (Affected 4UL) "the rejected destination is now available"
+                          [ [ 10; 5; 0 ]; [ 30; 3; 0 ]; [ 40; 7; 1 ]; [ 60; 4; 0 ] ]
+                      | _ ->
+                          TestSupport.Sql.expectError 1205 result "the whole batch rolls back"
+                          [ [ 30; 3; 0 ]; [ 40; 4; 0 ] ]
+                  Expect.equal (writer.Diagnostics |> List.filter (fun entry -> entry.Code = 1062) |> List.map _.Code) warnings "duplicate warnings"
+                  let writer = if explicitTransaction then run writer "COMMIT" (Affected 0UL) else writer
+                  run writer "SELECT id,u,p FROM feed ORDER BY id"
+                      (ResultSet([ "id"; "u"; "p" ], [ row [ 10; 5; 0 ]; row [ 40; 4; 0 ]; row [ 60; 4; 0 ] ]))
+                  |> ignore
+                  run setup "SELECT id,u,p FROM jobs ORDER BY id" (ResultSet([ "id"; "u"; "p" ], List.map row finalRows)) |> ignore
+                  let backing = if ending = "COMMIT" then 100 else 99
+                  run setup "SELECT p FROM feed" (ResultSet([ "p" ], [ row [ backing ] ])) |> ignore
+
           testCase "duplicate-key updates preserve validated key moves when publishing after a wait"
           <| fun _ ->
               for values, affected, row20, row40 in

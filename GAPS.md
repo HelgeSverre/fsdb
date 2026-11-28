@@ -1022,9 +1022,9 @@ unique key. The upsert rechecks the key when the owner ends. INSERT
 IGNORE warns per rejected candidate after a late collision and keeps
 independent changes in the batch. Later candidates can still match
 the rejected row's original key. A fatal timeout rolls back the batch.
-The audited path covers VALUES and SELECT from permanent sources,
-including writes through checked views. An INSERT SELECT from a
-temporary source can still return 1205 after a late collision.
+The audited path covers VALUES and SELECT from permanent or temporary
+sources, including writes through checked views. A wait refreshes the
+permanent rows while leaving session-local sources visible to the upsert.
 An upsert can still reject a key before its current owner finishes
 moving away.
 [Joins through temporary sources](torture/findings/2026-11-27-joined-update-key-waits.md#session-local-join-sources)
@@ -1569,6 +1569,9 @@ now carries the permanent binding through multiple writable views,
 correlated view predicates, and indexed ngram MATCH. [Mixed joined writes](torture/findings/2026-11-26-joined-update-shadow.md#primary-key-locking-follow-up)
 can lock just the permanent row when integer equalities identify its
 complete primary key. Missing and unproven keys still use broader claims.
+[INSERT SELECT and REPLACE SELECT through a view whose base table is shadowed](torture/findings/2026-11-27-ordered-secondary-locking.md#inserting-through-a-shadowed-view-target)
+can write the session's temporary table when the source is also temporary.
+MySQL writes the permanent base table.
 [Joined DELETE with a leading derived source](torture/findings/2026-11-26-joined-delete-binding.md#leading-derived-sources)
 supports both target-list forms, grouped and outer joins to writable
 views, CTE-backed sources, and prepared execution.

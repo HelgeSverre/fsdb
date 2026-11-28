@@ -271,15 +271,45 @@ mode. It covered VALUES, SELECT from a permanent source, checked views,
 READ COMMITTED, REPEATABLE READ, explicit transactions, and
 CLIENT_FOUND_ROWS. A separate WAL crash replay recovered a batch that
 updated its own inserted row after another transaction's insert changed
-its storage row ID. Replacing the permanent SELECT source with a
-temporary table still produced 1205 on Fsdb when the holder committed.
-All eight rollback controls for that temporary source agreed.
+its storage row ID.
 
 In a native in-memory Debug run without contention, the median
 1,000-candidate batch went from 64 to 129 ms for payload updates and
 from 89 to 161 ms for unique-key moves. Each median used four measured
 runs after one warm-up. Both versions returned the same affected-row
 counts in that fixture.
+
+### Upserts that read temporary tables
+
+An upsert targeting a permanent table or writable view can now refresh
+its permanent rows after waiting even when it reads temporary tables.
+Before rebasing the statement, Fsdb restores the permanent roots behind
+any temporary names. It overlays the session's temporary rows again
+before continuing. Publication retains the latest permanent roots
+behind those names.
+
+The pinned MySQL comparison matched 112 additional schedules in memory
+and WAL mode. It covered VALUES with a temporary table in an update
+expression, SELECT from temporary tables, checked views, explicit
+transactions, CLIENT_FOUND_ROWS, and both READ COMMITTED and REPEATABLE
+READ. Cross-database tests also covered earlier writes in the same
+transaction and rollback by the writer. A concurrent update to a
+permanent table shadowed by the source survived. A separate crash replay
+also retained that update and the permanent target rows, with the source's
+temporary rows confined to the original connection.
+
+### Inserting through a shadowed view target
+
+When a session creates a temporary table named `jobs` after creating
+the permanent view `active_jobs` over the permanent `jobs`, an
+`INSERT IGNORE INTO active_jobs SELECT ... ON DUPLICATE KEY UPDATE`
+can write to the temporary `jobs` in Fsdb. The pinned MySQL image wrote
+the permanent table and returned three affected rows for one update and
+one insert. Fsdb returned two affected rows and inserted both rows into
+the temporary table. The discrepancy also reproduced at `f8d4a899`.
+Plain INSERT SELECT, INSERT SELECT with ON DUPLICATE KEY UPDATE, and
+REPLACE SELECT also wrote to the temporary table in this fixture.
+VALUES, UPDATE, DELETE, and SELECT controls agreed with MySQL.
 
 ### Occupied keys being released
 

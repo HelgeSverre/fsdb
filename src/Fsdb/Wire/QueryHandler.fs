@@ -3542,7 +3542,11 @@ let private consistentReadTransaction session statement =
     |> Option.filter (fun transaction ->
         transaction.Isolation = RepeatableRead && retainsTransactionAfterStatement session && isConsistentRead statement)
 
-let private beginDynamicWriteRebaseForStatement (session: Session) (store: Store) statement =
+let private restoreCatalogShadows keys original catalog =
+    keys
+    |> Set.fold (fun catalog (database, table) -> CatalogOverlay.restoreTable original catalog database table) catalog
+
+let private beginDynamicWriteRebaseForStatement (session: Session) (store: Store) statement shadowKeys =
     // Wrapped autocommit writes that read a target row need it refreshed after a wait.
     let canRebase =
         match statement with
@@ -3564,14 +3568,16 @@ let private beginDynamicWriteRebaseForStatement (session: Session) (store: Store
                   StatementCatalog = privateCatalog
                   ApplyTransactionRoot = ignore }
             else
+                let transactionCatalog = transaction.Snapshot.Catalog
                 let rebasedTransaction = Storage.beginTransactionSnapshotFromCatalog session.Store liveCatalog
-                Storage.mergeCatalogInto rebasedTransaction baseCatalog transaction.Snapshot.Catalog
+                Storage.mergeCatalogInto rebasedTransaction baseCatalog transactionCatalog
 
                 let rebasedStatement = Storage.beginTransactionSnapshotFromCatalog session.Store liveCatalog
-                Storage.mergeCatalogInto rebasedStatement baseCatalog privateCatalog
+                let permanentStatement = restoreCatalogShadows shadowKeys transactionCatalog privateCatalog
+                Storage.mergeCatalogInto rebasedStatement baseCatalog permanentStatement
 
                 { BaseCatalog = liveCatalog
-                  StatementCatalog = rebasedStatement.Catalog
+                  StatementCatalog = restoreCatalogShadows shadowKeys privateCatalog rebasedStatement.Catalog
                   ApplyTransactionRoot = (fun () -> transaction.Snapshot.Catalog <- rebasedTransaction.Catalog) }
 
         Storage.beginDynamicWriteRebase transaction.Snapshot transaction.BaseCatalog prepare
@@ -3882,7 +3888,7 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
             | Diagnostics.RaisedCondition error ->
                 session.LastInsertId, session.LastGeneratedId, ErrInfo error, [], None
 
-        let startedDynamicWriteRebase = beginDynamicWriteRebaseForStatement session store stmt
+        let startedDynamicWriteRebase = beginDynamicWriteRebaseForStatement session store stmt Set.empty
 
         let mutable dynamicWriteBase = None
 
@@ -4380,6 +4386,13 @@ let private rememberTemporaryRows keys original updated (tx: Transaction) =
             | _ -> catalog) tx.TemporaryRowsBefore
     { tx with TemporaryRowsBefore = before }
 
+let private isPermanentUpsert temporaryCatalog dbName = function
+    | Insert(target, _, _, _ :: _, _)
+    | InsertSelect(target, _, _, _ :: _, _) ->
+        let database, table = splitQualified dbName target
+        not (CatalogOverlay.containsTable temporaryCatalog database table)
+    | _ -> false
+
 let private executeWithTemporaryCatalog (action: TemporaryAction option) (session: Session) (stmt: Statement) =
     let dbName = session.Database |> Option.defaultValue defaultDatabase
     let baseStore = Session.currentStore session
@@ -4417,10 +4430,14 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
             { Storage.beginTransactionSnapshotFromCatalog statementStore visible with ExecutionSettings = statementStore.ExecutionSettings })
     // The overlay executes without its own transaction, but permanent writes
     // still share the outer transaction's lock owner and catalog refresh.
+    let rebaseOverlayUpsert =
+        action.IsNone && isPermanentUpsert session.TemporaryCatalog dbName stmt
     let startedRebase =
         match action, stmt with
+        | None, _ when rebaseOverlayUpsert ->
+            beginDynamicWriteRebaseForStatement session baseStore stmt beforeKeys
         | None, Update update when not update.Joins.IsEmpty ->
-            beginDynamicWriteRebaseForStatement session baseStore stmt
+            beginDynamicWriteRebaseForStatement session baseStore stmt Set.empty
         | _ -> false
 
     let mutable rebasedBase = None
@@ -4462,9 +4479,8 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
             | Some snapshot -> snapshot.Catalog
             | None when changesOnlyTemporaryCatalog dbName beforeKeys action stmt -> baseCatalog
             | None ->
-                overlayKeys
-                |> Set.fold (fun catalog (db, table) ->
-                    CatalogOverlay.restoreTable baseCatalog catalog db table) working.Catalog
+                let permanentRoots = if startedRebase && rebaseOverlayUpsert then baseStore.Catalog else baseCatalog
+                restoreCatalogShadows overlayKeys permanentRoots working.Catalog
 
         working.Catalog <- permanentCatalog
 
@@ -4477,7 +4493,7 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
             |> Option.bind _.PendingEvents
             |> Option.iter events.AddRange)
 
-        if startedRebase && permanent.IsSome then
+        if startedRebase && (permanent.IsSome || rebaseOverlayUpsert) then
             Storage.adoptTransactionSnapshot baseStore working
         else
             Storage.commitCatalogInto baseStore baseCatalog working
@@ -4512,6 +4528,7 @@ let private permanentTemporaryOverlayWrite (session: Session) dbName statement =
     // Only permanent targets need a row claim. The planner still uses the
     // temporary sources' visible types to infer bounds through equality joins.
     match statement with
+    | _ when isPermanentUpsert session.TemporaryCatalog dbName statement -> Some statement
     | Update update when update.Joins.IsEmpty ->
         let database = update.From.Database |> Option.defaultValue dbName
         if (temporaryTable update.From).IsNone && Executor.viewExists session.Store database update.From.Table then
