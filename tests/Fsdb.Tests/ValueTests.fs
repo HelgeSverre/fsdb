@@ -963,6 +963,23 @@ let tests =
                         Expect.isTrue (abs (longitude - 2.5999938217929484) < 1e-10) "the crossing longitude matches MySQL"
                     | actual -> failtestf "expected one clipped ring, got %A" actual
 
+                testCase "geographic polygon difference walks touches on a retained exterior"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let source = "POLYGON((0 0,4 0,4 1,4 3,4 4,0 4,0 0))"
+                    let rotated = "POLYGON((4 1,4 3,4 4,0 4,0 0,4 0,4 1))"
+                    let above = "POLYGON((4 2,8 2,8 6,4 6,4 2))"
+                    let simple = "POLYGON((4 0,4 4,0 4,0 0,4 0))"
+                    for left, right, expected in
+                        [ source, "POLYGON((4 0,8 0,8 4,4 4,4 0))", "POLYGON((4 4,0 4,0 0,4 0,4 4))"
+                          source, "POLYGON((4 1.5,8 1.5,8 2.5,4 2.5,4 1.5))", simple
+                          rotated, "POLYGON((4 -2,8 -2,8 2,4 2,4 -2))", simple
+                          source, above, "POLYGON((4 4,0 4,0 0,4 0,4 1,4 2,4 4))"
+                          source, "POLYGON((4 4,8 4,8 8,4 8,4 4))", "POLYGON((4 4,0 4,0 0,4 0,4 1,4 3,4 4))" ] do
+                        let result = call "ST_Difference" [ geometry left; geometry right ]
+                        Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) "the retained ring follows MySQL's contact turns"
+
                 testCase "geographic polygon crossings retain separately rounded contacts"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"

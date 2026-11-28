@@ -3656,8 +3656,9 @@ implementation effort:
    source vertices. A few split decisions differ across MySQL builds.
    [Geographic difference ring starts](torture/findings/2026-11-28-spatial-area.md#ring-starts-in-geographic-differences)
    and clipped member order now follow proper crossings in the audited
-   cases. Shared-edge starts, broader member ordering, and polar
-   endpoints remain open.
+   cases. [Exterior contacts](torture/findings/2026-11-28-spatial-area.md#exterior-contacts-in-geographic-differences)
+   also follow the start and closing rules on retained rings. Inward
+   contacts, broader member ordering, and polar endpoints remain open.
    [Geographic collection difference](torture/findings/2026-11-26-geographic-polygon-union.md#mixed-collection-difference)
    normalizes areas, lines, and points before applying the mask.
    [Geographic collection intersection](torture/findings/2026-11-26-geographic-polygon-union.md#mixed-collection-intersection)

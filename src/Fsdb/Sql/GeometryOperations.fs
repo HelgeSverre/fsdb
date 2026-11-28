@@ -3910,6 +3910,67 @@ let private geographicDifferenceCrossingRanks flattening belongsToSource indexed
         point, (rankOfPair pair, pair, -source.EdgeIndex, clip.EdgeIndex))
     |> Map.ofList
 
+let private geographicDifferenceRingContacts referenceSystem belongsToSource fragments =
+    let source, clip = List.partition (_.Polygon >> belongsToSource) fragments
+    // The source walks clockwise and the clip counterclockwise. Offer the
+    // incoming edge on each side of the contact.
+    let clipAtVertex = clip |> List.groupBy (_.Segment >> snd) |> Map.ofList
+    let clipSegments = clip |> List.map _.Segment |> Set.ofList
+    source
+    |> List.groupBy _.Ring
+    |> List.choose (fun (_, parts) ->
+        let rank (edge: GeographicPolygonFragment) point opposite =
+            -edge.EdgeIndex, opposite.Ring, opposite.EdgeIndex, geographicVertexDistance referenceSystem (snd edge.Edge) point
+        let shared = parts |> List.filter (fun part -> Set.contains (snd part.Segment, fst part.Segment) clipSegments)
+        // Vertices inside a shared run are copied, with no turn at the vertex.
+        let sharedInterior =
+            Set.intersect (shared |> List.map (_.Segment >> fst) |> Set.ofList)
+                          (shared |> List.map (_.Segment >> snd) |> Set.ofList)
+        let contact =
+            parts
+            |> List.collect (fun edge ->
+                let point = fst edge.Segment
+                if Set.contains point sharedInterior then []
+                else
+                    Map.tryFind point clipAtVertex
+                    |> Option.defaultValue []
+                    |> List.map (fun other -> rank edge point other, point))
+            |> List.sortBy fst
+        contact
+        |> List.tryHead
+        |> Option.map (fun (_, start) ->
+            let segments = parts |> List.map _.Segment |> Set.ofList
+            let turns = contact |> List.map snd |> Set.ofList
+            segments, (start, turns)))
+    |> Map.ofList
+
+let private walkGeographicRingContacts referenceSystem (start, turns: Set<_>) ring =
+    let clockwise = ring |> List.rev |> List.take (ring.Length - 1)
+    let before, after = List.splitAt (List.findIndex ((=) start) clockwise) clockwise
+    let rotated = after @ before @ [ start ]
+    let collinear point first last = geographicPointOnLineSegment referenceSystem point (first, last)
+    // The turn can replace the middle of a straight run. Ordinary copied
+    // vertices keep their positions until a turn reaches them.
+    let rec appendTurn point = function
+        | previous :: prior :: rest when collinear previous prior point -> appendTurn point (prior :: rest)
+        | output -> point :: output
+    let output =
+        rotated
+        |> List.fold (fun output point ->
+            if turns.Contains point then appendTurn point output else point :: output) []
+        |> List.rev
+        |> List.toArray
+    let size = output.Length - 1
+    let rec trimStart index =
+        if size - index > 3 && collinear output.[index] output.[size - 1] output.[index + 1] then
+            trimStart (index + 1)
+        else index
+    if size < 3 then ring
+    else
+        let first = trimStart 0
+        let ring = output.[first .. size - 1] |> Array.toList
+        List.rev (ring @ [ List.head ring ])
+
 let private tryGeographicPolygonBoundaryOverlay referenceSystem kind srid left right =
     let polygons = prepareGeographicOverlayPolygons referenceSystem (left @ right)
     if not (supportsGeographicPolygonOverlay polygons) then None
@@ -3983,6 +4044,9 @@ let private tryGeographicPolygonBoundaryOverlay referenceSystem kind srid left r
                 |> List.choose (fun point -> Map.tryFind point differenceCrossings |> Option.map (fun order -> order, point))
                 |> List.sortBy fst
                 |> List.tryHead
+        let contactedRings =
+            if kind = OverlayKind.Difference then geographicDifferenceRingContacts referenceSystem belongsToLeft fragments
+            else Map.empty
         let startOutputRing ring =
             // Keep the original vertex for a complete ring, even when its winding changed.
             let sourceStart = Map.tryFind (Set.ofList ring) sourceRingStarts
@@ -3994,6 +4058,14 @@ let private tryGeographicPolygonBoundaryOverlay referenceSystem kind srid left r
                     let before, after = List.splitAt (List.findIndex ((=) start) vertices) vertices
                     after @ before @ [ start ]
                 | _ -> ring
+            let started =
+                if Map.isEmpty contactedRings then started
+                else
+                    // A complete directed source boundary can keep its fill
+                    // and still require traversal through exterior contacts.
+                    match Map.tryFind (ring |> List.pairwise |> Set.ofList) contactedRings with
+                    | Some contact -> walkGeographicRingContacts referenceSystem contact started
+                    | None -> started
             Option.map fst crossing, started
         let orderOutputRings rings =
             let started = List.map startOutputRing rings

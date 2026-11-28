@@ -184,8 +184,27 @@ zigzag rings. Matches rose from 17 to 120. All previous matches held in
 the three replays. Symmetric-difference type and rounded area stayed the
 same across the 360 seeded small-polygon cases.
 
-The 60 adjacent shared-edge controls still differ. In the Boost trace,
-one shared-edge fixture starts at a touch and a partial overlap starts
-at an interior touch. After traversing the latter, Boost removes the
-collinear start and keeps the next corner as the first vertex. The
-proper-crossing ranks do not yet cover these contact turns.
+### Exterior contacts in geographic differences
+
+When the clip touches the outside of a retained source ring, MySQL
+starts its clockwise walk at the first contact turn. The walk removes
+collinear vertices when appending a turn and again at closure. Vertices
+strictly inside a shared run are ordinary vertices during the walk.
+This explains why a partial overlap can move the start to the next
+corner and why an isolated corner contact can keep unrelated collinear
+source vertices.
+
+Fsdb now follows this walk on retained rings. All 60 adjacent cases
+in the 378-case replay match, bringing that total from 318 to 378.
+An additional 880-case replay varied whole and partial shared edges,
+point contacts, ring starts, operand order, and latitude. Ordered
+vertex matches rose from 248 to 800 without losing any previous match.
+In a separate 192-case run with multiple contacts and existing holes,
+matches rose from 84 to 108. The 24 gains came from clips touching
+the unfilled side of an existing hole.
+The 80 outstanding results in the 880-case replay are inward contacts.
+A point contact can produce a touching hole. All 40 such oracle outputs pass `ST_IsValid`,
+whereas Fsdb currently returns a single self-touching ring that fails it.
+The other 40 results are valid in both engines and differ in how the
+walk through a notch starts and removes collinear vertices.
+[Boost ring traversal and closing cleanup](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/overlay/traversal_ring_creator.hpp)
