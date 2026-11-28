@@ -82,11 +82,11 @@ ruby torture/scripts/generate-zh-0900-weights.rb --japanese pack japanese-weight
 
 ## Three-level Japanese wildcards
 
-The three-level `utf8mb4_ja_0900_as_cs` collation has a separate bigram
-prefix difference on pinned MySQL 8.4.11. In the following fixture,
-`か*`, `カ*`, and `ｶ*` each return IDs 1 through 9 and 12. Fsdb omits
+The three-level `utf8mb4_ja_0900_as_cs` collation had a separate bigram
+prefix difference against pinned MySQL 8.4.11. In the following fixture,
+`か*`, `カ*`, and `ｶ*` each return IDs 1 through 9 and 12. Fsdb omitted
 IDs 2 and 8, which start with precomposed voiced Kana. With `が*` or
-`ガ*`, MySQL returns IDs 2 and 8, while Fsdb also returns the decomposed
+`ガ*`, MySQL returns IDs 2 and 8, while Fsdb also returned the decomposed
 form in row 3. The exact `かな` query returns IDs 1, 4, 5, and 6 on both
 engines.
 
@@ -109,5 +109,22 @@ WHERE MATCH(body) AGAINST ('が*' IN BOOLEAN MODE) ORDER BY id;
 In a separate weight comparison, the first three levels of
 `utf8mb4_ja_0900_as_cs_ks` matched `utf8mb4_ja_0900_as_cs` byte for byte
 on 734 single characters, 1,624 Kana-plus-mark pairs, and 300 seeded
-mixed strings. This gives a path to reuse the pinned Japanese weights
-while testing the three-level prefix cursor independently.
+mixed strings. Fsdb now builds full-text keys from those three levels
+and uses them in the ordered cache and disk prefix cursors.
+
+The 12-row fixture and its mutations match MySQL membership across all
+70 Boolean queries in five phases. With `が*`, the result changes from
+IDs 2 and 8 in cache to ID 3 after flush, then to IDs 3 and 13 after new
+inserts. After the deletion and final optimize, IDs 3 and 15 match.
+Checkpoints written by the previous implementation reopen with corrected
+results for cached postings, flushed postings, and mixed postings after
+deletion. The seeded multi-column corpus matched MySQL membership and
+scores across 212 bigram searches and 266 default-parser searches,
+including edits and deletes.
+
+On the first 70-query replay, scores agreed through deletion. The last
+optimize left 13 live rows, and MySQL's exact `かな` query scored as if
+there were 12. Repeating with a statistics read after the first match
+showed MySQL's estimates diverging from `COUNT(*)` after optimize. Fsdb
+uses the live count, so score differences from estimated document counts
+remain open. [MySQL document-count lookup](https://github.com/mysql/mysql-server/blob/mysql-8.4.11/storage/innobase/fts/fts0que.cc#L3668-L3672)

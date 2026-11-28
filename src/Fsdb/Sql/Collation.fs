@@ -2070,8 +2070,10 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                 Uca0900Weights.accentSensitiveKey s
             elif name = "utf8mb4_0900_as_cs" then
                 Uca0900Weights.caseSensitiveKey s
+            elif name = "utf8mb4_ja_0900_as_cs" then
+                Uca0900Weights.japaneseFullTextKey false s
             elif name = "utf8mb4_ja_0900_as_cs_ks" then
-                Uca0900Weights.japaneseFullTextKey s
+                Uca0900Weights.japaneseFullTextKey true s
             elif usesGeneralFullTextWeights name then
                 s |> lowercaseWith LegacyFullTextCaseData.unicode400 |> trim |> generalFullTextKey
             else

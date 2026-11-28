@@ -430,13 +430,15 @@ let private cacheDocumentTerms (words: (string * Token[])[]) terms =
 let private usesOrderedPrefixes (collation: Collation) tokenizer =
     match collation.Name, tokenizer with
     | "utf8mb4_0900_as_cs", _
+    | "utf8mb4_ja_0900_as_cs", _
     | "utf8mb4_ja_0900_as_cs_ks", _
     | "utf8mb4_0900_as_ci", Ngrams _ -> true
     | _ -> false
 
 let private compareOrderedPrefix (collation: Collation) key =
     match collation.Name with
-    | "utf8mb4_0900_as_cs" -> Uca0900Weights.caseSensitivePrefixCompare key
+    | "utf8mb4_0900_as_cs"
+    | "utf8mb4_ja_0900_as_cs" -> Uca0900Weights.caseSensitivePrefixCompare key
     | "utf8mb4_ja_0900_as_cs_ks" -> Uca0900Weights.japanesePrefixCompare key
     | _ -> Uca0900Weights.accentSensitivePrefixCompare key
 

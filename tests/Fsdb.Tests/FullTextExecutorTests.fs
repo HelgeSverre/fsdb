@@ -743,6 +743,33 @@ let tests =
                   [ "1" ]
                   "mixed-script columns do not gain a false halfwidth posting"
 
+          testCase "Japanese three-level ngram prefixes use MySQL voicing boundaries"
+          <| fun _ ->
+              let store = create ()
+              configureNgramTokenSize 2 store
+              run store "CREATE TABLE kana_prefix(id INT PRIMARY KEY,body TEXT COLLATE utf8mb4_ja_0900_as_cs,FULLTEXT KEY ft(body) WITH PARSER ngram)" |> ignore
+              run store "INSERT INTO kana_prefix VALUES (1,'かな'),(2,'がな'),(3,'がな'),(4,'ｶﾅ'),(5,'カナ'),(6,'かナ'),(7,'ｶﾞﾅ'),(8,'ガナ'),(9,'かた'),(10,'漢字'),(11,'東京'),(12,'カル')" |> ignore
+
+              let search term =
+                  ids (run store $"SELECT id FROM kana_prefix WHERE MATCH(body) AGAINST('{term}' IN BOOLEAN MODE) ORDER BY id")
+              for term in [ "か*"; "カ*"; "ｶ*" ] do
+                  Expect.equal (search term) ([1 .. 9] @ [12] |> List.map string) term
+              for term in [ "が*"; "ガ*" ] do
+                  Expect.equal (search term) [ "2"; "8" ] term
+              Expect.equal (search "が*") [ "3" ] "the decomposed input retains its own token boundary"
+              Expect.equal (search "かな") [ "1"; "4"; "5"; "6" ] "exact keys retain voicing distinctions"
+
+              let session = Fsdb.Session.create 1 store
+              Fsdb.QueryHandler.handle session "SET GLOBAL innodb_optimize_fulltext_only=ON" |> ignore
+              Fsdb.QueryHandler.handle session "OPTIMIZE TABLE kana_prefix" |> ignore
+              Expect.equal (search "が*") [ "3" ] "the flushed cursor starts at the decomposed posting"
+              run store "INSERT INTO kana_prefix VALUES (13,'がた'),(14,'かた'),(15,'がた'),(16,'漢文')" |> ignore
+              Expect.equal (search "が*") [ "3"; "13" ] "mixed cached and flushed postings"
+              run store "DELETE FROM kana_prefix WHERE id IN (2,7,13)" |> ignore
+              Expect.equal (search "が*") [ "3" ] "deleted postings leave the result"
+              Fsdb.QueryHandler.handle session "OPTIMIZE TABLE kana_prefix" |> ignore
+              Expect.equal (search "が*") [ "3"; "15" ] "optimize makes the later decomposed posting visible"
+
           testCase "Japanese kana-sensitive order and indexed range follow MySQL script and voicing levels"
           <| fun _ ->
               let store = create ()

@@ -167,8 +167,10 @@ let accentSensitiveKey value =
 let caseSensitiveKey value =
     Convert.ToHexString((weightOf false caseSensitiveTable.Value value).Bytes)
 
-let japaneseFullTextKey value =
-    Convert.ToHexString((weightOf true japaneseTable.Value value).Bytes)
+let japaneseFullTextKey kanaSensitive value =
+    let weight = weightOf true japaneseTable.Value value
+    let length = if kanaSensitive then weight.Bytes.Length else weight.TertiaryEnd
+    Convert.ToHexString(weight.Bytes, 0, length)
 
 let private prefixCompare levels (prefix: string) =
     let levelEnd (key: string) start =
