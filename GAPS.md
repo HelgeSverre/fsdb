@@ -1067,8 +1067,10 @@ now binds current table and column names for audited consistent SELECTs.
 Reads of replaced layouts return 1412 without ending the transaction.
 Audited single-table SELECTs now distinguish inherited B-tree keys from
 new keys, including renames, covering scans, point misses, and ordered
-limits. Broader access plans, locking reads, mutations, and prepared or
-EXPLAIN paths still differ.
+limits. Single-table locking reads also check the selected key before
+acquiring row locks while keeping current row versions for clustered
+reads. Broader access plans, mutation hints, and prepared or EXPLAIN
+paths still differ.
 [Point UPDATE and DELETE](torture/findings/2026-11-27-current-point-writes.md)
 can seek an exact unique key absent from the transaction's old write
 view. The audited writes wait for a pending key or its current row and

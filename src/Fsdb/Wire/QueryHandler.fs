@@ -3792,12 +3792,12 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
                                             else
                                                 let refresh () = rebaseTransactionSnapshot session transaction |> snd
                                                 let planningStore =
-                                                    if readSelect.OrderBy.IsEmpty && readSelect.Limit.IsSome
+                                                    if (not select.Locking.IsEmpty || (readSelect.OrderBy.IsEmpty && readSelect.Limit.IsSome))
                                                        && readSelect.Joins.IsEmpty && readSelect.Ctes.IsEmpty then
                                                         let revision catalog =
                                                             Storage.tableSnapshot catalog database source.Table
                                                             |> Result.toOption |> Option.map _.SchemaRevision
-                                                        // A locking read can open a replacement table first accessed after the snapshot.
+                                                        // Current index definitions determine whether a clustered read is appropriate.
                                                         if revision store <> revision session.Store then refresh () else store
                                                     else store
                                                 Executor.tryPrimaryRead protectGaps wait planningStore registry dbName readSelect

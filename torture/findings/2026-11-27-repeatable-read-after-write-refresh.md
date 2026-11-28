@@ -143,5 +143,19 @@ The pinned MySQL comparison includes matching and missing keys, covering
 and noncovering projections, forced and ignored keys, no-scan conditions,
 and both a 24-row table and a 256-row table. Planning data for a new key
 is built from pinned rows and reused for later reads of that definition.
-Broader join and expression index opens, locking reads, mutation, and
-prepared or EXPLAIN paths remain open.
+Broader join and expression index opens, mutation, and prepared or
+EXPLAIN paths remain open.
+
+### Locking reads after in-place index creation
+
+MySQL 8.4.11 binds hints against the current definition. After another
+session changes a row and adds a B-tree key in place, a clustered locking
+read can return the new value while a later consistent SELECT returns the
+pinned value. A locking read that opens the new key returns 1412 before
+acquiring row locks. This applies to UPDATE and SHARE locks, including
+NOWAIT and SKIP LOCKED. READ COMMITTED can open the new key.
+
+The comparison exercises equality hits and misses, range misses,
+covering and noncovering scans, ORDER BY with and without LIMIT, and
+empty predicates. The remaining differences in this fixture concern
+index hints on UPDATE.

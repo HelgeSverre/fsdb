@@ -16816,6 +16816,41 @@ let tests =
                                (Err(1176, "Key 'inherited' doesn't exist in table 't'"))
               run reader "ROLLBACK" (Affected 0UL) |> ignore
 
+          testCase "locking reads reject a secondary index created after the read view"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let writer = run (create 1 store) "CREATE TABLE t(id INT PRIMARY KEY, k INT, payload INT)" (Affected 0UL)
+              let writer = run writer "INSERT INTO t VALUES(1,10,100),(2,20,200)" (Affected 2UL)
+              let reader = run (create 2 store) "START TRANSACTION WITH CONSISTENT SNAPSHOT" (Affected 0UL)
+              let writer = run writer "UPDATE t SET payload=300 WHERE id=1" (Affected 1UL)
+              let writer = run writer "ALTER TABLE t ADD INDEX ix(k), ALGORITHM=INPLACE" (Affected 0UL)
+              let unavailable = Err(1412, "Table definition has changed, please retry transaction")
+              let reader = run reader "SELECT id FROM t FORCE INDEX(ix) WHERE k=10 FOR UPDATE" unavailable
+              let reader = run reader "SELECT id FROM t FORCE INDEX(ix) WHERE k=999 FOR SHARE" unavailable
+              let reader = run reader "SELECT id FROM t FORCE INDEX(ix) WHERE k=10 FOR UPDATE NOWAIT" unavailable
+              let reader = run reader "SELECT id FROM t FORCE INDEX(ix) WHERE k=10 FOR UPDATE SKIP LOCKED" unavailable
+              let reader = run reader "SELECT id FROM t WHERE k=10 FOR UPDATE" unavailable
+              let reader = run reader "SELECT id FROM t FORCE INDEX(ix) FOR UPDATE" unavailable
+              let reader = run reader "SELECT payload FROM t FORCE INDEX(ix) ORDER BY k LIMIT 1 FOR UPDATE" unavailable
+              let reader = run reader "SELECT id FROM t FORCE INDEX(ix) WHERE k>10 AND k<5 FOR UPDATE" (ResultSet([ "id" ], []))
+              let reader = run reader "SELECT id FROM t FORCE INDEX(ix) LIMIT 0 FOR UPDATE" (ResultSet([ "id" ], []))
+              let writer = run writer "START TRANSACTION" (Affected 0UL)
+              let writer = run writer "SELECT id FROM t WHERE id=1 FOR UPDATE NOWAIT" (ResultSet([ "id" ], [ [ Some "1" ] ]))
+              run writer "ROLLBACK" (Affected 0UL) |> ignore
+              let reader = run reader "SELECT payload FROM t FORCE INDEX(PRIMARY) WHERE id=1 FOR UPDATE"
+                               (ResultSet([ "payload" ], [ [ Some "300" ] ]))
+              let reader = run reader "SELECT payload FROM t WHERE k=10 FOR UPDATE" (ResultSet([ "payload" ], [ [ Some "300" ] ]))
+              let reader = run reader "SELECT payload FROM t WHERE id=1" (ResultSet([ "payload" ], [ [ Some "100" ] ]))
+              let reader = run reader "ROLLBACK" (Affected 0UL)
+              let reader = run reader "SET TRANSACTION ISOLATION LEVEL READ COMMITTED" (Affected 0UL)
+              let reader = run reader "START TRANSACTION" (Affected 0UL)
+              let reader = run reader "SELECT id FROM t FORCE INDEX(ix) WHERE k=10 FOR UPDATE" (ResultSet([ "id" ], [ [ Some "1" ] ]))
+              run reader "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "transaction access modes, chaining, and SET CHARACTER SET are enforced"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

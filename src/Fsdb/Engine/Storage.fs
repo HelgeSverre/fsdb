@@ -1187,6 +1187,13 @@ let internal recordConsistentReadView (live: Store) snapshot =
 let internal pinConsistentReadView snapshot catalog =
     recordReadView snapshot (fun () -> catalog)
 
+let private tryConsistentReadView (store: Store) =
+    store.TransactionLocks
+    |> Option.bind (fun context ->
+        match store.ConsistentReadViews.TryGetValue context.Owner with
+        | true, catalog -> Some catalog
+        | false, _ -> None)
+
 let internal transactionGapLocks (store: Store) =
     match store.TransactionLocks with
     | None -> []
@@ -4170,16 +4177,26 @@ let private bindReadIndexes (pinned: Table) (current: Table) =
         let bindings = readIndexBindings.GetValue(pinned, fun _ -> ConcurrentDictionary())
         bindings.GetOrAdd(current.SchemaRevision, fun _ -> lazy (rebindChangedReadIndexes pinned current)).Value
 
+let internal lockingReadUnavailableIndexes store database name (current: Table) =
+    tryConsistentReadView store
+    |> Option.bind (fun catalog ->
+        let sameLayout (table: Table) = table.ReadLayoutRevision = current.ReadLayoutRevision
+        let previous = tryCatalogDatabase database catalog |> Option.bind (Map.tryFind (normalizeTableName name))
+        match previous with
+        | Some table when sameLayout table -> previous
+        | _ -> catalog |> Map.values |> Seq.collect Map.values |> Seq.tryFind sameLayout)
+    |> Option.filter (fun pinned -> pinned.ReadIndexRevisions <> current.ReadIndexRevisions)
+    |> Option.map (fun pinned ->
+        let inherited = pinned.ReadIndexRevisions |> Map.values |> Set.ofSeq
+        current.ReadIndexRevisions
+        |> Map.toSeq
+        |> Seq.choose (fun (name, revision) -> if Set.contains revision inherited then None else Some name)
+        |> Set.ofSeq)
+    |> Option.defaultValue Set.empty
+
 /// The write base can advance independently of the committed read view.
 /// Overlay only this transaction's changes on that read view.
 let internal consistentReadSnapshot (working: Store) (writeBase: Catalog) (live: Store) accessedTables =
-    let pinned =
-        working.TransactionLocks
-        |> Option.bind (fun context ->
-            match working.ConsistentReadViews.TryGetValue context.Owner with
-            | true, catalog -> Some catalog
-            | false, _ -> None)
-
     let overlayOwnChanges catalog =
         working.Catalog
         |> Map.fold (fun visible dbName workingDb ->
@@ -4199,7 +4216,7 @@ let internal consistentReadSnapshot (working: Store) (writeBase: Catalog) (live:
                 | None, _ -> Map.add dbName workingDb visible
                 | _ -> visible) catalog
 
-    match pinned with
+    match tryConsistentReadView working with
     | None -> working
     | Some catalog ->
         let unchanged = catalog.Count = writeBase.Count
