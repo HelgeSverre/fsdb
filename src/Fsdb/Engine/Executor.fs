@@ -7586,8 +7586,8 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | Add when isIntervalValue vb -> tryDateIntervalBinOp 1.0 va vb |> Option.defaultValue (Value.add va vb) |> Ok
                     | Sub when isIntervalValue vb -> tryDateIntervalBinOp -1.0 va vb |> Option.defaultValue (Value.sub va vb) |> Ok
                     | SignedSub when isIntervalValue vb -> tryDateIntervalBinOp -1.0 va vb |> Option.defaultValue (Value.subSigned va vb) |> Ok
-                    | Add -> Ok(arith Value.add)
-                    | Sub -> Ok(arith Value.sub)
+                    | Add -> Ok(arith Value.addChecked)
+                    | Sub -> Ok(arith Value.subChecked)
                     | SignedSub -> Ok(arith Value.subSigned)
                     | Mul -> Ok(arith Value.mul)
                     | Div -> divide (Value.divWithIntermediatePrecision (divisionPrecisionIncrement ()))
@@ -12984,6 +12984,83 @@ and private whereMatches (ctxFor: Value[] -> EvalContext) (where: Expr option) (
     | None -> Ok true
     | Some expr -> evalExpr { ctxFor row with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
 
+and private exactWhereIntegerColumn context column =
+    tryDirectColumnForExpr context column
+    |> Option.filter (fun (_, definition) -> isExactIntegerIndexType definition.Type)
+
+and private isExactWhereComparison context =
+    let rec signedOperand = function
+        | BinOp((Add | Sub), left, right) -> signedOperand left && signedOperand right
+        | Cast(operand, target) -> (signedIntegerTypeBounds target).IsSome && signedOperand operand
+        | (Col _ | QualifiedCol _) as column ->
+            tryColumnDefForExpr context column |> Option.exists (fun definition -> (integerTypeBounds definition.Type).IsSome)
+        | LiteralValue(VUInt _) -> true
+        | expression -> (trySignedIntegerConstant expression).IsSome
+
+    function
+    | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), left, right) ->
+        ((exactWhereIntegerColumn context left).IsSome && signedOperand right)
+        || ((exactWhereIntegerColumn context right).IsSome && signedOperand left)
+    | _ -> false
+
+and private elidedWhereTruth context where =
+    let canSkipExactComparison = isExactWhereComparison context
+    let canSkipComparedDivision =
+        isElidableDivisionComparison
+            (tryDirectColumnForExpr context >> Option.isSome)
+            (isLiteralConstantExpression context.Registry)
+
+    let contradictoryEqualities = function
+        | Some(BinOp(And, _, _) as expression) ->
+            let terms = conjuncts expression
+            let literalKey column = function
+                | LiteralValue(VInt value) -> exactWhereIntegerColumn context column |> Option.map (fun (position, _) -> position, bigint value)
+                | LiteralValue(VUInt value) -> exactWhereIntegerColumn context column |> Option.map (fun (position, _) -> position, bigint value)
+                | _ -> None
+            let equalities =
+                terms |> List.choose (function
+                    | BinOp(Eq, left, right) -> literalKey left right |> Option.orElseWith (fun () -> literalKey right left)
+                    | _ -> None)
+            match equalities with
+            | _ :: _ :: _ ->
+                let values = Dictionary<int, bigint>()
+                let conflicts =
+                    equalities |> List.exists (fun (position, value) ->
+                        match values.TryGetValue position with
+                        | true, previous -> previous <> value
+                        | false, _ ->
+                            values.Add(position, value)
+                            false)
+                conflicts && List.forall canSkipExactComparison terms
+            | _ -> false
+        | _ -> false
+
+    if hasFalseLiteralConjunct (fun expression -> canSkipComparedDivision expression || canSkipExactComparison expression) where
+       || contradictoryEqualities where then Some false
+    elif hasTrueLiteralDisjunct canSkipComparedDivision where then Some true
+    else None
+
+and private validateUnevaluatedExpression allowAggregates (context: EvalContext) expression =
+    let rec firstFunctionError expression =
+        Expression.children expression
+        |> List.tryPick firstFunctionError
+        |> Option.orElseWith (fun () ->
+            match expression with
+            | FuncCall _ when isAggregateCall context.Registry expression ->
+                if allowAggregates then None else Some(1111, "Invalid use of group function")
+            | FuncCall(name, _) ->
+                match validateFunctionName context.Registry context.DbName name with
+                | Error error -> Some error
+                | Ok() -> None
+            | _ -> None)
+    validateExpressionInContext context expression
+    |> Result.bind (fun () ->
+        firstFunctionError expression |> Option.map Error |> Option.defaultValue (Ok()))
+
+and private deferProbeOverflow context expression fallback = function
+    | Error(1690, _) -> validateUnevaluatedExpression true context expression |> Result.map (fun () -> fallback)
+    | evaluated -> evaluated
+
 and private prepareWhereMatches
     (ctxFor: Value[] -> EvalContext)
     (where: Expr option)
@@ -12992,34 +13069,9 @@ and private prepareWhereMatches
     let correlatedBounds = correlatedNumericWarningScope.Value
     let evaluate expression row = evalExpr { ctxFor row with Clause = WhereClause } expression
 
-    let canSkipComparedDivision =
-        isElidableDivisionComparison
-            (tryDirectColumnForExpr context >> Option.isSome)
-            (isLiteralConstantExpression context.Registry)
-
-    let validateElidedPredicate expression =
-        let probe = { context with Row = Array.create context.ColumnsByPosition.Length VNull }
-        let rec firstMissingFunction expression =
-            Expression.children expression
-            |> List.tryPick firstMissingFunction
-            |> Option.orElseWith (fun () ->
-                match expression with
-                | FuncCall _ when isAggregateCall context.Registry expression ->
-                    Some(1111, "Invalid use of group function")
-                | FuncCall(name, _) ->
-                    match validateFunctionName context.Registry context.DbName name with
-                    | Error error -> Some error
-                    | Ok() -> None
-                | _ -> None)
-
-        validateExpressionInContext probe expression
-        |> Result.bind (fun () ->
-            firstMissingFunction expression
-            |> Option.map Error
-            |> Option.defaultValue (Ok()))
-
     let elidedResult truth expression =
-        let validated = validateElidedPredicate expression
+        let probe = { context with Row = Array.create context.ColumnsByPosition.Length VNull }
+        let validated = validateUnevaluatedExpression false probe expression
         fun _ -> validated |> Result.map (fun () -> truth)
 
     let usesApproximateBound integerBounds = function
@@ -13098,19 +13150,18 @@ and private prepareWhereMatches
             | None -> evaluate expression
         | _ -> evaluate expression
 
-    match where with
-    | None -> fun _ -> Ok true
-    | Some expression when hasFalseLiteralConjunct canSkipComparedDivision where -> elidedResult false expression
-    | Some expression when hasTrueLiteralDisjunct canSkipComparedDivision where -> elidedResult true expression
-    | Some expression when isLiteralConstantExpression context.Registry expression ->
+    match where, elidedWhereTruth context where with
+    | None, _ -> fun _ -> Ok true
+    | Some expression, Some truth -> elidedResult truth expression
+    | Some expression, None when isLiteralConstantExpression context.Registry expression ->
         let result = evaluate expression [||] |> Result.map (truthy >> (=) (Some true))
         fun _ -> result
-    | Some expression when storedRowsMatchReadRows context.Store (context.ColumnsByPosition |> Seq.choose id) ->
+    | Some expression, None when storedRowsMatchReadRows context.Store (context.ColumnsByPosition |> Seq.choose id) ->
         // A metadata probe can reach an integer predicate that execution skips.
         let integerBounds = correlatedBounds && not metadataProbe.Value && not (Diagnostics.isSuppressed ())
         let prepared = prepare true integerBounds expression
         fun row -> prepared row |> Result.map (truthy >> (=) (Some true))
-    | Some expression ->
+    | Some expression, None ->
         fun row -> evaluate expression row |> Result.map (truthy >> (=) (Some true))
 
 /// `NATURAL JOIN`'s name set: every column name the two sides share,
@@ -23655,6 +23706,10 @@ and private evalProjection (ctx: EvalContext) (columns: ColumnDef list) (proj: P
         evalExpr { ctx with ProjectionLabel = Some(projectionLabel proj) } expr
         |> Result.map (fun v -> [ projectionLabel proj, v ])
 
+and private describeProjectionByProbe context columns projection =
+    evalProjection context columns projection
+    |> deferProbeOverflow context projection.Expression [ projectionLabel projection, VNull ]
+
 /// An all-NULL row that surfaces schema errors even when no data row matches.
 and private probeRow (columns: ColumnDef list) : Value[] = Array.create (List.length columns) VNull
 
@@ -25069,7 +25124,7 @@ and private runGroupedSelect
     let charProjection = containsCharProjection select.Projections
     let mutable projectedGroupNumber = 0
 
-    let projectGroup (rollup: Expr -> Expr, rolledKeys: Expr list) (groupRows: GroupInputRow list) : Result<(string * Value) list, EvalError> =
+    let projectGroup evaluateValue (rollup: Expr -> Expr, rolledKeys: Expr list) (groupRows: GroupInputRow list) : Result<(string * Value) list, EvalError> =
         let representative = representativeOf groupRows
         let evaluate () =
             select.Projections
@@ -25079,7 +25134,7 @@ and private runGroupedSelect
                 | Star(Some qualifier) -> resolveStarQualifier (ctxFor representative) qualifier
                 | _ ->
                     rewriteGroupAggregates groupRows (rollup expr)
-                    |> Result.bind (evalExpr { ctxFor representative with RollupKeys = rolledKeys; ProjectionLabel = Some(projectionLabel projection) })
+                    |> Result.bind (evaluateValue { ctxFor representative with RollupKeys = rolledKeys; ProjectionLabel = Some(projectionLabel projection) })
                     |> Result.map (fun v -> [ projectionLabel projection, v ]))
             |> Result.map List.concat
         if charProjection then
@@ -25106,7 +25161,7 @@ and private runGroupedSelect
             |> Result.bind (evalExpr { ctxFor (representativeOf groupRows) with Clause = HavingClause; RollupKeys = rolledKeys })
             |> Result.map (fun v -> truthy v = Some true)
 
-    let orderKeysOf (rollup: Expr -> Expr, rolledKeys: Expr list) (outputCols: (string * Value) list) (groupRows: GroupInputRow list) : Result<(Value * Collation.Collation option) list, EvalError> =
+    let orderKeysOf evaluateValue (rollup: Expr -> Expr, rolledKeys: Expr list) (outputCols: (string * Value) list) (groupRows: GroupInputRow list) : Result<(Value * Collation.Collation option) list, EvalError> =
         let representative = representativeOf groupRows
         let ctx = { ctxFor representative with RollupKeys = rolledKeys }
 
@@ -25141,7 +25196,7 @@ and private runGroupedSelect
 
         let evalKey (keyCtx: EvalContext) (expr: Expr) =
             let orderCtx = { keyCtx with Clause = OrderClause }
-            evalExpr orderCtx expr |> Result.map (orderKeyOf orderCtx expr)
+            evaluateValue orderCtx expr |> Result.map (orderKeyOf orderCtx expr)
 
         orderBinding
         |> Result.bind (fun () -> orderExpressions |> traverse (fun (expr, _) ->
@@ -25235,6 +25290,8 @@ and private runGroupedSelect
 
     let probe = probeRow columns
     let probeContext = ctxFor probe
+    let describeValue context expression =
+        evalExpr context expression |> deferProbeOverflow context expression VNull
 
     match
         withMetadataProbe (fun () ->
@@ -25242,9 +25299,9 @@ and private runGroupedSelect
                 matches probe
                 |> Result.bind (fun _ -> groupExprs |> traverse (evalExpr { probeContext with Clause = GroupStatement }) |> Result.map ignore)
                 |> Result.bind (fun _ -> havingOk probeRewrite None [])
-                |> Result.bind (fun _ -> projectGroup probeRewrite [])
+                |> Result.bind (fun _ -> projectGroup describeValue probeRewrite [])
                 |> Result.bind (fun probeProjected ->
-                    orderKeysOf probeRewrite probeProjected []
+                    orderKeysOf describeValue probeRewrite probeProjected []
                     |> Result.map (fun _ -> probeProjected))))
     with
     | Error(code, message) -> Err(code, message), [], []
@@ -25452,10 +25509,10 @@ and private runGroupedSelect
                     rollupRewrite rolledCount
                     |> Result.bind (fun rollup ->
                         let project () =
-                            projectGroup rollup groupRows
+                            projectGroup evalExpr rollup groupRows
                             |> Result.bind (fun projection ->
                                 // A single aggregate group has no runtime sort; the metadata probe still validates its names.
-                                let keys = if groupExprs.IsEmpty then Ok [] else orderKeysOf rollup projection groupRows
+                                let keys = if groupExprs.IsEmpty then Ok [] else orderKeysOf evalExpr rollup projection groupRows
                                 keys |> Result.map (fun keys -> projection, keys, key))
                         if groupExprs.IsEmpty then
                             havingOk rollup None groupRows
@@ -27930,6 +27987,57 @@ and private runFullTextSelect
 
                             result, metadata, outputRows
 
+and private correlatedLookupHasEmptyInput store dbName (select: SelectStmt) (context: EvalContext) =
+    match select.From, select.Where with
+    | Some(FromTable tref), Some predicate when context.Outer.IsSome && select.Joins.IsEmpty ->
+        let terms = conjuncts predicate
+        if not (List.forall (isExactWhereComparison context) terms) then false
+        else
+            physicalFastPathTable store dbName tref
+            |> Option.filter (fun table -> storedRowsMatchReadRows store table.Columns)
+            |> Option.exists (fun table ->
+                let qualifier = tref.Alias |> Option.defaultValue tref.Table
+                let source = correlatedProbeSource qualifier table.Columns
+                let classify column bound =
+                    exactWhereIntegerColumn context column
+                    |> Option.bind (fun (position, definition) ->
+                        match bound with
+                        | LiteralValue(VInt value) when (signedIntegerTypeBounds definition.Type).IsSome ->
+                            Some(Choice1Of2(definition.Name.ToLowerInvariant(), (position, value)))
+                        | BinOp((Add | Sub), _, _) when (tryCorrelatedOuterScope source bound).IsSome ->
+                            Some(Choice2Of2(definition.Name.ToLowerInvariant()))
+                        | _ -> None)
+                let collect (guards, outerKeys) = function
+                    | BinOp(Eq, left, right) ->
+                        match classify left right |> Option.orElseWith (fun () -> classify right left) with
+                        | Some(Choice1Of2(name, guard)) -> Map.add name guard guards, outerKeys
+                        | Some(Choice2Of2 name) -> guards, Set.add name outerKeys
+                        | None -> guards, outerKeys
+                    | _ -> guards, outerKeys
+                let guards, outerKeys = List.fold collect (Map.empty, Set.empty) terms
+                if outerKeys.IsEmpty then false
+                else
+                    let misses (position, key) =
+                        table.RowsArray |> Seq.exists (fun row -> row.[position] = VInt key) |> not
+                    let indexes = orderedIndexCandidates table |> List.filter (fun index -> indexAllowedForOrderedAccess IndexJoin tref index.Name)
+                    let columnName (term: IndexOrderTerm) = term.Column.ToLowerInvariant()
+                    let isBound (term: IndexOrderTerm) =
+                        let name = columnName term
+                        term.Transform.IsNone && (Map.containsKey name guards || Set.contains name outerKeys)
+                    let prefixes =
+                        indexes |> List.map (fun index -> index.Terms |> List.takeWhile isBound |> List.map columnName)
+                    let hasOuterProbe prefix = List.exists (fun name -> Set.contains name outerKeys) prefix
+                    let canSkipIndex prefix =
+                        not (hasOuterProbe prefix)
+                        && (prefix |> List.exists (fun name -> Map.tryFind name guards |> Option.exists misses))
+                    // A ref lookup evaluates its outer key before reading rows.
+                    // With a dead independent key or no eligible ref path, an
+                    // exact local equality can reject the rows before that work.
+                    List.exists canSkipIndex prefixes
+                    || (not (List.exists hasOuterProbe prefixes)
+                        && (table.RowsArray.IsEmpty || (guards |> Map.exists (fun _ guard -> misses guard)))))
+    | _ -> false
+
 and private runSelect
     output
     sortInput
@@ -28144,10 +28252,10 @@ and private runSelect
 
     let mutable projectedRowNumber = 0
 
-    let projectRow (row: Value[]) : Result<(string * Value) list, EvalError> =
+    let projectWith evaluateProjection (row: Value[]) : Result<(string * Value) list, EvalError> =
         let evaluate () =
             projections
-            |> traverse (evalProjection (ctxFor row) columns)
+            |> traverse (evaluateProjection (ctxFor row) columns)
             |> Result.map List.concat
 
         if charProjection then
@@ -28156,6 +28264,8 @@ and private runSelect
         else
             evaluate ()
 
+    let projectRow = projectWith evalProjection
+    let describeRow = projectWith describeProjectionByProbe
     let bindOrderAliases =
         orderBy |> List.map (fst >> resolveOrderExpr)
         |> prepareOrderProjectionAliases registry columnIndex qualifiers orderProjections
@@ -28164,11 +28274,17 @@ and private runSelect
     // caller and threaded in here, rather than re-run per `ORDER BY`
     // key — re-running per key would call `projectRow` three times over
     // on the same row for `ORDER BY a, b, c`, for the same result.
-    let orderKeysOf (row: Value[]) (outputCols: (string * Value) list) : Result<(Value * Collation.Collation option) list, EvalError> =
+    let orderKeysWith describe (row: Value[]) (outputCols: (string * Value) list) : Result<(Value * Collation.Collation option) list, EvalError> =
         orderBinding
         |> Result.bind (fun () ->
             let context = bindOrderAliases (ctxFor row) outputCols
-            orderBy |> traverse (fun (expr, _) -> resolveOrderKey sortInput context orderProjections outputCols (resolveOrderExpr expr)))
+            orderBy |> traverse (fun (expr, _) ->
+                let expression = resolveOrderExpr expr
+                let key = resolveOrderKey sortInput context orderProjections outputCols expression
+                if describe then deferProbeOverflow { context with Clause = OrderClause } expression (VNull, None) key
+                else key))
+
+    let orderKeysOf = orderKeysWith false
 
     // The declared fsp per output column, computed once off the probe
     // context — a temporal column renders exactly its fsp digits (see
@@ -28213,15 +28329,31 @@ and private runSelect
 
     let probe = probeRow columns
 
-    match
+    let probeResult =
         Diagnostics.suppress (fun () ->
             withMetadataProbe (fun () ->
                 withSuppressedVariableAssignments (fun () ->
-                    matches probe
-                    |> Result.bind (fun _ -> projectRow probe)
-                    |> Result.bind (fun outputCols -> orderKeysOf probe outputCols |> Result.map (fun _ -> outputCols))))) with
+                    let emptyInput =
+                        match matches probe with
+                        | Error(1690, _)
+                            when elidedWhereTruth (ctxFor probe) whereExpr = Some false
+                                 || correlatedLookupHasEmptyInput store dbName select (ctxFor probe) ->
+                            Ok true
+                        | Error error -> Error error
+                        | Ok _ -> Ok false
+                    emptyInput
+                    |> Result.bind (fun empty ->
+                        describeRow probe
+                        |> Result.bind (fun outputCols ->
+                            orderKeysWith true probe outputCols |> Result.map (fun _ -> empty, outputCols))))))
+
+    match probeResult with
+    | Ok(true, projection) ->
+        let names = projection |> List.map fst
+        let types = columnMetadataOf names.Length [] |> applyWireOverrides outputWireOverrides
+        ResultSet(names, []), types, []
     | Error(code, message) -> Err(code, message), [], []
-    | Ok probeProjection when limit = Some 0 ->
+    | Ok(false, probeProjection) when limit = Some 0 ->
         // `LIMIT 0` still resolves row-dependent result metadata. Those
         // probes must not expose conversion diagnostics or assignments.
         let colNames = probeProjection |> List.map fst
@@ -28236,7 +28368,7 @@ and private runSelect
                     matches row
                     |> Result.bind (fun keep ->
                         if keep then
-                            projectRow row |> Result.map (fun projected ->
+                            describeRow row |> Result.map (fun projected ->
                                 match distinctOffsetKeys with
                                 | Some keys -> keys.Add(distinctKeyOf row projected) |> ignore
                                 | None -> ()
@@ -28252,7 +28384,7 @@ and private runSelect
             | _ -> ()
             let types = columnMetadataOf (List.length colNames) allProjected
             ResultSet(colNames, []), applyWireOverrides outputWireOverrides types, []
-    | Ok probeProjection ->
+    | Ok(false, probeProjection) ->
         projectedRowNumber <- 0
         let colNames = probeProjection |> List.map fst
 

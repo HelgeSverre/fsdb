@@ -15206,6 +15206,58 @@ let tests =
                     | ResultSet(_, [ [ Some "4294967294" ] ]) -> ()
                     | other -> failtestf "expected an in-range BIGINT product, got %A" other
 
+                testCase "signed BIGINT addition and subtraction report overflow during SQL evaluation"
+                <| fun _ ->
+                    let store = newStore ()
+                    for sql in
+                        [ "CREATE TABLE bounds(id INT PRIMARY KEY, k BIGINT)"
+                          "INSERT INTO bounds VALUES (1,9223372036854775807)"
+                          "CREATE TABLE events(id INT PRIMARY KEY, k INT, state INT, KEY recent(k,id))"
+                          "INSERT INTO events VALUES(1,1,1),(2,1,1)" ] do
+                        TestSupport.Sql.expectOk (runDefault store sql) sql
+
+                    for sql in
+                        [ "SELECT 9223372036854775807 + 1"
+                          "SELECT (-9223372036854775807 - 1) - 1"
+                          "SELECT o.id,(SELECT e.id FROM events e WHERE e.k=o.k+1 ORDER BY e.id LIMIT 1) FROM bounds o"
+                          "SELECT id FROM events WHERE 9223372036854775807+1=0 AND 0"
+                          "SELECT COUNT(*),9223372036854775807+1 FROM events WHERE state=7"
+                          "UPDATE bounds SET k=k+1"
+                          "UPDATE IGNORE bounds SET k=k+1" ] do
+                        TestSupport.Sql.expectError 1690 (runDefault store sql) sql
+
+                    let decimalResult = runDefault store "SELECT CAST(9223372036854775807 AS DECIMAL(20,0)) + 1 AS v"
+                    Expect.equal decimalResult (ResultSet([ "v" ], [ [ Some "9223372036854775808" ] ])) "DECIMAL has a wider domain"
+
+                    for predicate in [ "e.k=o.k+1 AND 0"; "e.k=o.k+1 AND e.id=1 AND e.id=2"; "e.id=1 AND e.id=2 AND e.k=o.k+1" ] do
+                        let query = $"SELECT (SELECT e.id FROM events e WHERE {predicate} ORDER BY e.id LIMIT 1) AS v FROM bounds o"
+                        Expect.equal (runDefault store query) (ResultSet([ "v" ], [ [ None ] ])) predicate
+                    for predicate in [ "0"; "id=1 AND id=2" ] do
+                        let query = $"SELECT 9223372036854775807+1 AS v FROM events WHERE {predicate}"
+                        Expect.equal (runDefault store query) (ResultSet([ "v" ], [])) predicate
+                    for suffix in [ "LIMIT 0"; "FROM events LIMIT 0 OFFSET 1"; "FROM events WHERE 0=1"; "FROM events WHERE id=7"; "FROM events HAVING 0" ] do
+                        let query = $"SELECT 9223372036854775807+1 AS v {suffix}"
+                        Expect.equal (runDefault store query) (ResultSet([ "v" ], [])) suffix
+                    let skippedOrder = "SELECT id FROM events WHERE state=7 ORDER BY 9223372036854775807+1"
+                    Expect.equal (runDefault store skippedOrder) (ResultSet([ "id" ], [])) "the empty result has no sort keys"
+                    let grouped = "SELECT state,9223372036854775807+1 AS v FROM events WHERE state=7 GROUP BY state"
+                    Expect.equal (runDefault store grouped) (ResultSet([ "state"; "v" ], [])) "the empty result has no groups"
+                    let windowed = "SELECT ROW_NUMBER() OVER (ORDER BY id) AS rn,9223372036854775807+1 AS v FROM events WHERE state=7"
+                    Expect.equal (runDefault store windowed) (ResultSet([ "rn"; "v" ], [])) "the empty result has no window rows"
+                    let offset = "SELECT k+1 AS v FROM bounds LIMIT 0 OFFSET 1"
+                    Expect.equal (runDefault store offset) (ResultSet([ "v" ], [])) "the offset count does not require output values"
+                    let unknown = "SELECT id FROM events WHERE id=1 AND id=2 AND missing_column"
+                    TestSupport.Sql.expectError 1054 (runDefault store unknown) "the empty filter still validates names"
+
+                    let absent hint =
+                        $"SELECT (SELECT e.id FROM events e {hint} WHERE e.k=o.k+1 AND e.state=7 ORDER BY e.id LIMIT 1) AS v FROM bounds o"
+                    let emptyResult = ResultSet([ "v" ], [ [ None ] ])
+                    TestSupport.Sql.expectError 1690 (runDefault store (absent "")) "the correlated key is evaluated for the ref lookup"
+                    Expect.equal (runDefault store (absent "IGNORE INDEX (recent)")) emptyResult "the scan rejects every row"
+                    TestSupport.Sql.expectOk (runDefault store "ALTER TABLE events ADD KEY by_state(state)") "add an independent access path"
+                    Expect.equal (runDefault store (absent "")) emptyResult "the independent key has no candidates"
+                    TestSupport.Sql.expectError 1690 (runDefault store (absent "FORCE INDEX (recent)")) "the forced ref lookup evaluates the key"
+
                 testCase "correlated byte LIKE prefixes bound physical and materialized candidates"
                 <| fun _ ->
                     let mutable calls = 0

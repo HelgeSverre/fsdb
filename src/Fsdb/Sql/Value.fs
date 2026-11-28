@@ -2218,10 +2218,8 @@ let private arith
     | None, _
     | _, None -> VNull
     | Some(KInt x), Some(KInt y) ->
-        // MySQL errors (1690) on int64 overflow rather than wrapping to a
-        // bogus negative; there's no error channel to `Value` arithmetic
-        // here, so the safe compat move is to promote to `decimal` (exact,
-        // just like MySQL's own DECIMAL fallback for oversized literals).
+        // Callers that accumulate in a wider domain can retain an exact value.
+        // SQL operators raise SignedOutOfRange instead of OverflowException.
         try
             VInt(opInt x y)
         with :? OverflowException ->
@@ -2244,16 +2242,14 @@ let private arith
 
 let add = arith (Checked.(+)) (+) (+)
 let sub = arith (Checked.(-)) (-) (-)
-// MySQL keeps signed integer multiplication in BIGINT and raises error 1690
-// on overflow, even when both operands are literals. Raise our domain error
-// inside arith so its DECIMAL fallback does not swallow this overflow.
-let mul =
-    arith
-        (fun left right ->
-            try Checked.( * ) left right
-            with :? OverflowException -> raise SignedOutOfRange)
-        ( * )
-        ( * )
+
+let private checkedSigned (operator: int64 -> int64 -> int64) left right =
+    try operator left right
+    with :? OverflowException -> raise SignedOutOfRange
+
+let internal addChecked = arith (checkedSigned (Checked.(+))) (+) (+)
+let internal subChecked = arith (checkedSigned (Checked.(-))) (-) (-)
+let mul = arith (checkedSigned (Checked.( * ))) ( * ) ( * )
 
 let subSigned (a: Value) (b: Value) : Value =
     match classify a, classify b with

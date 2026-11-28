@@ -132,7 +132,27 @@ queries before timing.
 
 The pinned oracle also agrees on reversed equality, nested arithmetic,
 INT boundaries, NULL-safe equality, repeated bounds, inner column names
-shadowing outer names, and the ignored-index controls. Signed BIGINT addition that
-overflows remains a separate evaluation divergence. The existing
-executor widens the result to DECIMAL, whereas MySQL raises error 1690
-when it evaluates the overflowing expression.
+shadowing outer names, and the ignored-index controls.
+
+### Signed BIGINT overflow and empty reads
+
+SQL addition and subtraction over signed BIGINT now raise error 1690
+on overflow. The exact DECIMAL and unsigned controls retain their own
+arithmetic domains. Integer equality contradictions and constant-false
+filters can eliminate a read while still validating column and function
+references. A standalone overflowing constant in WHERE can still fail
+during condition evaluation.
+
+For the audited correlated equality, an eligible ref lookup evaluates
+the overflowing outer key before reading the inner rows. A competing
+independent index with no matching key can finish the query first.
+Ignoring the ref index also lets an exact local equality reject every
+inner row on the scan. A local range predicate retains the error in
+the corresponding control.
+
+Projection and sort expressions can overflow on the synthetic row used
+to describe an empty result. Fsdb now validates those expressions
+in that row's binding scope and defers the error to evaluation on
+actual result rows. The pinned MySQL 8.4.11 replay matched all 89
+observations, including grouped and windowed empty reads, prepared
+limits, wire column types, FOUND_ROWS, and writes.

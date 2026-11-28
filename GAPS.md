@@ -3301,6 +3301,9 @@ implementation effort:
    [Computed signed-integer prefixes](torture/findings/2026-11-27-explain-analyze-correlated-top-n.md#computed-signed-integer-prefixes)
    seek the ordered slice when outer addition or subtraction stays in the
    BIGINT domain. Static plans report the computed reference as `func`.
+   [Signed BIGINT overflow](torture/findings/2026-11-27-explain-analyze-correlated-top-n.md#signed-bigint-overflow-and-empty-reads)
+   now follows the audited evaluation order for constant-empty filters,
+   ordered probes, and result metadata.
    Other computed lookup keys, residual predicates, and broader
    aggregate shapes still need work.
 
