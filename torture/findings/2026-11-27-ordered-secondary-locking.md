@@ -247,13 +247,41 @@ zero otherwise. When its INSERT reserved an
 auto-increment ID before the late rejection, the reservation survived
 an abrupt WAL restart in the base-table and checked-view cases.
 
-A late 1062 in a staged batch still aborts the statement. MySQL can
-retain an independent insert or revisit the rejected row's original
-unique key when choosing which branch a later candidate takes.
-For example, when another transaction commits unique value 7,
-the batch `VALUES(40,4),(60,4) ON DUPLICATE KEY UPDATE u=7`
-leaves id 40 at value 4 and warns twice. The second candidate still
-matches the original unique key.
+### Late collisions in an ignored batch
+
+An ignored upsert batch now applies candidates in input order inside
+one private statement snapshot. MySQL and Fsdb both leave id 40 at
+value 4 and warn twice for `VALUES(40,4),(60,4) ON DUPLICATE KEY UPDATE u=7`
+when another transaction commits unique value 7. The second candidate
+matches the original unique key. If the holder rolls back, the first
+candidate moves id 40 to value 7 and the second inserts id 60 with
+value 4.
+
+An independent insert stays in the batch after an ignored collision.
+A fatal lock timeout rolls back earlier rows in the same statement.
+The connection retains user-variable assignments evaluated before
+the timeout. Reserved AUTO_INCREMENT values remain available to
+later candidates in the same batch. The reservation still advances
+the next ID beyond the batch. The MySQL manual leaves LAST_INSERT_ID()
+undefined after a statement error.
+[MySQL information functions](https://dev.mysql.com/doc/refman/8.4/en/information-functions.html#function_last-insert-id)
+
+The pinned MySQL comparison matched 78 schedules in Fsdb memory and WAL
+mode. It covered VALUES, SELECT from a permanent source, checked views,
+READ COMMITTED, REPEATABLE READ, explicit transactions, and
+CLIENT_FOUND_ROWS. A separate WAL crash replay recovered a batch that
+updated its own inserted row after another transaction's insert changed
+its storage row ID. Replacing the permanent SELECT source with a
+temporary table still produced 1205 on Fsdb when the holder committed.
+All eight rollback controls for that temporary source agreed.
+
+In a native in-memory Debug run without contention, the median
+1,000-candidate batch went from 64 to 129 ms for payload updates and
+from 89 to 161 ms for unique-key moves. Each median used four measured
+runs after one warm-up. Both versions returned the same affected-row
+counts in that fixture.
+
+### Occupied keys being released
 
 When the holder moves away from an already committed value, MySQL
 waits before deciding whether that value is available. Fsdb checks

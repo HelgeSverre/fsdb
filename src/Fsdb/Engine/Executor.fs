@@ -34815,8 +34815,9 @@ let rec private executeAsWithViewSources
 
                 let checkScope = viewCheckForTarget s db table
                 let ignoreViewCheck = ignoreDuplicates && checkScope.IsSome
+                let dynamic = Storage.dynamicWriteRebaseActive s
                 let finishGenerated =
-                    if ignoreViewCheck && (tableColumns |> List.exists _.AutoIncrement) then
+                    if ignoreDuplicates && (dynamic || ignoreViewCheck) && (tableColumns |> List.exists _.AutoIncrement) then
                         Some(computeGeneratedRow s registry db table tableColumns)
                     else
                         None
@@ -34835,11 +34836,12 @@ let rec private executeAsWithViewSources
                         column.AutoIncrement
                         && (onDuplicateUpdate |> List.exists (fun (name, _) -> equalsIgnoreCase name column.Name)))
 
-                match Storage.dynamicWriteRebaseActive s, finishGenerated with
-                | true, Some finish ->
-                    Storage.upsertCheckedRowsDynamically
-                        s db table cols rowsValues input prepare finish applyUpdate checkChangedRow
-                        (Some coercedAssignments) assignsAuto foundRows
+                match dynamic, ignoreDuplicates with
+                | true, true ->
+                    let reservation = finishGenerated |> Option.map (fun finish -> input, finish, assignsAuto)
+                    Storage.upsertIgnoredRowsDynamically
+                        s db table cols rowsValues prepare reservation applyUpdate checkChangedRow
+                        (Some coercedAssignments) foundRows ignoreViewCheck
                 | false, _ ->
                     let allocation =
                         finishGenerated
@@ -34847,41 +34849,26 @@ let rec private executeAsWithViewSources
                         |> Option.defaultValue StandardAllocation
                     upsertRowsWithOrdinalChecked
                         s db table cols (List.map Ok rowsValues) prepare applyUpdate checkChangedRow (Some coercedAssignments) foundRows ignoreDuplicates ignoreViewCheck allocation
-                | true, None ->
+                | true, false ->
                     rowsValues
                     |> List.indexed
                     |> traverse (fun (ordinal, values) ->
                         Diagnostics.withRowNumber (ordinal + 1) (fun () ->
-                            match Storage.prepareInsertCandidate s db table cols values prepare with
-                            | Error error when ignoreViewCheck && Storage.isViewCheckError error -> Ok(Error error)
-                            | result -> Result.map Ok result))
+                            Storage.prepareInsertCandidate s db table cols values prepare))
                     |> Result.bind (fun prepared ->
-                        let candidates = prepared |> List.map (Result.map _.Values)
+                        let candidates = prepared |> List.map _.Values
 
-                        Storage.acquirePreparedInsertWriteTargets s db table (candidates |> List.choose Result.toOption)
+                        Storage.acquirePreparedInsertWriteTargets s db table candidates
 
                         upsertRowsWithOrdinalChecked
-                            s
-                            db
-                            table
-                            None
-                            (candidates |> List.map (Result.map Array.toList))
-                            (fun _ row -> Ok row)
-                            applyUpdate
-                            checkChangedRow
-                            (Some coercedAssignments)
-                            foundRows
-                            ignoreDuplicates
-                            ignoreViewCheck
-                            StandardAllocation
+                            s db table None (candidates |> List.map (Array.toList >> Ok)) (fun _ row -> Ok row)
+                            applyUpdate checkChangedRow (Some coercedAssignments) foundRows false false StandardAllocation
                         |> Result.map (fun outcome ->
                             let generatedId =
                                 prepared
-                                |> List.tryPick (fun result ->
-                                    result |> Result.toOption
-                                    |> Option.bind (fun candidate ->
-                                        if outcome.InsertedRows |> List.exists ((=) candidate.Values) then candidate.GeneratedId
-                                        else None))
+                                |> List.tryPick (fun candidate ->
+                                    if outcome.InsertedRows |> List.exists ((=) candidate.Values) then candidate.GeneratedId
+                                    else None)
 
                             { outcome with
                                 LastInsertId = Option.defaultValue outcome.LastInsertId generatedId

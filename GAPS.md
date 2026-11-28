@@ -1019,10 +1019,14 @@ now do the same for audited joins, CTEs and correlated filters.
 [Primary and unique upsert destinations](torture/findings/2026-11-27-ordered-secondary-locking.md#primary-and-unique-upsert-destinations)
 honor audited primary-key gaps and wait for a transaction entering a
 unique key. The upsert rechecks the key when the owner ends. INSERT
-IGNORE skips duplicates known during candidate evaluation and warns
-on a late collision for a single candidate. A late collision in a
-staged batch still fails the statement, and an upsert can reject a
-key before its current owner finishes moving away.
+IGNORE warns per rejected candidate after a late collision and keeps
+independent changes in the batch. Later candidates can still match
+the rejected row's original key. A fatal timeout rolls back the batch.
+The audited path covers VALUES and SELECT from permanent sources,
+including writes through checked views. An INSERT SELECT from a
+temporary source can still return 1205 after a late collision.
+An upsert can still reject a key before its current owner finishes
+moving away.
 [Joins through temporary sources](torture/findings/2026-11-27-joined-update-key-waits.md#session-local-join-sources)
 also refresh permanent keys after a wait, including when a temporary
 table shadows a permanent source. [Batched warning retention](torture/findings/2026-11-27-ignored-update-key-waits.md#warning-order-and-retention)

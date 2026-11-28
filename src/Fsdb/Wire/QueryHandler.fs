@@ -3381,6 +3381,11 @@ let private ignoresDataChangeErrors =
     | Delete { Ignore = true } -> true
     | _ -> false
 
+let private isIgnoredUpsert = function
+    | Insert(_, _, _, _ :: _, true)
+    | InsertSelect(_, _, _, _ :: _, true) -> true
+    | _ -> false
+
 let private divisionByZeroPolicy (store: Store) (statement: Statement) =
     if not store.ExecutionSettings.SqlMode.ErrorForDivisionByZero then
         Diagnostics.DivisionByZeroPolicy.Silent
@@ -3548,16 +3553,26 @@ let private beginDynamicWriteRebaseForStatement (session: Session) (store: Store
 
     match session.Tx with
     | Some transaction when canRebase && not (Storage.dynamicWriteRebaseActive store) ->
-        let prepare baseCatalog privateCatalog =
-            let liveCatalog, rebasedTransaction = Storage.beginTransactionSnapshotWithBase session.Store
-            Storage.mergeCatalogInto rebasedTransaction baseCatalog transaction.Snapshot.Catalog
+        let prepare (baseCatalog: Catalog) privateCatalog =
+            let liveCatalog = session.Store.Catalog
+            let unchanged =
+                baseCatalog.Count = liveCatalog.Count
+                && (baseCatalog |> Map.forall (fun name database ->
+                    liveCatalog |> Map.tryFind name |> Option.exists (fun live -> obj.ReferenceEquals(database, live))))
+            if unchanged then
+                { BaseCatalog = baseCatalog
+                  StatementCatalog = privateCatalog
+                  ApplyTransactionRoot = ignore }
+            else
+                let rebasedTransaction = Storage.beginTransactionSnapshotFromCatalog session.Store liveCatalog
+                Storage.mergeCatalogInto rebasedTransaction baseCatalog transaction.Snapshot.Catalog
 
-            let rebasedStatement = Storage.beginTransactionSnapshotFromCatalog session.Store liveCatalog
-            Storage.mergeCatalogInto rebasedStatement baseCatalog privateCatalog
+                let rebasedStatement = Storage.beginTransactionSnapshotFromCatalog session.Store liveCatalog
+                Storage.mergeCatalogInto rebasedStatement baseCatalog privateCatalog
 
-            { BaseCatalog = liveCatalog
-              StatementCatalog = rebasedStatement.Catalog
-              ApplyTransactionRoot = (fun () -> transaction.Snapshot.Catalog <- rebasedTransaction.Catalog) }
+                { BaseCatalog = liveCatalog
+                  StatementCatalog = rebasedStatement.Catalog
+                  ApplyTransactionRoot = (fun () -> transaction.Snapshot.Catalog <- rebasedTransaction.Catalog) }
 
         Storage.beginDynamicWriteRebase transaction.Snapshot transaction.BaseCatalog prepare
         true
@@ -3859,6 +3874,11 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
             | Limits.SelectTimeoutExpired ->
                 session.LastInsertId, session.LastGeneratedId,
                 Err(3024, "Query execution was interrupted, maximum statement execution time exceeded"), [], None
+            | Storage.LockWaitTimeout _ when isIgnoredUpsert stmt ->
+                // The private statement snapshot is discarded, while evaluated
+                // user-variable assignments belong to the connection.
+                session.LastInsertId, session.LastGeneratedId,
+                Err(1205, "Lock wait timeout exceeded; try restarting transaction"), [], None
             | Diagnostics.RaisedCondition error ->
                 session.LastInsertId, session.LastGeneratedId, ErrInfo error, [], None
 
@@ -4186,6 +4206,7 @@ let private autocommitExecution (session: Session) dbName statement =
             TrackStatement
         else
             match statement with
+            | Insert(_, _, _ :: _ :: _, _ :: _, true) -> TrackStatement
             | Update _ | Delete _ ->
                 let isolation = configuredIsolation session
                 let protectGaps = isolation = RepeatableRead || isolation = Serializable

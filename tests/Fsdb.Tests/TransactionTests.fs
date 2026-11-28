@@ -8837,6 +8837,56 @@ let tests =
               let session = run session "INSERT INTO slots(u) VALUES(9)" (Affected 1UL)
               run session "SELECT id FROM slots WHERE u=9" (ResultSet([ "id" ], [ [ Some "5" ] ])) |> ignore
 
+          testCase "INSERT IGNORE resumes a duplicate-update batch after a late collision"
+          <| fun _ ->
+              for ending, foundRows in
+                  [ "COMMIT", false; "COMMIT", true; "ROLLBACK", false; "TIMEOUT", false ] do
+                  let store = Fsdb.Storage.create ()
+                  let run session sql expected =
+                      let next, result = handle session sql
+                      Expect.equal result expected sql
+                      next
+                  let setup = create 1 store
+                  run setup "CREATE TABLE jobs(id INT PRIMARY KEY,u INT UNIQUE,p INT)" (Affected 0UL) |> ignore
+                  run setup "INSERT INTO jobs VALUES(30,3,0),(40,4,0)" (Affected 2UL) |> ignore
+                  let holder = run (create 2 store) "BEGIN" (Affected 0UL)
+                  let holder = run holder "UPDATE jobs SET u=7 WHERE id=30" (Affected 1UL)
+                  let writer = create 3 store
+                  let writer =
+                      if foundRows then { writer with Capabilities = writer.Capabilities ||| Fsdb.Protocol.ClientFoundRows }
+                      else writer
+                  let timeout = if ending = "TIMEOUT" then 1 else 5
+                  let writer = run writer $"SET innodb_lock_wait_timeout={timeout}" (Affected 0UL)
+                  let writer = run writer "SET @calls=0" (Affected 0UL)
+                  let sql =
+                      "INSERT IGNORE INTO jobs VALUES(50,5,0),(40,4,0),(60,4,0) ON DUPLICATE KEY UPDATE u=7,p=(@calls:=@calls+1)"
+                  let waiting = Threading.Tasks.Task.Run(fun () -> handle writer sql)
+                  let blocked () = lock store.LockWaits.SyncRoot (fun () -> store.LockWaits.Edges.Count > 0)
+                  let entered =
+                      Threading.SpinWait.SpinUntil((fun () -> blocked () || waiting.IsCompleted), TimeSpan.FromSeconds 3.0)
+                  let wasWaiting = entered && blocked ()
+                  if ending <> "TIMEOUT" then run holder ending (Affected 0UL) |> ignore
+                  Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 6.0)) "the upsert finishes"
+                  if ending = "TIMEOUT" then run holder "ROLLBACK" (Affected 0UL) |> ignore
+                  Expect.isTrue wasWaiting "the duplicate candidate waits for the destination key"
+                  let writer, result = waiting.Result
+                  let warnings = if ending = "COMMIT" then [ 1062; 1062 ] else []
+                  Expect.equal (writer.Diagnostics |> List.filter (fun entry -> entry.Code = 1062) |> List.map _.Code) warnings "one warning per rejected candidate"
+                  let row values = List.map Some values
+                  let rows, calls =
+                      match ending with
+                      | "COMMIT" ->
+                          Expect.equal result (Affected(if foundRows then 3UL else 1UL)) "only the independent insert changes a row"
+                          [ row [ "30"; "7"; "0" ]; row [ "40"; "4"; "0" ]; row [ "50"; "5"; "0" ] ], "2"
+                      | "ROLLBACK" ->
+                          Expect.equal result (Affected 4UL) "the last candidate inserts after the successful move frees its key"
+                          [ row [ "30"; "3"; "0" ]; row [ "40"; "7"; "1" ]; row [ "50"; "5"; "0" ]; row [ "60"; "4"; "0" ] ], "1"
+                      | _ ->
+                          TestSupport.Sql.expectError 1205 result "the timeout aborts the batch"
+                          [ row [ "30"; "3"; "0" ]; row [ "40"; "4"; "0" ] ], "1"
+                  run setup "SELECT id,u,p FROM jobs ORDER BY id" (ResultSet([ "id"; "u"; "p" ], rows)) |> ignore
+                  run writer "SELECT @calls AS calls" (ResultSet([ "calls" ], [ row [ calls ] ])) |> ignore
+
           testCase "duplicate-key updates preserve validated key moves when publishing after a wait"
           <| fun _ ->
               for values, affected, row20, row40 in

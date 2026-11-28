@@ -12120,13 +12120,13 @@ type internal PreparedCheckedUpsert =
       Reservation: CheckedUpsertReservation
       SetCursor: int64 -> unit }
 
-/// A transaction prepares one checked candidate before locking its exact write targets.
-let private checkedUpsertPreparation store dbName tableName columns input prepare finish =
+/// Prepare one candidate against a statement-wide AUTO_INCREMENT reservation.
+let private reservedUpsertPreparation store dbName tableName columns input prepare finish =
     match tableAt store dbName tableName with
     | None -> Error(NoSuchTable(dbName, tableName))
     | Some table ->
         match table.Columns |> List.tryFindIndex _.AutoIncrement with
-        | None -> Error(ExpressionError(1105, "Checked upsert requires an AUTO_INCREMENT column"))
+        | None -> Error(ExpressionError(1105, "Reserved upsert requires an AUTO_INCREMENT column"))
         | Some autoIndex ->
             resolveInsertColumns table columns
             |> Result.map (fun indices ->
@@ -14753,44 +14753,64 @@ and internal upsertRowsWithOrdinalChecked
             }
         | Error e -> Error e
 
-/// The duplicate outcome determines the next candidate's ID, so claim each row's
-/// actual keys before applying it. All writes stay in the caller's statement snapshot.
-let internal upsertCheckedRowsDynamically store dbName tableName columns rows input prepare finish applyUpdate checkChangedRow
-    assignedColumns assignsAuto foundRows =
-    checkedUpsertPreparation store dbName tableName columns input prepare finish
-    |> Result.bind (fun prepareCandidate ->
-        let step result (ordinal, values) =
-            result
-            |> Result.bind (fun (firstGenerated, lastExplicit, affected, inserted) ->
-                Diagnostics.withRowNumber (ordinal + 1) (fun () ->
-                    match prepareCandidate values with
-                    | Error error when isViewCheckError error ->
-                        warnIgnoredUpsert error
-                        Ok(firstGenerated, lastExplicit, affected, inserted)
-                    | Error error -> Error error
-                    | Ok prepared ->
-                        let candidate = prepared.Candidate
-                        acquirePreparedInsertWriteTargets store dbName tableName [ candidate.Values ]
-                        upsertRowsWithOrdinalChecked
-                            store dbName tableName None [ Ok(Array.toList candidate.Values) ] (fun _ row -> Ok row)
-                            (fun _ -> applyUpdate ordinal) checkChangedRow assignedColumns foundRows true true
-                            (PreparedAllocation(prepared, assignsAuto))
-                        |> Result.map (fun outcome ->
-                            let assigned = if outcome.InsertedRows.IsEmpty then None else candidate.AssignedAutoId
-                            let firstGenerated, lastExplicit =
-                                trackAutoIncrementAssignment assigned firstGenerated lastExplicit
-                            let inserted = outcome.InsertedRows |> List.fold (fun acc row -> row :: acc) inserted
-                            firstGenerated, lastExplicit, affected + outcome.Affected, inserted)))
+/// Resolve each candidate against the keys left by the preceding candidate,
+/// including any rejected move after a wait. Publication to the caller's
+/// private statement snapshot allows a fatal error to discard every change.
+let private upsertIgnoredRowsInStatement store dbName tableName rows prepareCandidate applyUpdate checkChangedRow
+    assignedColumns foundRows ignoreViewCheck =
+    let step result (ordinal, values) =
+        result
+        |> Result.bind (fun (firstGenerated, lastExplicit, affected, inserted) ->
+            Diagnostics.withRowNumber (ordinal + 1) (fun () ->
+                match prepareCandidate values with
+                | Error error when ignoreViewCheck && isViewCheckError error ->
+                    warnIgnoredUpsert error
+                    Ok(firstGenerated, lastExplicit, affected, inserted)
+                | Error error -> Error error
+                | Ok((candidate: PreparedInsertCandidate), allocation) ->
+                    upsertRowsWithOrdinalChecked
+                        store dbName tableName None [ Ok(Array.toList candidate.Values) ] (fun _ row -> Ok row)
+                        (fun _ -> applyUpdate ordinal) checkChangedRow assignedColumns foundRows true ignoreViewCheck allocation
+                    |> Result.map (fun outcome ->
+                        let assigned = if outcome.InsertedRows.IsEmpty then None else candidate.AssignedAutoId
+                        let firstGenerated, lastExplicit =
+                            trackAutoIncrementAssignment assigned firstGenerated lastExplicit
+                        let inserted = outcome.InsertedRows |> List.fold (fun acc row -> row :: acc) inserted
+                        firstGenerated, lastExplicit, affected + outcome.Affected, inserted)))
 
-        rows
-        |> List.indexed
-        |> foldWithCancellation step (Ok(None, None, 0, []))
-        |> Result.map (fun (firstGenerated, lastExplicit, affected, inserted) ->
-            { LastInsertId = Option.defaultValue 0L (Option.orElse lastExplicit firstGenerated)
-              GeneratedId = firstGenerated
-              Affected = affected
-              InsertedRows = List.rev inserted
-              IgnoredErrors = [] }))
+    rows
+    |> List.indexed
+    |> foldWithCancellation step (Ok(None, None, 0, []))
+    |> Result.map (fun (firstGenerated, lastExplicit, affected, inserted) ->
+        { LastInsertId = Option.defaultValue 0L (Option.orElse lastExplicit firstGenerated)
+          GeneratedId = firstGenerated
+          Affected = affected
+          InsertedRows = List.rev inserted
+          IgnoredErrors = [] })
+
+let internal upsertIgnoredRowsDynamically store dbName tableName columns rows prepare reservation applyUpdate checkChangedRow
+    assignedColumns foundRows ignoreViewCheck =
+    let preparation =
+        match reservation with
+        | Some(input, finish, assignsAuto) ->
+            reservedUpsertPreparation store dbName tableName columns input prepare finish
+            |> Result.map (fun reserve values ->
+                reserve values |> Result.map (fun row -> row.Candidate, PreparedAllocation(row, assignsAuto)))
+        | None ->
+            Ok(fun values ->
+                prepareInsertCandidate store dbName tableName columns values prepare
+                |> Result.map (fun candidate -> candidate, StandardAllocation))
+
+    preparation
+    |> Result.bind (fun prepareCandidate ->
+        let prepareAndLock values =
+            prepareCandidate values
+            |> Result.map (fun (candidate, allocation) ->
+                acquirePreparedInsertWriteTargets store dbName tableName [ candidate.Values ]
+                candidate, allocation)
+
+        upsertIgnoredRowsInStatement store dbName tableName rows prepareAndLock
+            applyUpdate checkChangedRow assignedColumns foundRows ignoreViewCheck)
 
 let internal canBatchIgnoredUpdates (store: Store) database table =
     // Referential actions retain per-row publication so later rows see preceding cascades.
