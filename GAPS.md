@@ -3298,6 +3298,9 @@ implementation effort:
    reports the observed ordered index, rows per loop, and fallback
    invocations. [Static `EXPLAIN`](torture/findings/2026-11-27-explain-analyze-correlated-top-n.md#static-explain)
    reports the eligible correlated index and prefix references from schema metadata.
+   [Computed signed-integer prefixes](torture/findings/2026-11-27-explain-analyze-correlated-top-n.md#computed-signed-integer-prefixes)
+   seek the ordered slice when outer addition or subtraction stays in the
+   BIGINT domain. Static plans report the computed reference as `func`.
    Other computed lookup keys, residual predicates, and broader
    aggregate shapes still need work.
 

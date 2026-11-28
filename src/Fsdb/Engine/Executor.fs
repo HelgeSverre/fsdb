@@ -22682,6 +22682,13 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
 
             let key (column: ColumnDef) value = { Column = column.Name; Transform = None; Value = value }
             let indexedColumn expression = tryCorrelatedInnerColumn source expression |> Option.bind innerColumn
+            let rec signedBounds = function
+                | BinOp((Add | Sub as operator), left, right) ->
+                    Option.map2 (fun left right -> left, right) (signedBounds left) (signedBounds right)
+                    |> Option.bind (fun (left, right) -> tryBoundedSignedArithmetic operator left right |> Option.map snd)
+                | (Col _ | QualifiedCol _) as column ->
+                    tryColumnDefForExpr context column |> Option.bind (_.Type >> signedIntegerTypeBounds)
+                | expression -> trySignedIntegerConstant expression |> Option.map (fun value -> value, value)
             let hasCorrelatedTimestampRange columnName =
                 let timestampColumn expression =
                     indexedColumn expression
@@ -22750,6 +22757,14 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
                         | Some value when temporalKey ->
                             temporalKeyValue column.Type value |> Option.map (fun value -> key column value, Some bound)
                         | _ -> None
+                    | BinOp((Add | Sub), _, _)
+                        when (signedIntegerTypeBounds column.Type).IsSome
+                             && (tryCorrelatedOuterScope source bound).IsSome
+                             && (signedBounds bound).IsSome ->
+                        readOuter source context bound None
+                        |> Option.bind (function
+                            | VInt _ | VNull as value -> Some(key column value, Some bound)
+                            | _ -> None)
                     | _ -> None)
 
             let tryPrefixPin = function
@@ -22759,8 +22774,11 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
                 | _ -> None
 
             let clauses = predicate |> conjuncts |> List.map (fun expression -> expression, tryPrefixPin expression)
-            if not (isPlainRowPredicate predicate)
-               || (clauses |> List.exists (fun (expression, pin) -> pin.IsNone && not (safeResidual expression))) then None
+            let safeClause = function
+                // Only a proven, outer-only computed pin may bypass the plain predicate check.
+                | _, Some(_, Some(BinOp((Add | Sub), _, _))) -> true
+                | expression, pin -> isPlainRowPredicate expression && (pin.IsSome || safeResidual expression)
+            if not (List.forall safeClause clauses) then None
             else
                 let pins = clauses |> List.choose snd
                 let correlatedPins =
@@ -22785,7 +22803,7 @@ and private bindCorrelatedTopOrder registry (tref: TableRef) columns canSeekNull
                             | first :: _ -> hasCorrelatedTimestampRange first.Column
                             | [] -> false)
                     if correlatedPins.IsEmpty && not timestampRange then None
-                    else Some(source, context, predicate, terms, List.map fst pins, correlatedPins, timestampRange))
+                    else Some(source, context, predicate, terms, pins, correlatedPins, timestampRange))
 
 and private planCorrelatedTopOrder store registry dbName fromItem (select: SelectStmt) outer readOuter bindPredicate =
     let scopedSource =
@@ -22811,7 +22829,8 @@ and private planCorrelatedTopOrder store registry dbName fromItem (select: Selec
             // predicate on nullable keys rather than scanning the projection.
             bindCorrelatedTopOrder registry tref columns projected.IsSome select outer readOuter
             |> Option.bind (fun (source, context, predicate, terms, pins, references, timestampRange) ->
-                let bound = bindPredicate source context predicate
+                let bound = bindPredicate source context pins predicate
+                let pins = List.map fst pins
                 let plan tref predicate terms pins references =
                     { TableRef = tref
                       Predicate = predicate
@@ -22874,9 +22893,15 @@ and private correlatedOrderAccesses store dbName (plan: CorrelatedTopOrderPlan) 
 /// The original source and predicates still decide which rows reach LIMIT and OFFSET.
 and private tryCorrelatedTopOrder store registry dbName fromItem select outer =
     let readOuter source context expression _ = tryCorrelatedOuterValue source context expression
-    let bindPredicate source context =
-        Expression.rewrite (function
-            | (Col _ | QualifiedCol _) as expression -> tryCorrelatedOuterValue source context expression |> Option.map Lit
+    let bindPredicate source context (pins: (PointEquality * Expr option) list) =
+        let computed =
+            pins |> List.choose (function
+                | pin, Some(BinOp((Add | Sub), _, _) as expression) -> Some(expression, pin.Value)
+                | _ -> None) |> Map.ofList
+        Expression.rewrite (fun expression ->
+            match expression with
+            | Col _ | QualifiedCol _ -> tryCorrelatedOuterValue source context expression |> Option.map Lit
+            | BinOp((Add | Sub), _, _) -> Map.tryFind expression computed |> Option.map Lit
             | _ -> None)
     let plan = planCorrelatedTopOrder store registry dbName fromItem select outer readOuter bindPredicate
     let rejectsNull = function
@@ -31325,18 +31350,28 @@ let rec private explainOuterReference scope expression =
         | _ -> None)
 
 let private explainCorrelatedOrder store registry dbName outer fromItem select =
+    let reference = function
+        | BinOp((Add | Sub), _, _) as expression ->
+            let unboundColumn = function
+                | (Col _ | QualifiedCol _) as column -> (explainOuterReference outer column).IsNone
+                | _ -> false
+            if Expression.exists unboundColumn expression then None else Some "func"
+        | expression -> explainOuterReference outer expression
     // The planner needs a key domain, while execution supplies the row value.
     let readOuter _ _ expression column =
-        explainOuterReference outer expression
+        reference expression
         |> Option.bind (fun _ ->
-            column |> Option.bind (fun definition ->
+            match column, expression with
+            | None, BinOp((Add | Sub), _, _) -> Some(VInt 0L)
+            | Some definition, _ ->
                 match definition.Type with
                 | TDecimal _ -> Some(VDecimal 0M)
                 | ty when isExactIntegerIndexType ty -> Some(VInt 0L)
                 | _ when isTextColumn (Some definition) -> Some(VString "")
-                | ty -> temporalOrderProbeValue ty))
+                | ty -> temporalOrderProbeValue ty
+            | None, _ -> None)
 
-    planCorrelatedTopOrder store registry dbName fromItem select (outer |> Option.map _.Context) readOuter (fun _ _ predicate -> predicate)
+    planCorrelatedTopOrder store registry dbName fromItem select (outer |> Option.map _.Context) readOuter (fun _ _ _ predicate -> predicate)
     |> Option.bind (fun plan ->
         let tref = plan.TableRef
         let labels = plan.References |> Map.ofList
@@ -31365,7 +31400,7 @@ let private explainCorrelatedOrder store registry dbName outer fromItem select =
                                 prefix
                                 |> List.map (fun term ->
                                     Map.tryFind (term.Column.ToLowerInvariant()) labels
-                                    |> Option.bind (explainOuterReference outer)
+                                    |> Option.bind reference
                                     |> Option.defaultValue "const")
                             let length = explainIndexKeyLen (Some resolved.Table) name columns indices (List.replicate indices.Length None)
                             tref, ((explainKey name length, references), not terms.IsEmpty)))))

@@ -46,6 +46,46 @@ let tests =
                   Expect.isFalse (analyzed.Contains "ALL on e") "execution never materialized the source"
               | other -> failtestf "expected an analyzed plan, got %A" other
 
+          testCase "correlated top-N seeks a computed signed integer prefix"
+          <| fun _ ->
+              let store = newStore ()
+              for sql in
+                  [ "CREATE TABLE digit(d INT PRIMARY KEY)"
+                    "INSERT INTO digit VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)"
+                    "CREATE TABLE requests(id INT PRIMARY KEY, tenant INT, cutoff INT)"
+                    "INSERT INTO requests VALUES (1,1,94),(2,2,44),(3,3,100),(4,NULL,100)"
+                    "CREATE TABLE events(id INT PRIMARY KEY, tenant INT, state INT, stamp INT, KEY recent(tenant,state,stamp DESC,id))"
+                    "INSERT INTO events SELECT t.d*100+x.d*10+y.d,t.d,1,x.d*10+y.d FROM digit t CROSS JOIN digit x CROSS JOIN digit y" ] do
+                  TestSupport.Sql.expectOk (runDefault store sql) sql
+
+              let query predicate hint =
+                  "SELECT o.id,(SELECT e.id FROM events e " + hint
+                  + " WHERE " + predicate + " AND e.state=1 AND e.stamp<=o.cutoff "
+                  + "ORDER BY e.stamp DESC,e.id LIMIT 1 OFFSET 1) AS chosen FROM requests o ORDER BY o.id"
+              let computed = query "e.tenant=o.tenant+1"
+              let expected = [ [ Some "1"; Some "293" ]; [ Some "2"; Some "343" ]; [ Some "3"; Some "498" ]; [ Some "4"; None ] ]
+              let result, rows = withExaminedRows (fun () -> runDefault store (computed ""))
+              Expect.equal result (ResultSet([ "id"; "chosen" ], expected)) "the ordered slice matches MySQL"
+              Expect.equal (runDefault store (computed "IGNORE INDEX (recent)")) result "the scan agrees"
+              let plan = runDefault store ("EXPLAIN " + computed "") |> TestSupport.Sql.explainRows
+              let access = plan |> List.find (fun row -> row.Table = Some "e")
+              Expect.equal (access.AccessType, access.Key, access.Reference)
+                  (Some "ref", Some "recent", Some "func,const") "the plan reports an expression key"
+              Expect.isLessThan rows 30L "only a short part of each matching index slice is read"
+
+              for sql in
+                  [ "INSERT INTO requests VALUES (5,2147483647,100),(6,-2147483648,100)"
+                    "INSERT INTO events VALUES (1000,NULL,1,96),(1001,NULL,1,97),(1002,-2147483647,1,96),(1003,-2147483647,1,97)" ] do
+                  TestSupport.Sql.expectOk (runDefault store sql) sql
+
+              let expected = expected @ [ [ Some "5"; None ]; [ Some "6"; Some "1002" ] ]
+              Expect.equal (runDefault store (computed "")) (ResultSet([ "id"; "chosen" ], expected))
+                  "the expression uses BIGINT arithmetic at the INT boundary"
+              let nullSafe = query "e.tenant<=>(2+o.tenant-1)" ""
+              let expectedNullSafe = expected |> List.updateAt 3 [ Some "4"; Some "1000" ]
+              Expect.equal (runDefault store nullSafe) (ResultSet([ "id"; "chosen" ], expectedNullSafe))
+                  "a NULL-safe computed equality reads matching NULL keys"
+
           testCase "correlated top-N seeks exact decimal keys before applying its limit"
           <| fun _ ->
               let store = newStore ()

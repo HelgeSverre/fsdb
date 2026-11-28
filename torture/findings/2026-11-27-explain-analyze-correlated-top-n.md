@@ -112,3 +112,27 @@ key lengths, and references in every case. The 192 single-query
 CTE comparisons still match. Ordinary missing tables in later
 branches still report error 1146. Full plan estimates and the
 select ID of a zero-limit UNION result can differ.
+
+### Computed signed-integer prefixes
+
+For `e.tenant = o.tenant + 1`, the pinned MySQL 8.4.11 plan uses the
+`recent(tenant,state,stamp DESC,id)` index. Its key reference is
+`func,const` when `state` is fixed. Fsdb now binds the outer expression
+as an ordered equality key when the declared signed column ranges prove
+that addition or subtraction stays within BIGINT. The original predicate
+still decides row membership. NULL-safe equality can seek a NULL key,
+and ordinary equality with a NULL bound returns no inner row.
+
+On the 10,000-event, 50-request fixture, Fsdb's plan changed from `ALL`
+to an ordered lookup that examined two inner rows per outer row. All 50
+results matched between Release builds before and after the change. On
+native macOS with both servers in memory, the median of seven alternating
+query pairs fell from 34.84 ms to 8.76 ms. Each server ran three warm-up
+queries before timing.
+
+The pinned oracle also agrees on reversed equality, nested arithmetic,
+INT boundaries, NULL-safe equality, repeated bounds, inner column names
+shadowing outer names, and the ignored-index controls. Signed BIGINT addition that
+overflows remains a separate evaluation divergence. The existing
+executor widens the result to DECIMAL, whereas MySQL raises error 1690
+when it evaluates the overflowing expression.
