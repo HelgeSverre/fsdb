@@ -662,6 +662,11 @@ Douglas–Peucker simplification for SRID 0 and projected geometries.
 It preserves the audited ring and component order, drops collapsed
 components, and reports MySQL's geographic-SRS and argument errors.
 
+`ST_Area` remains unavailable in Fsdb. MySQL 8.4.11 returns 196 for
+a Cartesian 10-by-20 polygon with a 2-by-2 hole and about 12.31 billion
+square meters for an EPSG 4326 one-degree square at the equator. It
+returns 3516 for other geometry types, including an empty collection.
+
 [`ST_Collect`](torture/findings/2026-11-27-spatial-collect.md) supports
 grouped and window aggregation, including `DISTINCT` spatial equality.
 Unions of geometry and bare NULL retain geometry values for downstream
