@@ -152,3 +152,40 @@ and addition in the crossing solver and its azimuth calculation matched
 all 144 uncontracted Linux cuts. That comparison covered the raw solver
 output. Full SQL overlay parity also requires the union traversal.
 [Boost overlay traversal and ring selection](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/overlay/overlay.hpp)
+
+Carrying raw cut coordinates into Fsdb's final union produced identical
+SQL output with and without the intermediate degree conversion, for
+both fused and unfused crossing calculations. The instrumented Linux
+Boost replay matched MySQL on all 72 symmetric-difference types and
+areas. In each of the 28 cases that Fsdb missed, Boost emitted one ring
+from traversal and kept neither input ring. In 18 of those 28 cases the
+returned type and rounded area matched one of the directed differences.
+The other ten require reconstructing the traversed boundary.
+
+### Ring starts in geographic differences
+
+MySQL visits pairs of monotone source and clipping sections before it
+visits the edges within them. The source is walked clockwise and the clip
+in reverse. Ranking proper crossings by edge alone left 11 differences
+in the seeded sample. When both operands have more than 16 sections,
+MySQL starts visiting them through a spatial partition. Fsdb uses both
+visitation orders to choose the first vertex of each clipped ring and to
+order the clipped rings. Complete rings keep their source start and precede
+clipped rings.
+[Boost section pairs](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/algorithms/detail/overlay/get_turns.hpp)
+
+The change made the ordered vertices agree with MySQL within
+`1e-8` degrees in all 72 directed differences, up from zero. A separate
+378-case replay varied ring starts, winding, holes, and positions from
+70° south to 66° north. Matches rose from 126 to 318. In a seeded
+360-case replay of three- to eight-vertex polygons, matches rose
+from 58 to 360. A third replay used 120 cases with 18- to 72-vertex
+zigzag rings. Matches rose from 17 to 120. All previous matches held in
+the three replays. Symmetric-difference type and rounded area stayed the
+same across the 360 seeded small-polygon cases.
+
+The 60 adjacent shared-edge controls still differ. In the Boost trace,
+one shared-edge fixture starts at a touch and a partial overlap starts
+at an interior touch. After traversing the latter, Boost removes the
+collinear start and keeps the next corner as the first vertex. The
+proper-crossing ranks do not yet cover these contact turns.

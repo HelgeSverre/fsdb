@@ -3654,8 +3654,11 @@ implementation effort:
    [Clipping-ring start cuts](torture/findings/2026-11-26-geographic-polygon-union.md#clipping-ring-start-cuts)
    now follow MySQL's turn order inside a source edge and at straight
    source vertices. A few split decisions differ across MySQL builds.
-   Serialized ring starts, member ordering, and polar endpoints remain
-   open. [Geographic collection difference](torture/findings/2026-11-26-geographic-polygon-union.md#mixed-collection-difference)
+   [Geographic difference ring starts](torture/findings/2026-11-28-spatial-area.md#ring-starts-in-geographic-differences)
+   and clipped member order now follow proper crossings in the audited
+   cases. Shared-edge starts, broader member ordering, and polar
+   endpoints remain open.
+   [Geographic collection difference](torture/findings/2026-11-26-geographic-polygon-union.md#mixed-collection-difference)
    normalizes areas, lines, and points before applying the mask.
    [Geographic collection intersection](torture/findings/2026-11-26-geographic-polygon-union.md#mixed-collection-intersection)
    also clips normalized dimensions against each other and retains

@@ -911,6 +911,58 @@ let tests =
                         let result = call "ST_Intersection" [ geometry source; geometry clip ]
                         Expect.equal (call "ST_AsText" [ result; axis ]) (VString expected) $"intersection of {source} and {clip}"
 
+                testCase "geographic polygon difference starts clipped rings at the first crossing"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let a = geometry "POLYGON((0 0,4 0,4 4,0 4,0 0))"
+                    let b = geometry "POLYGON((2 5,6 5,6 1,2 1,2 5))"
+                    let c = geometry "POLYGON((0 0,0.5 2,2 2.75,3.5 1.5,3.75 -0.75,2.5 -2.25,1 -2,0 0))"
+                    let d = geometry "POLYGON((1.75 1.25,2.75 -0.25,4 0.875,3 2.5,1.75 1.25))"
+                    for source, clip, (latitude, longitude), nextVertex in
+                        [ a, b, (4.002446562605655, 1.999999982893048), (4.0, 0.0)
+                          b, a, (1.0006135284248756, 4.0000017993443695), (1.0, 6.0)
+                          c, d, (0.5227943245877492, 3.6086003250104874), (-0.25, 2.75) ] do
+                        match call "ST_Difference" [ source; clip ] with
+                        | VGeometry { Shape = GPolygon [ ((firstLat, firstLon) as start) :: next :: _ as ring ] } ->
+                            Expect.isTrue (abs (firstLat - latitude) < 1e-10) "starting latitude matches MySQL"
+                            Expect.isTrue (abs (firstLon - longitude) < 1e-10) "starting longitude matches MySQL"
+                            Expect.equal next nextVertex "the ring follows the expected winding"
+                            Expect.equal (List.last ring) start "the ring closes at the crossing"
+                        | actual -> failtestf "expected one clipped ring, got %A" actual
+
+                testCase "geographic polygon difference orders split rings by their starting crossings"
+                <| fun _ ->
+                    let axis = VString "axis-order=long-lat"
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L; axis ]
+                    let strip = geometry "POLYGON((1 5,3 5,3 -1,1 -1,1 5))"
+                    let box = geometry "POLYGON((0 0,4 0,4 4,0 4,0 0))"
+                    match call "ST_Difference" [ strip; box ] with
+                    | VGeometry { Shape = GMultiPolygon [ [ south ]; [ north ] ] } ->
+                        Expect.equal (List.head south) (0.0, 3.0) "MySQL emits the southern ring first"
+                        let latitude, longitude = List.head north
+                        Expect.isTrue (abs (latitude - 4.001834869621155) < 1e-10) "the northern ring starts at its crossing"
+                        Expect.isTrue (abs (longitude - 3.0000000000012284) < 1e-10) "the crossing is on the eastern edge"
+                    | actual -> failtestf "expected two clipped rings, got %A" actual
+
+                testCase "geographic polygon difference follows the spatial partition for many sections"
+                <| fun _ ->
+                    let boundary x y =
+                        let notch index = float (index % 2) * 0.25
+                        let ring =
+                            [ for index in 0 .. 7 do yield y + notch index, x + float index
+                              for index in 0 .. 7 do yield y + float index, x + 8.0 - notch index
+                              for index in 0 .. 7 do yield y + 8.0 - notch index, x + 8.0 - float index
+                              for index in 0 .. 7 do yield y + 8.0 - float index, x + notch index ]
+                        VGeometry { Srid = 4326; Shape = GPolygon [ ring @ [ List.head ring ] ] }
+                    let source = boundary 0.0 0.0
+                    let clip = boundary 2.5 -2.25
+                    match call "ST_Difference" [ source; clip ] with
+                    | VGeometry { Shape = GPolygon [ (latitude, longitude) :: _ ] } ->
+                        Expect.isTrue (abs (latitude - 0.1500018286452206) < 1e-10) "the partition picks the southern crossing"
+                        Expect.isTrue (abs (longitude - 2.5999938217929484) < 1e-10) "the crossing longitude matches MySQL"
+                    | actual -> failtestf "expected one clipped ring, got %A" actual
+
                 testCase "geographic polygon crossings retain separately rounded contacts"
                 <| fun _ ->
                     let axis = VString "axis-order=long-lat"

@@ -3855,6 +3855,61 @@ let private geographicSharedPolygonLines referenceSystem belongsToLeft shared fr
             |> geographicLineFragments referenceSystem true)
         |> distinctGeographicLines referenceSystem
 
+let private geographicDifferenceCrossingRanks flattening belongsToSource indexedPolygons fragments =
+    let sections = ResizeArray()
+    let ringSections =
+        [ for polygon, rings in indexedPolygons do
+              let clockwise = belongsToSource polygon
+              for ring in rings do
+                  let traversal = if clockwise then List.rev ring else ring
+                  let indexes =
+                      traversal
+                      |> List.pairwise
+                      |> geographicOverlaySections
+                      |> List.collect (fun edges ->
+                          let section = sections.Count
+                          sections.Add(clockwise, edges)
+                          List.replicate edges.Length section)
+                  yield (if clockwise then List.rev indexes else indexes) |> List.toArray ]
+        |> List.toArray
+    let sectionOf (edge: GeographicPolygonFragment) = ringSections.[edge.Ring].[edge.EdgeIndex]
+    let crossings =
+        fragments
+        |> List.filter (fun fragment -> not fragment.StartsEdge)
+        |> List.groupBy (_.Segment >> fst)
+        |> List.choose (fun (point, cuts) ->
+            let source, clip = List.partition (_.Polygon >> belongsToSource) cuts
+            match source, clip with
+            // A proper crossing splits both edges.
+            | [ sourceEdge ], [ clipEdge ] -> Some(point, sourceEdge, clipEdge)
+            | _ -> None)
+
+    let sectionPair source clip = struct (sectionOf source, sectionOf clip)
+    let first, second = sections |> Seq.indexed |> Seq.toList |> List.partition (snd >> fst)
+    let rankOfPair =
+        if List.isEmpty crossings || first.Length <= geographicPartitionThreshold
+           || second.Length <= geographicPartitionThreshold then fun _ -> 0
+        else
+            let pairs = crossings |> List.map (fun (_, source, clip) -> sectionPair source clip) |> Set.ofList
+            let ranks = Collections.Generic.Dictionary<struct (int * int), int>()
+            let visit firstSection secondSection =
+                let pair = struct (firstSection, secondSection)
+                if pairs.Contains pair then ranks.TryAdd(pair, ranks.Count) |> ignore
+            let bounds =
+                List.map (fun (index, (_, edges)) -> index, geographicSectionBounds flattening edges)
+            visitGeographicSectionPairs visit (bounds first) (bounds second)
+            // Keep any crossing the clipping pass found outside the section boxes.
+            for struct (source, clip) in pairs do visit source clip
+            fun pair -> ranks.[pair]
+
+    // Boost visits each pair of sections before the edges within it,
+    // with the source clockwise and the clipping ring reversed.
+    crossings
+    |> List.map (fun (point, source, clip) ->
+        let pair = sectionPair source clip
+        point, (rankOfPair pair, pair, -source.EdgeIndex, clip.EdgeIndex))
+    |> Map.ofList
+
 let private tryGeographicPolygonBoundaryOverlay referenceSystem kind srid left right =
     let polygons = prepareGeographicOverlayPolygons referenceSystem (left @ right)
     if not (supportsGeographicPolygonOverlay polygons) then None
@@ -3917,19 +3972,38 @@ let private tryGeographicPolygonBoundaryOverlay referenceSystem kind srid left r
                 | start :: _ as ring -> Some(Set.ofList ring, start)
                 | [] -> None)
             |> Map.ofList
-        let retainRingStart ring =
-            match Map.tryFind (Set.ofList ring) sourceRingStarts with
-            | Some start when List.head ring <> start ->
-                // Reversing a complete source ring changes its winding but
-                // can keep the vertex at which the source began the ring.
-                let vertices = List.take (ring.Length - 1) ring
-                let before, after = List.splitAt (List.findIndex ((=) start) vertices) vertices
-                after @ before @ [ start ]
-            | _ -> ring
+        let differenceCrossings =
+            if kind = OverlayKind.Difference then
+                geographicDifferenceCrossingRanks flattening belongsToLeft indexedPolygons fragments
+            else Map.empty
+        let firstDifferenceCrossing ring =
+            if Map.isEmpty differenceCrossings then None
+            else
+                ring
+                |> List.choose (fun point -> Map.tryFind point differenceCrossings |> Option.map (fun order -> order, point))
+                |> List.sortBy fst
+                |> List.tryHead
+        let startOutputRing ring =
+            // Keep the original vertex for a complete ring, even when its winding changed.
+            let sourceStart = Map.tryFind (Set.ofList ring) sourceRingStarts
+            let crossing = if sourceStart.IsSome then None else firstDifferenceCrossing ring
+            let started =
+                match sourceStart |> Option.orElseWith (fun () -> Option.map snd crossing) with
+                | Some start when List.head ring <> start ->
+                    let vertices = List.take (ring.Length - 1) ring
+                    let before, after = List.splitAt (List.findIndex ((=) start) vertices) vertices
+                    after @ before @ [ start ]
+                | _ -> ring
+            Option.map fst crossing, started
+        let orderOutputRings rings =
+            let started = List.map startOutputRing rings
+            // Complete rings come before rings built by walking the crossings.
+            let ordered = if Map.isEmpty differenceCrossings then started else List.sortBy fst started
+            List.map snd ordered
 
         boundary
         |> geographicBoundaryRings flattening
-        |> Option.map (List.map retainRingStart)
+        |> Option.map orderOutputRings
         |> Option.bind (assembleGeographicPolygons referenceSystem)
         |> Option.map (fun areas ->
             let area = geographicAreaShape areas
