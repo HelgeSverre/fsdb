@@ -169,9 +169,32 @@ publishes those final index entries together. WAL recovery also
 preserves repeated updates to one row, including an insert whose
 storage row ID moved when another session inserted first.
 
-Two schedules still differ. When the holder commits a new unique
-value, MySQL's INSERT IGNORE skips the conflicting update with a
-warning and Fsdb returns 1062. When the holder moves away from an
-already committed value, MySQL waits before deciding whether that
-value is available. Fsdb checks the initial unique index and returns
-1062 immediately in both the commit and rollback cases.
+When INSERT IGNORE encounters a conflicting duplicate update during
+evaluation, it warns with 1062 and continues from the unchanged
+row. That also applies to a single candidate whose destination
+becomes occupied while it waits. VALUES, INSERT SELECT, and a checked
+view agreed with MySQL for the audited commits and rollbacks. The
+candidate's assignment ran once. The rejected match contributes
+one affected row when the connection uses CLIENT_FOUND_ROWS and
+zero otherwise. When its INSERT reserved an
+auto-increment ID before the late rejection, the reservation survived
+an abrupt WAL restart in the base-table and checked-view cases.
+
+A late 1062 in a staged batch still aborts the statement. MySQL can
+retain an independent insert or revisit the rejected row's original
+unique key when choosing which branch a later candidate takes.
+For example, when another transaction commits unique value 7,
+the batch `VALUES(40,4),(60,4) ON DUPLICATE KEY UPDATE u=7`
+leaves id 40 at value 4 and warns twice. The second candidate still
+matches the original unique key.
+
+When the holder moves away from an already committed value, MySQL
+waits before deciding whether that value is available. Fsdb checks
+the initial unique index and returns 1062 immediately in both the
+commit and rollback cases.
+
+MySQL also waits when the holder deletes the row, restores the
+unique value after changing it, or uses the unique index for a
+locking read of that value. A payload-only update or a locking read
+through the primary key leaves the unique check free to return
+1062 immediately.

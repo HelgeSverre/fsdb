@@ -34068,7 +34068,7 @@ let rec private executeAsWithViewSources
                         |> Option.map (fun finish -> AllocateAfterViewCheck(input, finish, assignsAuto))
                         |> Option.defaultValue StandardAllocation
                     upsertRowsWithOrdinalChecked
-                        s db table cols (List.map Ok rowsValues) prepare applyUpdate checkChangedRow (Some coercedAssignments) foundRows ignoreViewCheck allocation
+                        s db table cols (List.map Ok rowsValues) prepare applyUpdate checkChangedRow (Some coercedAssignments) foundRows ignoreDuplicates ignoreViewCheck allocation
                 | true, None ->
                     rowsValues
                     |> List.indexed
@@ -34093,6 +34093,7 @@ let rec private executeAsWithViewSources
                             checkChangedRow
                             (Some coercedAssignments)
                             foundRows
+                            ignoreDuplicates
                             ignoreViewCheck
                             StandardAllocation
                         |> Result.map (fun outcome ->

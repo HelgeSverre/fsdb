@@ -12826,7 +12826,8 @@ type private UpsertSummary =
       Affected: int
       InsertedRows: Value[] list
       UpdatedRows: RowUpdate list
-      AutoIncrementAdvance: int64 option }
+      AutoIncrementAdvance: int64 option
+      ReservedAutoIncrement: int64 option }
 
 type private UpsertBatchState =
     { NextAutoId: int64
@@ -12846,6 +12847,10 @@ let internal isViewCheckError = function
     | ExpressionError(1369, _) -> true
     | _ -> false
 
+let private warnIgnoredUpsert error =
+    let code, message = toMySqlError error
+    Diagnostics.warning code message
+
 /// Applies an upsert batch and returns direct changes alongside any foreign-key
 /// cascades so publication can emit matching row events.
 let private upsertRowsInTable
@@ -12861,6 +12866,7 @@ let private upsertRowsInTable
     (checkChangedRow: (Value[] -> Value[] -> Result<Value[], StorageError>) option)
     (assignedColumns: Set<int> option)
     (foundRows: bool)
+    (ignoreDuplicates: bool)
     (ignoreViewCheck: bool)
     (allocation: UpsertAllocation)
     : Result<Catalog * Map<TableAddress, RowUpdate list> * UpsertSummary, StorageError> =
@@ -12904,6 +12910,7 @@ let private upsertRowsInTable
                     let mutable updatedAutoFloor = table.NextAutoId
                     let uniqueGroups = uniqueKeyGroups table
                     let secondaryGroups = secondaryKeyGroups table
+                    let unchangedMatch = if foundRows then 1 else 0
 
                     let rows = table.RowsArray.ToBuilder()
                     // The running index (seeded from `table.UniqueIndex`,
@@ -12944,74 +12951,76 @@ let private upsertRowsInTable
                                                     match checkChangedRow with
                                                     | Some check when applied <> existing -> check candidate applied
                                                     | _ -> Ok applied)
-                                                |> Result.bind (validateUpdatedUniqueKeys table uniqueGroups state.UniqueIndex pos)
                                                 |> Result.bind (fun applied ->
-                                                    // ODKU validates child references and applies
-                                                    // parent-side cascades before reindexing.
-                                                    (if checkFks then
-                                                         let currentDatabase = tryCatalogDatabase dbName state.Catalog |> Option.get
+                                                    match validateUpdatedUniqueKeys table uniqueGroups state.UniqueIndex pos applied with
+                                                    | Error(DuplicateKey _ as error) when ignoreDuplicates ->
+                                                        warnIgnoredUpsert error
+                                                        Ok { state with NextAutoId = skippedCursor; Affected = state.Affected + unchangedMatch }
+                                                    | Error error -> Error error
+                                                    | Ok applied ->
+                                                        // ODKU validates child references and applies
+                                                        // parent-side cascades before reindexing.
+                                                        (if checkFks then
+                                                             let currentDatabase = tryCatalogDatabase dbName state.Catalog |> Option.get
 
-                                                         checkFkParents state.Catalog dbName currentDatabase table (Some existing) applied
-                                                         |> Result.bind (fun () ->
-                                                             cascadeUpdateVisited
-                                                                 true
-                                                                 state.Catalog
-                                                                 state.Visited
-                                                                 state.Cascaded
-                                                                 (tableAddress dbName key)
-                                                                 table.Columns
-                                                                 existing
-                                                                 applied)
-                                                     else
-                                                         Ok(state.Catalog, state.Visited, state.Cascaded))
-                                                    |> Result.map (fun (cascadeCatalog', visited', cascaded') ->
-                                                        match checkedAuto with
-                                                        | Some(index, _, true, _) when applied.[index] <> existing.[index] ->
-                                                            match checkedAutoValue applied.[index] with
-                                                            | Some id when id >= updatedAutoFloor ->
-                                                                updatedAutoFloor <- if id = Int64.MaxValue then id else id + 1L
-                                                                advanceAutoIncrementCounter store dbName table.OriginalName updatedAutoFloor
+                                                             checkFkParents state.Catalog dbName currentDatabase table (Some existing) applied
+                                                             |> Result.bind (fun () ->
+                                                                 cascadeUpdateVisited
+                                                                     true
+                                                                     state.Catalog
+                                                                     state.Visited
+                                                                     state.Cascaded
+                                                                     (tableAddress dbName key)
+                                                                     table.Columns
+                                                                     existing
+                                                                     applied)
+                                                         else
+                                                             Ok(state.Catalog, state.Visited, state.Cascaded))
+                                                        |> Result.map (fun (cascadeCatalog', visited', cascaded') ->
+                                                            match checkedAuto with
+                                                            | Some(index, _, true, _) when applied.[index] <> existing.[index] ->
+                                                                match checkedAutoValue applied.[index] with
+                                                                | Some id when id >= updatedAutoFloor ->
+                                                                    updatedAutoFloor <- if id = Int64.MaxValue then id else id + 1L
+                                                                    advanceAutoIncrementCounter store dbName table.OriginalName updatedAutoFloor
+                                                                | _ -> ()
                                                             | _ -> ()
-                                                        | _ -> ()
-                                                        rows.[pos] <- applied
+                                                            rows.[pos] <- applied
 
-                                                        let changed = applied <> existing
-                                                        let weight =
-                                                            if changed then 2
-                                                            elif foundRows then 1
-                                                            else 0
+                                                            let changed = applied <> existing
+                                                            let weight = if changed then 2 else unchangedMatch
 
-                                                        // MySQL emits no row event for a no-op;
-                                                        // emitting one can make on-commit upsert
-                                                        // pipelines re-fire forever.
-                                                        let uniqueIndex, secondaryIndex, secondaryOrder =
-                                                            reindexRow
-                                                                table.Columns
-                                                                uniqueGroups
-                                                                secondaryGroups
-                                                                (Some(pos, existing))
-                                                                (Some(pos, applied))
-                                                                state.UniqueIndex
-                                                                state.SecondaryIndex
-                                                                state.SecondaryOrder
+                                                            // MySQL emits no row event for a no-op;
+                                                            // emitting one can make on-commit upsert
+                                                            // pipelines re-fire forever.
+                                                            let uniqueIndex, secondaryIndex, secondaryOrder =
+                                                                reindexRow
+                                                                    table.Columns
+                                                                    uniqueGroups
+                                                                    secondaryGroups
+                                                                    (Some(pos, existing))
+                                                                    (Some(pos, applied))
+                                                                    state.UniqueIndex
+                                                                    state.SecondaryIndex
+                                                                    state.SecondaryOrder
 
-                                                        { state with
-                                                            NextAutoId = nextAfterDuplicate
-                                                            Affected = state.Affected + weight
-                                                            UpdatedRev =
-                                                                if changed then
-                                                                    { RowId = pos
-                                                                      Before = existing
-                                                                      After = applied }
-                                                                    :: state.UpdatedRev
-                                                                else
-                                                                    state.UpdatedRev
-                                                            UniqueIndex = uniqueIndex
-                                                            SecondaryIndex = secondaryIndex
-                                                            SecondaryOrder = secondaryOrder
-                                                            Catalog = cascadeCatalog'
-                                                            Visited = visited'
-                                                            Cascaded = cascaded' }))
+                                                            { state with
+                                                                NextAutoId = nextAfterDuplicate
+                                                                Affected = state.Affected + weight
+                                                                UpdatedRev =
+                                                                    if changed then
+                                                                        { RowId = pos
+                                                                          Before = existing
+                                                                          After = applied }
+                                                                        :: state.UpdatedRev
+                                                                    else
+                                                                        state.UpdatedRev
+                                                                UniqueIndex = uniqueIndex
+                                                                SecondaryIndex = secondaryIndex
+                                                                SecondaryOrder = secondaryOrder
+                                                                Catalog = cascadeCatalog'
+                                                                Visited = visited'
+                                                                Cascaded = cascaded' }))
                                             | None ->
                                                 (if checkFks then
                                                      let currentDatabase = tryCatalogDatabase dbName state.Catalog |> Option.get
@@ -13049,8 +13058,7 @@ let private upsertRowsInTable
                                                         SecondaryOrder = secondaryOrder }))
                             |> function
                                 | Error error when ignoreViewCheck && isViewCheckError error ->
-                                    let code, message = toMySqlError error
-                                    Diagnostics.warning code message
+                                    warnIgnoredUpsert error
                                     Ok { state with NextAutoId = skippedCursor }
                                 | result -> result)
 
@@ -13073,11 +13081,12 @@ let private upsertRowsInTable
                               Cascaded = Map.empty })
                     |> Result.map (fun state ->
                         let finalRows = rows.DrainToImmutable()
-                        let nextAutoId = max state.NextAutoId (max (reservedUpper ()) updatedAutoFloor)
+                        let reserved = reservedUpper ()
+                        let nextAutoId = max state.NextAutoId (max reserved updatedAutoFloor)
                         advanceAutoIncrementCounter store dbName table.OriginalName nextAutoId
                         let autoIncrementAdvance =
                             match allocation with
-                            | StandardAllocation -> None
+                            | StandardAllocation when not ignoreDuplicates -> None
                             | _ when nextAutoId > table.NextAutoId -> Some nextAutoId
                             | _ -> None
 
@@ -13100,7 +13109,8 @@ let private upsertRowsInTable
                           Affected = state.Affected
                           InsertedRows = List.rev state.InsertedRev
                           UpdatedRows = List.rev state.UpdatedRev
-                          AutoIncrementAdvance = autoIncrementAdvance }))
+                          AutoIncrementAdvance = autoIncrementAdvance
+                          ReservedAutoIncrement = if reserved > table.NextAutoId then Some reserved else None }))
 
 /// Deletes `toDelete` (rows already known to belong to `tableKey`, e.g. from
 /// `deleteRows`'s WHERE match) from `db`, applying every other table's
@@ -14561,7 +14571,7 @@ and upsertRowsWithOrdinal
     (assignedColumns: Set<int> option)
     (foundRows: bool)
     : Result<InsertOutcome, StorageError> =
-    upsertRowsWithOrdinalChecked store dbName tableName columns (List.map Ok rowsIn) prepare applyUpdate None assignedColumns foundRows false StandardAllocation
+    upsertRowsWithOrdinalChecked store dbName tableName columns (List.map Ok rowsIn) prepare applyUpdate None assignedColumns foundRows false false StandardAllocation
 
 and internal upsertRowsWithOrdinalChecked
     (store: Store)
@@ -14574,6 +14584,7 @@ and internal upsertRowsWithOrdinalChecked
     (checkChangedRow: (Value[] -> Value[] -> Result<Value[], StorageError>) option)
     (assignedColumns: Set<int> option)
     (foundRows: bool)
+    (ignoreDuplicates: bool)
     (ignoreViewCheck: bool)
     (allocation: UpsertAllocation)
     : Result<InsertOutcome, StorageError> =
@@ -14602,11 +14613,28 @@ and internal upsertRowsWithOrdinalChecked
             virtualWriteGuard store dbName tableName
             |> Result.bind (fun () -> tryGetTable dbName db tableName)
             |> Result.bind (fun table ->
-                upsertRowsInTable store dbName catalog key table columns rowsIn prepare applyUpdate checkChangedRow assignedColumns foundRows ignoreViewCheck allocation)
+                upsertRowsInTable store dbName catalog key table columns rowsIn prepare applyUpdate checkChangedRow assignedColumns foundRows ignoreDuplicates ignoreViewCheck allocation)
             |> Result.map (fun (catalog', cascaded, summary) -> catalog', (summary, cascaded, catalog))
 
         let keysOf ((summary: UpsertSummary), cascaded, catalog) =
             mutationKeyClaims dbName tableName catalog summary.UpdatedRows cascaded
+
+        let ignoredLateDuplicate ((summary: UpsertSummary), _, catalog) =
+            let reserved = summary.ReservedAutoIncrement
+            let address = tableAddress dbName tableName
+            let reservedCatalog =
+                match reserved, tryCatalogTable address catalog with
+                | Some nextId, Some table -> setCatalogTable address { table with NextAutoId = nextId } catalog
+                | _ -> catalog
+            let skipped =
+                { summary with
+                    LastInsertId = 0L
+                    GeneratedId = None
+                    Affected = if foundRows then 1 else 0
+                    InsertedRows = []
+                    UpdatedRows = []
+                    AutoIncrementAdvance = reserved }
+            reservedCatalog, (skipped, Map.empty, catalog)
 
         let result =
             captureIndexExpressionError (fun () ->
@@ -14614,8 +14642,13 @@ and internal upsertRowsWithOrdinalChecked
                     withWriteLockOwner store (fun owner ->
                         let claimKeys groups batch publish =
                             withUpdateKeyClaims owner store groups (fun () ->
-                                validateMovedUniqueKeys (currentUpdateCatalog store) groups
-                                |> Result.bind (fun () -> publish batch))
+                                match validateMovedUniqueKeys (currentUpdateCatalog store) groups, rowsIn with
+                                | Error(DuplicateKey _ as error), [_] when ignoreDuplicates ->
+                                    // A single rejected candidate has no later row that could have observed its staged keys.
+                                    warnIgnoredUpsert error
+                                    publish (ignoredLateDuplicate (snd batch))
+                                | Error error, _ -> Error error
+                                | Ok (), _ -> publish batch)
                         let publish () = withStagedCatalogPublishing store dbName eventsOf operation keysOf claimKeys
                         let lockRows = rowsIn |> List.choose (Result.toOption >> Option.map (List.map Some))
                         match tryInsertLockTargets store dbName tableName columns lockRows with
@@ -14646,8 +14679,7 @@ let internal upsertCheckedRowsDynamically store dbName tableName columns rows in
                 Diagnostics.withRowNumber (ordinal + 1) (fun () ->
                     match prepareCandidate values with
                     | Error error when isViewCheckError error ->
-                        let code, message = toMySqlError error
-                        Diagnostics.warning code message
+                        warnIgnoredUpsert error
                         Ok(firstGenerated, lastExplicit, affected, inserted)
                     | Error error -> Error error
                     | Ok prepared ->
@@ -14655,7 +14687,7 @@ let internal upsertCheckedRowsDynamically store dbName tableName columns rows in
                         acquirePreparedInsertWriteTargets store dbName tableName [ candidate.Values ]
                         upsertRowsWithOrdinalChecked
                             store dbName tableName None [ Ok(Array.toList candidate.Values) ] (fun _ row -> Ok row)
-                            (fun _ -> applyUpdate ordinal) checkChangedRow assignedColumns foundRows true
+                            (fun _ -> applyUpdate ordinal) checkChangedRow assignedColumns foundRows true true
                             (PreparedAllocation(prepared, assignsAuto))
                         |> Result.map (fun outcome ->
                             let assigned = if outcome.InsertedRows.IsEmpty then None else candidate.AssignedAutoId

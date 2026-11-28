@@ -8758,8 +8758,11 @@ let tests =
 
           testCase "duplicate-key updates recheck the actual unique destination after waiting"
           <| fun _ ->
-              for transactional, ending in
-                  [ false, "COMMIT"; true, "COMMIT"; false, "ROLLBACK"; true, "ROLLBACK" ] do
+              for ignoreDuplicates, foundRows, transactional, ending in
+                  [ for ignoreDuplicates, foundRows in [ false, false; true, false; true, true ] do
+                        for transactional in [ false; true ] do
+                            for ending in [ "COMMIT"; "ROLLBACK" ] do
+                                yield ignoreDuplicates, foundRows, transactional, ending ] do
                   let store = Fsdb.Storage.create ()
                   let run session sql expected =
                       let next, result = handle session sql
@@ -8770,11 +8773,16 @@ let tests =
                   run setup "INSERT INTO jobs VALUES(30,3),(40,4)" (Affected 2UL) |> ignore
                   let holder = run (create 2 store) "BEGIN" (Affected 0UL)
                   let holder = run holder "UPDATE jobs SET u=7 WHERE id=30" (Affected 1UL)
-                  let writer = run (create 3 store) "SET innodb_lock_wait_timeout=5" (Affected 0UL)
+                  let writer = create 3 store
+                  let writer =
+                      if foundRows then { writer with Capabilities = writer.Capabilities ||| Fsdb.Protocol.ClientFoundRows }
+                      else writer
+                  let writer = run writer "SET innodb_lock_wait_timeout=5" (Affected 0UL)
                   let writer = if transactional then run writer "BEGIN" (Affected 0UL) else writer
+                  let insert = if ignoreDuplicates then "INSERT IGNORE" else "INSERT"
                   let waiting =
                       Threading.Tasks.Task.Run(fun () ->
-                          handle writer "INSERT INTO jobs VALUES(40,4) ON DUPLICATE KEY UPDATE u=7")
+                          handle writer $"{insert} INTO jobs VALUES(40,4) ON DUPLICATE KEY UPDATE u=7")
                   let blocked () = lock store.LockWaits.SyncRoot (fun () -> store.LockWaits.Edges.Count > 0)
                   let entered =
                       Threading.SpinWait.SpinUntil((fun () -> blocked () || waiting.IsCompleted), TimeSpan.FromSeconds 3.0)
@@ -8786,11 +8794,48 @@ let tests =
                   let writer, result = waiting.Result
                   let expected, rows =
                       if ending = "COMMIT" then
-                          Err(1062, "Duplicate entry '7' for key 'jobs.ux'"), [ [ Some "7" ]; [ Some "4" ] ]
+                          let result =
+                              if ignoreDuplicates then Affected(if foundRows then 1UL else 0UL)
+                              else Err(1062, "Duplicate entry '7' for key 'jobs.ux'")
+                          result, [ [ Some "7" ]; [ Some "4" ] ]
                       else Affected 2UL, [ [ Some "3" ]; [ Some "7" ] ]
                   Expect.equal result expected ending
+                  if ignoreDuplicates then
+                      let warnings = if ending = "COMMIT" then [ 1062 ] else []
+                      Expect.equal (writer.Diagnostics |> List.map _.Code) warnings "only the rejected update warns"
                   if transactional then run writer "COMMIT" (Affected 0UL) |> ignore
                   run setup "SELECT u FROM jobs ORDER BY id" (ResultSet([ "u" ], rows)) |> ignore
+
+          testCase "INSERT IGNORE skips conflicting duplicate updates and continues the batch"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let session = create 1 store
+              let session = run session "CREATE TABLE jobs(id INT PRIMARY KEY,u INT UNIQUE,p INT)" (Affected 0UL)
+              let session = run session "INSERT INTO jobs VALUES(1,1,0),(2,2,0)" (Affected 2UL)
+              let session =
+                  run session
+                      "INSERT IGNORE INTO jobs VALUES(1,1,2),(3,3,0),(1,1,4) ON DUPLICATE KEY UPDATE u=VALUES(p),p=jobs.p+1"
+                      (Affected 3UL)
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1287; 1062 ] "the duplicate follows the VALUES warning"
+              run session "SELECT u,p FROM jobs ORDER BY id"
+                  (ResultSet([ "u"; "p" ], [ [ Some "4"; Some "1" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "0" ] ]))
+              |> ignore
+
+              let foundRows = { session with Capabilities = session.Capabilities ||| Fsdb.Protocol.ClientFoundRows }
+              let skipped = run foundRows "INSERT IGNORE INTO jobs VALUES(1,4,1) ON DUPLICATE KEY UPDATE u=2" (Affected 1UL)
+              Expect.equal (skipped.Diagnostics |> List.map _.Code) [ 1062 ] "the skipped match counts in found-row mode"
+
+              let session = run session "CREATE TABLE slots(id INT AUTO_INCREMENT PRIMARY KEY,u INT UNIQUE)" (Affected 0UL)
+              let session = run session "INSERT INTO slots(u) VALUES(1),(2)" (Affected 2UL)
+              let session = run session "INSERT IGNORE INTO slots(u) VALUES(1),(3) ON DUPLICATE KEY UPDATE u=2" (Affected 1UL)
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1062 ] "the rejected duplicate warns"
+              let session = run session "SELECT id FROM slots WHERE u=3" (ResultSet([ "id" ], [ [ Some "3" ] ]))
+              let session = run session "INSERT INTO slots(u) VALUES(9)" (Affected 1UL)
+              run session "SELECT id FROM slots WHERE u=9" (ResultSet([ "id" ], [ [ Some "5" ] ])) |> ignore
 
           testCase "duplicate-key updates preserve validated key moves when publishing after a wait"
           <| fun _ ->
