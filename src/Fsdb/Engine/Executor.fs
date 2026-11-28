@@ -899,10 +899,16 @@ type private AggregateBindingScope =
       CteScope: obj
       DescribedCteScope: obj }
 
+type private CteOuterCondition =
+    { Qualifier: string
+      AllowsBareColumns: bool
+      Predicate: Expr }
+
 type private StatementMemo =
     { FromSubqueries: Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>
       MaterializedDerivedSources: HashSet<FromItem>
       MaterializedCteReferences: HashSet<TableRef>
+      MaterializedCteConditions: Dictionary<CommonTableExpr, CteOuterCondition>
       SharedDerivedGroups: Dictionary<string, (CteGroup * SelectOrUnion) list>
       SharedDerivedRows: Dictionary<CteGroup, Result<ColumnDef list * Value[] list, QueryResult>>
       ExpressionSubqueries: Dictionary<SelectStmt, MemoizedSubquery>
@@ -947,6 +953,7 @@ let private freshStatementMemo () =
     { FromSubqueries = Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
       MaterializedDerivedSources = HashSet<FromItem>(HashIdentity.Reference)
       MaterializedCteReferences = HashSet<TableRef>(HashIdentity.Reference)
+      MaterializedCteConditions = Dictionary<CommonTableExpr, CteOuterCondition>(HashIdentity.Reference)
       SharedDerivedGroups = Dictionary<string, (CteGroup * SelectOrUnion) list>(System.StringComparer.OrdinalIgnoreCase)
       SharedDerivedRows = Dictionary<CteGroup, Result<ColumnDef list * Value[] list, QueryResult>>()
       ExpressionSubqueries = Dictionary<SelectStmt, MemoizedSubquery>(HashIdentity.Reference)
@@ -1149,7 +1156,8 @@ let private lookupScopedFunction registry dbName (name: string) =
 let internal withJoinHintDiagnostics (diagnostics: OptimizerHintResolution.ExecutionDiagnostics) body =
     let inherited = DynamicScope.valueOrDefault OptimizerHintResolution.emptyExecution joinHintDiagnostics
     let isEmpty (value: OptimizerHintResolution.ExecutionDiagnostics) =
-        value.Warnings.IsEmpty && value.SourceStrategies.IsEmpty && value.ParameterizedWhere.IsEmpty
+        value.Warnings.IsEmpty && value.SourceStrategies.IsEmpty
+        && value.ConditionPushdown.IsEmpty && value.ParameterizedWhere.IsEmpty
     if isEmpty diagnostics && isEmpty inherited then body ()
     else DynamicScope.withValue joinHintDiagnostics diagnostics body
 
@@ -15460,6 +15468,61 @@ and private cteSelfReferenced (cte: CommonTableExpr) =
 and private renameCteColumns (cte: CommonTableExpr) (columns: ColumnDef list) : Result<ColumnDef list, QueryResult> =
     renameRelationColumns cte.CteColumns _.Name (fun name column -> { column with Name = name }) columns
 
+and private pushMaterializedCteCondition store registry dbName cte condition =
+    let numericProjection qualifier (columns: ColumnDef list) = function
+        | Col name when (tryRoutineVariable name).IsNone ->
+            columns |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
+        | QualifiedCol(owner, name) when equalsIgnoreCase owner qualifier ->
+            columns |> List.tryFind (fun column -> equalsIgnoreCase column.Name name)
+        | _ -> None
+
+    let specialize (select: SelectStmt) (tableRef: TableRef) =
+        physicalFastPathTable store dbName tableRef
+        |> Option.bind (fun table ->
+            let qualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+            let projections = expandOrderProjections table.Columns (singleQualifier qualifier table.Columns) select.Projections
+            let names =
+                if cte.CteColumns.IsEmpty then projections |> List.map projectionLabel else cte.CteColumns
+            if not (sameLength names projections) || (tryDuplicateIgnoreCase id names).IsSome then None
+            else
+                let keys =
+                    List.zip names projections
+                    |> List.choose (fun (name, projection) ->
+                        numericProjection qualifier table.Columns projection.Expression
+                        |> Option.filter (_.Type >> isExactNumericIndexType)
+                        |> Option.map (fun column -> name.ToLowerInvariant(), QualifiedCol(qualifier, column.Name)))
+                    |> Map.ofList
+                let outputKey = function
+                    | Col name when condition.AllowsBareColumns && (tryRoutineVariable name).IsNone ->
+                        Map.tryFind (name.ToLowerInvariant()) keys
+                    | QualifiedCol(owner, name) when equalsIgnoreCase owner condition.Qualifier ->
+                        Map.tryFind (name.ToLowerInvariant()) keys
+                    | _ -> None
+                let rec safe = function
+                    | LiteralValue(VInt _ | VUInt _ | VDecimal _ | VNull) -> true
+                    | (Col _ | QualifiedCol _) as key -> (outputKey key).IsSome
+                    | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq | And | Or), left, right) -> safe left && safe right
+                    | IsNull value | IsNotNull value | Not value -> safe value
+                    | In(value, candidates) -> safe value && List.forall safe candidates
+                    | Between(value, lower, upper) -> safe value && safe lower && safe upper
+                    | _ -> false
+                let pushed =
+                    condition.Predicate |> conjuncts
+                    |> List.filter (fun expression -> safe expression && Expression.exists (outputKey >> Option.isSome) expression)
+                    |> List.map (Expression.rewrite outputKey)
+                if pushed.IsEmpty then None
+                else
+                    let where = combineConjuncts ((select.Where |> optionalConjuncts) @ pushed)
+                    Some { cte with Body = PlainSelect { select with Where = where } })
+
+    match cte.Body with
+    | PlainSelect({ From = Some(FromTable source) } as select)
+        when queryBodyCanMerge registry cte.Body
+             && select.Ctes.IsEmpty && select.Joins.IsEmpty && select.Locking.IsEmpty
+             && (select.Where |> Option.forall isPlainRowPredicate) ->
+        specialize select source |> Option.defaultValue cte
+    | _ -> cte
+
 and private withCteScope
     (store: Store)
     (registry: Registry)
@@ -15505,6 +15568,10 @@ and private withCteScope
                 match remaining with
                 | [] -> Ok()
                 | cte :: rest ->
+                    let cte =
+                        match (currentStatementMemo ()).MaterializedCteConditions.TryGetValue cte with
+                        | true, condition -> pushMaterializedCteCondition store registry dbName cte condition
+                        | _ -> cte
                     let bindCte columns (rows: Lazy<Result<Value[] list, QueryResult>>) physicalProjection =
                         let materialize values =
                             validateMaterializedGeometry store columns values
@@ -27149,13 +27216,36 @@ let private emitJoinHintDiagnostics store registry schema statement =
     let scopes = lazy (OptimizerHintScopes.collect OptimizerHintScopes.BoundStatement statement)
     if not pending.SourceStrategies.IsEmpty then
         let memo = currentStatementMemo ()
+        let blocks = scopes.Value.Numbered |> List.map (fun block -> block.Number, block) |> Map.ofList
+        let cteReferences = HashSet<CommonTableExpr>(HashIdentity.Reference)
+        let sharedCtes = HashSet<CommonTableExpr>(HashIdentity.Reference)
+        for block in scopes.Value.Numbered do
+            match block.Source |> Option.bind _.Cte with
+            | Some cte when not (cteReferences.Add cte) -> sharedCtes.Add cte |> ignore
+            | _ -> ()
         for block in scopes.Value.Numbered do
             match block.Source, block.ParentBlock with
             | Some source, Some parent
                 when sourceStrategy pending parent source.Alias = Some OptimizerHintResolution.MaterializeSource ->
                 match source.Item with
                 | FromSubquery _ as item -> memo.MaterializedDerivedSources.Add item |> ignore
-                | FromTable reference -> memo.MaterializedCteReferences.Add reference |> ignore
+                | FromTable reference ->
+                    memo.MaterializedCteReferences.Add reference |> ignore
+                    let alias = source.Alias.ToLowerInvariant()
+                    let pushdown =
+                        Map.tryFind (parent, Some alias) pending.ConditionPushdown
+                        |> Option.orElseWith (fun () -> Map.tryFind (parent, None) pending.ConditionPushdown)
+                    match source.Cte, blocks.[parent].Query with
+                    | Some cte, Some owner when pushdown <> Some false && not (sharedCtes.Contains cte) ->
+                        let sources = blocks.[parent].Sources |> List.collect FromItem.leaves
+                        let aliasCount =
+                            sources |> List.sumBy (fun item ->
+                                if FromItem.tryQualifier item |> Option.exists (equalsIgnoreCase alias) then 1 else 0)
+                        if aliasCount = 1 && not (Set.contains alias (nullableJoinQualifiers owner)) then
+                            owner.Where |> Option.iter (fun predicate ->
+                                memo.MaterializedCteConditions.[cte] <-
+                                    { Qualifier = alias; AllowsBareColumns = sources.Length = 1; Predicate = predicate })
+                    | _ -> ()
                 | _ -> ()
             | _ -> ()
     if not pending.Warnings.IsEmpty then

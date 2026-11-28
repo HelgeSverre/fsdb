@@ -10,9 +10,10 @@ type SourceStrategy = MergeSource | MaterializeSource
 type ExecutionDiagnostics =
     { Warnings: (int * (int * string) list) list
       SourceStrategies: Map<int * string option, SourceStrategy>
+      ConditionPushdown: Map<int * string option, bool>
       ParameterizedWhere: Map<int, Expr> }
 
-let emptyExecution = { Warnings = []; SourceStrategies = Map.empty; ParameterizedWhere = Map.empty }
+let emptyExecution = { Warnings = []; SourceStrategies = Map.empty; ConditionPushdown = Map.empty; ParameterizedWhere = Map.empty }
 
 /// Contextualization warnings precede variable evaluation and name resolution.
 type Diagnostics =
@@ -48,6 +49,7 @@ type private Block =
       Sources: FromItem list
       mutable Name: string option
       mutable SourceStrategies: Map<string option, SourceStrategy>
+      mutable ConditionPushdown: Map<string option, bool>
       Targets: ResizeArray<Target>
       Seen: HashSet<string * ConflictTarget>
       JoinOrders: HashSet<OptimizerHints.JoinOrderKind> }
@@ -175,7 +177,7 @@ let resolve (options: Parser.ParserOptions) sql hasSyntaxDiagnostics (hints: Opt
             | root :: _ ->
                 let blocks = scopes.Numbered |> List.map (fun scope ->
                     scope.Number,
-                    { Number = scope.Number; Sources = scope.Sources; Name = None; SourceStrategies = Map.empty
+                    { Number = scope.Number; Sources = scope.Sources; Name = None; SourceStrategies = Map.empty; ConditionPushdown = Map.empty
                       Targets = ResizeArray(); Seen = HashSet(); JoinOrders = HashSet() }) |> Map.ofList
                 let context = ResizeArray<int * int * string>()
                 let named = Dictionary<string, Block>(StringComparer.OrdinalIgnoreCase)
@@ -229,9 +231,12 @@ let resolve (options: Parser.ParserOptions) sql hasSyntaxDiagnostics (hints: Opt
                             let inherited = table.IsSome && block.Seen.Contains(family name, WholeBlock)
                             if inherited || not (block.Seen.Add key) then duplicate (OptimizerHints.contextOrder hint) (renderTableHint quote name table printedBlock indexes)
                             else
+                                let tableKey = table |> Option.map _.ToLowerInvariant()
                                 if family name = "MERGE" then
                                     let strategy = if name = "NO_MERGE" then MaterializeSource else MergeSource
-                                    block.SourceStrategies <- Map.add (table |> Option.map _.ToLowerInvariant()) strategy block.SourceStrategies
+                                    block.SourceStrategies <- Map.add tableKey strategy block.SourceStrategies
+                                elif family name = "DERIVED_CONDITION_PUSHDOWN" then
+                                    block.ConditionPushdown <- Map.add tableKey (name = "DERIVED_CONDITION_PUSHDOWN") block.ConditionPushdown
                                 table |> Option.iter (fun table -> block.Targets.Add(TableTarget(name, table, indexes))))
                     match hint.Value with
                     | OptimizerHints.QueryBlockName name ->
@@ -279,10 +284,14 @@ let resolve (options: Parser.ParserOptions) sql hasSyntaxDiagnostics (hints: Opt
                     blocks |> Map.toSeq |> Seq.collect (fun (number, block) ->
                         block.SourceStrategies |> Map.toSeq |> Seq.map (fun (table, strategy) -> (number, table), strategy))
                     |> Map.ofSeq
+                let pushdown =
+                    blocks |> Map.toSeq |> Seq.collect (fun (number, block) ->
+                        block.ConditionPushdown |> Map.toSeq |> Seq.map (fun (table, enabled) -> (number, table), enabled))
+                    |> Map.ofSeq
                 { Context = List.ofSeq context; Hints = Some(contextHints |> List.map snd)
                   Resolution = resolution
                   Execution =
-                    if execution.IsEmpty then { emptyExecution with SourceStrategies = strategies }
+                    if execution.IsEmpty then { emptyExecution with SourceStrategies = strategies; ConditionPushdown = pushdown }
                     else
                         let parameterizedWhere =
                             scopes.Numbered |> List.choose (fun block ->
@@ -290,4 +299,4 @@ let resolve (options: Parser.ParserOptions) sql hasSyntaxDiagnostics (hints: Opt
                                     if Expression.exists (function Placeholder _ -> true | _ -> false) condition then
                                         Some(block.Number, condition)
                                     else None)) |> Map.ofList
-                        { Warnings = execution; SourceStrategies = strategies; ParameterizedWhere = parameterizedWhere } }
+                        { Warnings = execution; SourceStrategies = strategies; ConditionPushdown = pushdown; ParameterizedWhere = parameterizedWhere } }

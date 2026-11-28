@@ -70,7 +70,22 @@ return 1416 and leave their target rows intact, including UPDATE and DELETE
 through a writable view. These results match the pinned MySQL 8.4.11 oracle
 in memory and WAL mode.
 
-MySQL can push an outer key predicate into a singly referenced materialized
-CTE. A filter that matches no source rows can then bypass the geometry
-check. Fsdb still validates the CTE before applying that filter. Disabling
-`derived_merge` through `optimizer_switch` also remains open.
+### Conditions on a materialized CTE
+
+Fsdb now pushes eligible predicates on direct numeric projections into a
+singly referenced CTE materialized by `NO_MERGE`. This filters the underlying
+table before projection and geometry validation. Renamed columns, prepared
+numeric bounds, and qualified filters in an inner join match the pinned
+MySQL oracle in memory and WAL mode. The filter stays outside the CTE if
+pushdown is disabled by the hint, if the CTE is shared or uses an inner
+`LIMIT`, or if the reference is on the nullable side of an outer join.
+[MySQL condition pushdown rules](https://dev.mysql.com/doc/refman/8.4/en/derived-condition-pushdown-optimization.html)
+
+An indexed point filter over 2,000 source rows returned the same polygon
+with 2 examined rows, compared with 4,000 when pushdown was disabled.
+
+Computed outputs, grouped and union CTEs, and CTEs materialized without
+an explicit hint still need pushdown coverage. MySQL also skips a shared
+materialization if an unmaterialized join input can prove the result
+empty. Fsdb can validate that CTE before the join discovers the empty
+input. Disabling `derived_merge` through `optimizer_switch` remains open.

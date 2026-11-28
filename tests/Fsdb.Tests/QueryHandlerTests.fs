@@ -5588,6 +5588,20 @@ let tests =
               for tail in [ "LIMIT 0"; "WHERE FALSE"; "WHERE 1=2" ] do
                   let skipped = $"WITH e AS ({source}) SELECT /*+ NO_MERGE(e) */ id FROM e {tail}"
                   Expect.equal (run skipped) (ResultSet([ "id" ], [])) skipped
+              for sql in
+                  [ $"WITH e AS ({source}) SELECT /*+ NO_MERGE(e) */ id FROM e WHERE id=999"
+                    $"WITH e(k,g) AS ({source}) SELECT /*+ NO_MERGE(x) */ x.k FROM e x WHERE x.k BETWEEN 7 AND 9 OR x.k IN (10,11)" ] do
+                  match run sql with
+                  | ResultSet(_, rows) -> Expect.isEmpty rows sql
+                  | other -> failtestf "%s should be empty, got %A" sql other
+              let partlyValid = "SELECT id,ST_MakeEnvelope(POINT(id,0),POINT(IF(id>1,id+1,id),IF(id>1,1,0))) AS shape FROM envelope_ids"
+              let matching = $"WITH e AS ({partlyValid}) SELECT /*+ NO_MERGE(e) */ id FROM e WHERE id=2"
+              Expect.equal (run matching) (ResultSet([ "id" ], [ [ Some "2" ] ])) matching
+              for sql in
+                  [ $"WITH e AS ({source}) SELECT /*+ NO_MERGE(e) NO_DERIVED_CONDITION_PUSHDOWN(e) */ id FROM e WHERE id=999"
+                    $"WITH e AS ({partlyValid}) SELECT /*+ NO_MERGE(a) NO_MERGE(b) */ a.id FROM e a JOIN e b ON b.id=a.id WHERE a.id=2"
+                    $"WITH e AS ({source} LIMIT 1) SELECT /*+ NO_MERGE(e) */ id FROM e WHERE id=999" ] do
+                  TestSupport.Sql.expectError 1416 (run sql) sql
               let union = $"SELECT ST_AsText(shape) AS wkt FROM (SELECT {shape} AS shape FROM envelope_ids WHERE id=1 UNION ALL SELECT NULL) AS d"
               Expect.equal (run union) (ResultSet([ "wkt" ], [ [ Some "POINT(1 0)" ]; [ None ] ])) union
               let valid = "SELECT ST_AsText(shape) AS wkt FROM (SELECT ST_MakeEnvelope(POINT(1,0),POINT(2,1)) AS shape UNION ALL SELECT ST_MakeEnvelope(NULL,POINT(1,0))) AS d"

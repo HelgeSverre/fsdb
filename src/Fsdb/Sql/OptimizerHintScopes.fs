@@ -8,6 +8,7 @@ open Fsdb.Sql
 type SourceReference =
     { Alias: string
       Item: FromItem
+      Cte: CommonTableExpr option
       Body: SelectOrUnion
       Recursive: bool }
 
@@ -108,6 +109,7 @@ let collect querySource statement =
                     let reference =
                         { Alias = table.Alias |> Option.defaultValue table.Table
                           Item = item
+                          Cte = Some cte
                           Body = cte.Body
                           Recursive = cte.Recursive }
                     let body = query definitionScope (cte :: active) cte.Body |> fromSource reference
@@ -116,7 +118,7 @@ let collect querySource statement =
         | FromTable _ -> empty
         | FromJoinGroup(first, joins) -> combine [ source scope active first; joinBlocks scope active joins ]
         | (FromSubquery(body, alias) | FromLateral(body, alias)) as item ->
-            query scope active body |> fromSource { Alias = alias; Item = item; Body = body; Recursive = false }
+            query scope active body |> fromSource { Alias = alias; Item = item; Cte = None; Body = body; Recursive = false }
         | FromJsonTable(value, _, _, _) -> expressions scope active [value]
     and joinBlocks scope active joins =
         joins |> List.collect (fun join -> [source scope active join.Table; expressions scope active [join.On]]) |> combine
