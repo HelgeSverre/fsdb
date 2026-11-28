@@ -35736,7 +35736,7 @@ let rec private executeAsWithViewSources
                             (finish rowNumber)
                         |> Result.mapError storageErr
                         |> Result.bind (fun prepared ->
-                            Storage.acquirePreparedInsertWriteTargets snapshot db table [ prepared.Values ]
+                            Storage.acquirePreparedReplaceWriteTargets snapshot db table [ prepared.Values ]
 
                             replaceConflictRows snapshot db table prepared.Values
                             |> Result.mapError storageErr

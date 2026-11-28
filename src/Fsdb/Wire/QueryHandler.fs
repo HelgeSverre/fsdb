@@ -3617,22 +3617,36 @@ let private safeUpdatesEnabled session =
     | _ -> false
 
 let private bindMutationReadView (session: Session) statement =
-    match session.Tx, Executor.tryDirectMutationRead statement with
-    | Some transaction, Some read when transaction.Isolation = RepeatableRead
-                                       && Storage.hasConsistentReadView transaction.Snapshot
-                                       && not (insideFunctionOrTrigger session) ->
-        let dbName = session.Database |> Option.defaultValue defaultDatabase
-        let database = read.Source.Database |> Option.defaultValue dbName
-        let revision store =
-            Storage.tableSnapshot store database read.Source.Table
-            |> Result.toOption |> Option.map _.SchemaRevision
-        let bound =
+    let unchanged session = session, Ok(Executor.MutationScan statement)
+    match session.Tx with
+    | Some transaction when transaction.Isolation = RepeatableRead
+                            && Storage.hasConsistentReadView transaction.Snapshot
+                            && not (insideFunctionOrTrigger session) ->
+        let bindCurrentDefinition database table =
+            let revision store =
+                Storage.tableSnapshot store database table
+                |> Result.toOption |> Option.map _.SchemaRevision
             if revision transaction.Snapshot = revision session.Store then session
             else
                 let baseCatalog, snapshot = rebaseTransactionSnapshot session transaction
                 { session with Tx = Some { transaction with BaseCatalog = baseCatalog; Snapshot = snapshot } }
-        bound, Executor.planMutationReadView (safeUpdatesEnabled bound) (Session.currentStore bound) (registryFor bound) dbName read statement
-    | _ -> session, Ok(Executor.MutationScan statement)
+        let dbName = session.Database |> Option.defaultValue defaultDatabase
+        match Executor.tryDirectMutationRead statement with
+        | Some read ->
+            let database = read.Source.Database |> Option.defaultValue dbName
+            let bound = bindCurrentDefinition database read.Source.Table
+            bound, Executor.planMutationReadView (safeUpdatesEnabled bound) (Session.currentStore bound) (registryFor bound) dbName read statement
+        | None ->
+            match statement with
+            | Insert(table, _, _, _, _)
+            | InsertSelect(table, _, _, _, _)
+            | Replace(table, _, _)
+            | ReplaceSelect(table, _, _)
+            | ReplaceSet(table, _) ->
+                let database, name = splitQualified dbName table
+                bindCurrentDefinition database name |> unchanged
+            | _ -> unchanged session
+    | _ -> unchanged session
 
 let private executeParsedStatement readOverlay accesses (session: Session) (stmt: Statement) : Session * QueryResult =
     let stmt = withSqlSelectLimit session stmt

@@ -185,5 +185,19 @@ write scan. Column binding and safe-update errors retain their precedence.
 
 The comparison includes ordered UPDATE with LIMIT, DELETE with a single
 source and an explicit target, and clustered writes using USE or IGNORE
-hints. Joined writes, insert sources, and duplicate-handling reads remain
-open.
+hints. Joined writes and insert source queries remain open.
+
+### Duplicate-key writes
+
+An ordinary INSERT that collides with a committed secondary unique key
+can report 1062 or skip the row under IGNORE while another transaction
+holds the clustered row for a payload update. A pending key move or
+delete can change the duplicate result, so the insert waits for the
+key. A duplicate on PRIMARY can still wait on the clustered row.
+
+Upsert and REPLACE must open the conflicting row to change or remove
+it. A committed conflict through a secondary key outside the read view
+reports 1412 once the key is stable. A conflict through an inherited
+PRIMARY can wait for the latest row and then proceed if the layout is
+available. A new row can be inserted into a layout created after the
+read view, while a later read of that layout still returns 1412.

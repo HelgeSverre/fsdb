@@ -3473,8 +3473,14 @@ type WriteLockTargets =
     { RowIds: RowId list
       Keys: string list }
 
+type private InsertConflictAction =
+    | CheckDuplicate
+    | UpdateDuplicate
+    | ReplaceDuplicates
+
 let private insertionLockTargets
-    replacesDuplicates
+    action
+    (conflictUnavailable: Table -> string -> bool)
     (store: Store)
     (dbName: string)
     (tableName: string)
@@ -3581,12 +3587,29 @@ let private insertionLockTargets
                         encodedRows |> List.collect (fun (uniqueKeys, orderKeys) ->
                             // A duplicate INSERT reaches the existing record
                             // before it can insert a secondary index entry.
-                            if replacesDuplicates || not (List.exists (existing >> Option.isSome) uniqueKeys) then orderKeys
+                            if action = ReplaceDuplicates || not (List.exists (existing >> Option.isSome) uniqueKeys) then orderKeys
                             else [])
 
+                    let isPrimary name = String.Equals("PRIMARY", name, StringComparison.OrdinalIgnoreCase)
+                    let unavailable = lazy (conflictUnavailable table)
+                    let matchingRow ((name, _, _) as key) =
+                        existing key |> Option.map (fun rowId -> name, rowId)
+                    let conflicts keys =
+                        match action with
+                        | CheckDuplicate ->
+                            keys
+                            |> List.tryPick (fun ((name, _, _) as key) -> if isPrimary name then matchingRow key else None)
+                            |> Option.toList
+                        | UpdateDuplicate -> keys |> List.tryPick matchingRow |> Option.toList
+                        | ReplaceDuplicates -> keys |> List.choose matchingRow |> List.distinctBy snd
                     let rowIds =
-                        encodedKeys
-                        |> List.choose existing
+                        encodedRows
+                        |> List.collect (fst >> conflicts)
+                        // A clustered duplicate still waits on the clustered
+                        // row. A secondary conflict can reject the access once
+                        // its key is stable, before locking the existing row.
+                        |> List.choose (fun (name, rowId) ->
+                            if isPrimary name || not (unavailable.Value name) then Some rowId else None)
                         |> List.distinct
 
                     { RowIds = rowIds
@@ -3595,12 +3618,6 @@ let private insertionLockTargets
     match store.Databases.TryGetValue dbName with
     | true, slot -> tryGetTable dbName slot.Value tableName |> Result.toOption |> Option.bind findInTable
     | false, _ -> None
-
-let tryInsertLockTargets store dbName tableName columns rows =
-    insertionLockTargets false store dbName tableName columns rows
-
-let internal tryReplaceLockTargets store dbName tableName columns rows =
-    insertionLockTargets true store dbName tableName columns rows
 
 let private constraintLookup columns indices rows =
     let lookup = HashSet<string>(StringComparer.Ordinal)
@@ -4203,6 +4220,24 @@ let internal lockingReadUnavailableIndexes store database name (current: Table) 
         |> Seq.choose (fun (name, revision) -> if Set.contains revision inherited then None else Some name)
         |> Set.ofSeq)
     |> Option.defaultValue Set.empty
+
+let private duplicateReadIsUnavailable store database tableName table =
+    if lockingReadLayoutUnavailable store database tableName table then fun _ -> true
+    else
+        let names = lockingReadUnavailableIndexes store database tableName table
+        fun (name: string) -> not names.IsEmpty && Set.contains (name.ToLowerInvariant()) names
+
+let private duplicateReadError =
+    ExpressionError(1412, "Table definition has changed, please retry transaction")
+
+let tryInsertLockTargets store dbName tableName columns rows =
+    insertionLockTargets CheckDuplicate (fun _ _ -> false) store dbName tableName columns rows
+
+let private tryUpsertLockTargets store dbName tableName columns rows =
+    insertionLockTargets UpdateDuplicate (duplicateReadIsUnavailable store dbName tableName) store dbName tableName columns rows
+
+let internal tryReplaceLockTargets store dbName tableName columns rows =
+    insertionLockTargets ReplaceDuplicates (duplicateReadIsUnavailable store dbName tableName) store dbName tableName columns rows
 
 /// The write base can advance independently of the committed read view.
 /// Overlay only this transaction's changes on that read view.
@@ -5195,6 +5230,7 @@ let activeOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (
 /// Claims prepared unique keys, then refreshes and claims duplicate rows from
 /// the rebased catalog before applying it.
 let private claimPreparedInsertWriteTargets
+    planTargets
     (store: Store)
     (dbName: string)
     (tableName: string)
@@ -5202,7 +5238,7 @@ let private claimPreparedInsertWriteTargets
     : bool =
     let candidateRows = candidates |> List.map (Array.toList >> List.map Some)
 
-    match tryInsertLockTargets store dbName tableName None candidateRows with
+    match planTargets store dbName tableName None candidateRows with
     | Some targets when not targets.Keys.IsEmpty ->
         withInsertLocks store dbName tableName targets.RowIds targets.Keys (fun () ->
             match prepareDynamicWriteRebase store with
@@ -5215,7 +5251,7 @@ let private claimPreparedInsertWriteTargets
                     | Some(latestRebase, latest) -> applyDynamicWriteRebase store latestRebase latest
                     | None -> applyDynamicWriteRebase store rebase prepared
 
-                match tryInsertLockTargets currentStore dbName tableName None candidateRows with
+                match planTargets currentStore dbName tableName None candidateRows with
                 | Some currentTargets ->
                     withInsertLocks store dbName tableName currentTargets.RowIds currentTargets.Keys applyLatest
                 | None -> applyLatest ())
@@ -5223,7 +5259,10 @@ let private claimPreparedInsertWriteTargets
     | _ -> false
 
 let internal acquirePreparedInsertWriteTargets store dbName tableName candidates =
-    claimPreparedInsertWriteTargets store dbName tableName candidates |> ignore
+    claimPreparedInsertWriteTargets tryInsertLockTargets store dbName tableName candidates |> ignore
+
+let internal acquirePreparedReplaceWriteTargets store dbName tableName candidates =
+    claimPreparedInsertWriteTargets tryReplaceLockTargets store dbName tableName candidates |> ignore
 
 let internal waitForTransactionReadDependencies timeout (store: Store) dbName tableName keys rowIds =
     match store.TransactionLocks with
@@ -12398,25 +12437,25 @@ let private reservedUpsertPreparation store dbName tableName columns input prepa
                           Reservation = reservation
                           SetCursor = setCursor }))
 
-/// Finds every live row a prepared REPLACE candidate displaces.
-let internal replaceConflictRows
-    (store: Store)
-    (dbName: string)
-    (tableName: string)
-    (candidate: Value[])
-    : Result<(RowId * Value[]) list, StorageError> =
-    match tableAt store dbName tableName with
-    | None -> Error(NoSuchTable(dbName, tableName))
-    | Some table ->
+let private replaceConflicts store dbName tableName (table: Table) candidate =
+    let conflicts =
         uniqueKeyGroups table
         |> List.choose (fun group ->
             encodeUniqueKey table.Columns group candidate
             |> Option.bind (fun key ->
                 Map.tryFind group.Name table.UniqueIndex
                 |> Option.bind (Map.tryFind key)
-                |> Option.bind (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))))
+                |> Option.map (fun rowId -> rowId, group.Name)))
         |> List.distinctBy fst
-        |> Ok
+    let unavailable = lazy (duplicateReadIsUnavailable store dbName tableName table)
+    if conflicts |> List.exists (fun (_, name) -> unavailable.Value name) then Error duplicateReadError
+    else Ok(conflicts |> List.map (fun (rowId, _) -> rowId, table.RowsArray.[rowId]))
+
+/// Finds every live row a prepared REPLACE candidate displaces.
+let internal replaceConflictRows store dbName tableName candidate =
+    match tableAt store dbName tableName with
+    | None -> Error(NoSuchTable(dbName, tableName))
+    | Some table -> replaceConflicts store dbName tableName table candidate
 
 /// The result of an insert-family statement, including rows needed by WAL
 /// events and AFTER INSERT triggers. MySQL's OK packet reports the first
@@ -13256,12 +13295,13 @@ let private upsertRowsInTable
                     // The running index (seeded from `table.UniqueIndex`,
                     // rekeyed after every matched/inserted candidate) finds
                     // the one row (if any) sharing a key with `candidate` in
-                    let findMatch (index: Map<string, Map<string, RowId>>) (candidate: Value[]) : (RowId * Value[]) option =
+                    let unavailable = lazy (duplicateReadIsUnavailable store dbName key table)
+                    let findMatch (index: Map<string, Map<string, RowId>>) (candidate: Value[]) =
                         uniqueGroups
                         |> List.tryPick (fun group ->
                             encodeUniqueKey table.Columns group candidate
                             |> Option.bind (fun key -> Map.tryFind key (Map.find group.Name index))
-                            |> Option.map (fun rowId -> rowId, rows.[rowId]))
+                            |> Option.map (fun rowId -> group.Name, rowId))
 
                     let step stateResult (ordinal, rowValues) =
                         stateResult
@@ -13273,7 +13313,9 @@ let private upsertRowsInTable
                             |> Result.bind (fun (candidate, nextAutoId', assigned) ->
                                         // The candidate's generated keys are ready for duplicate lookup.
                                         match findMatch state.UniqueIndex candidate with
-                                            | Some(pos, existing) ->
+                                            | Some(name, _) when unavailable.Value name -> Error duplicateReadError
+                                            | Some(_, pos) ->
+                                                let existing = rows.[pos]
                                                 let mutable nextAfterDuplicate = nextAutoId'
                                                 applyUpdate ordinal existing candidate
                                                 |> Result.bind (coerceMutationRow (temporalCoercionMode store) table.Columns assignedColumns existing)
@@ -13720,116 +13762,99 @@ let private replaceRowsCore
 
                                         (if candidateChanged then finish rowNumber candidate else Ok candidate)
                                         |> Result.bind (fun candidate ->
-                                            let uniqueGroups = uniqueKeyGroups table
+                                            replaceConflicts store dbName tableName table candidate
+                                            |> Result.bind (fun conflicts ->
+                                                let optimizedConflict =
+                                                    match conflicts with
+                                                    | [ rowId, existing ] when (referencingForeignKeys catalog address).IsEmpty -> Some(rowId, existing)
+                                                    | _ -> None
 
-                                            let conflicts =
-                                                uniqueGroups
-                                                |> List.choose (fun group ->
-                                                    encodeUniqueKey table.Columns group candidate
-                                                    |> Option.bind (fun encoded ->
-                                                        Map.tryFind encoded (Map.find group.Name table.UniqueIndex)
-                                                        |> Option.map (fun rowId -> rowId, table.RowsArray.[rowId])))
-                                                |> List.fold
-                                                    (fun (seen, matches) ((rowId, _) as matched) ->
-                                                        if Set.contains rowId seen then
-                                                            seen, matches
-                                                        else
-                                                            Set.add rowId seen, matched :: matches)
-                                                    (Set.empty, [])
-                                                |> snd
-                                                |> List.rev
-
-                                            let optimizedConflict =
-                                                match conflicts with
-                                                | [ rowId, existing ] when (referencingForeignKeys catalog address).IsEmpty -> Some(rowId, existing)
-                                                | _ -> None
-
-                                            let deletedMatches =
-                                                match optimizedConflict with
-                                                | Some _ -> []
-                                                | None -> conflicts
-
-                                            let deletedConflicts = deletedMatches |> List.map snd
-
-                                            cascadeDelete store.ForeignKeyChecks catalog address deletedConflicts
-                                            |> Result.bind (fun (deletedCatalog, removed, blanked) ->
-                                                let target = tryCatalogTable address deletedCatalog |> Option.get
-                                                let target', writeEvent, weight =
+                                                let deletedMatches =
                                                     match optimizedConflict with
-                                                    | Some(rowId, existing) ->
-                                                        let changed = existing <> candidate
-                                                        let uniqueIndex, secondaryIndex, secondaryOrder =
-                                                            reindexRow
-                                                                target.Columns
-                                                                (uniqueKeyGroups target)
-                                                                (secondaryKeyGroups target)
-                                                                (Some(rowId, existing))
-                                                                (Some(rowId, candidate))
-                                                                target.UniqueIndex
-                                                                target.SecondaryIndex
-                                                                target.SecondaryOrder
+                                                    | Some _ -> []
+                                                    | None -> conflicts
 
-                                                        publishRows target
-                                                            { target with
-                                                                RowsArray = target.RowsArray.SetItem(rowId, candidate)
-                                                                NextAutoId = nextAutoId'
-                                                                UniqueIndex = uniqueIndex
-                                                                SecondaryIndex = secondaryIndex
-                                                                SecondaryOrder = secondaryOrder },
-                                                        (if changed then
-                                                             Some(
-                                                                 RowsUpdatedById(
-                                                                     dbName,
-                                                                     tableName,
-                                                                     [ { RowId = rowId
-                                                                         Before = existing
-                                                                         After = candidate } ]
+                                                let deletedConflicts = deletedMatches |> List.map snd
+
+                                                cascadeDelete store.ForeignKeyChecks catalog address deletedConflicts
+                                                |> Result.bind (fun (deletedCatalog, removed, blanked) ->
+                                                    let target = tryCatalogTable address deletedCatalog |> Option.get
+                                                    let target', writeEvent, weight =
+                                                        match optimizedConflict with
+                                                        | Some(rowId, existing) ->
+                                                            let changed = existing <> candidate
+                                                            let uniqueIndex, secondaryIndex, secondaryOrder =
+                                                                reindexRow
+                                                                    target.Columns
+                                                                    (uniqueKeyGroups target)
+                                                                    (secondaryKeyGroups target)
+                                                                    (Some(rowId, existing))
+                                                                    (Some(rowId, candidate))
+                                                                    target.UniqueIndex
+                                                                    target.SecondaryIndex
+                                                                    target.SecondaryOrder
+
+                                                            publishRows target
+                                                                { target with
+                                                                    RowsArray = target.RowsArray.SetItem(rowId, candidate)
+                                                                    NextAutoId = nextAutoId'
+                                                                    UniqueIndex = uniqueIndex
+                                                                    SecondaryIndex = secondaryIndex
+                                                                    SecondaryOrder = secondaryOrder },
+                                                            (if changed then
+                                                                 Some(
+                                                                     RowsUpdatedById(
+                                                                         dbName,
+                                                                         tableName,
+                                                                         [ { RowId = rowId
+                                                                             Before = existing
+                                                                             After = candidate } ]
+                                                                     )
                                                                  )
-                                                             )
-                                                         else
-                                                             None),
-                                                        deletedConflicts.Length + 1 + (if changed then 1 else 0)
-                                                    | None ->
-                                                        let rowId, rows = target.RowsArray.Append candidate
-                                                        let uniqueIndex, secondaryIndex, secondaryOrder =
-                                                            reindexRow
-                                                                target.Columns
-                                                                (uniqueKeyGroups target)
-                                                                (secondaryKeyGroups target)
-                                                                None
-                                                                (Some(rowId, candidate))
-                                                                target.UniqueIndex
-                                                                target.SecondaryIndex
-                                                                target.SecondaryOrder
+                                                             else
+                                                                 None),
+                                                            deletedConflicts.Length + 1 + (if changed then 1 else 0)
+                                                        | None ->
+                                                            let rowId, rows = target.RowsArray.Append candidate
+                                                            let uniqueIndex, secondaryIndex, secondaryOrder =
+                                                                reindexRow
+                                                                    target.Columns
+                                                                    (uniqueKeyGroups target)
+                                                                    (secondaryKeyGroups target)
+                                                                    None
+                                                                    (Some(rowId, candidate))
+                                                                    target.UniqueIndex
+                                                                    target.SecondaryIndex
+                                                                    target.SecondaryOrder
 
-                                                        publishRows target
-                                                            { target with
-                                                                RowsArray = rows
-                                                                NextAutoId = nextAutoId'
-                                                                UniqueIndex = uniqueIndex
-                                                                SecondaryIndex = secondaryIndex
-                                                                SecondaryOrder = secondaryOrder },
-                                                        Some(RowsInserted(dbName, tableName, [ candidate ])),
-                                                        deletedConflicts.Length + 1
+                                                            publishRows target
+                                                                { target with
+                                                                    RowsArray = rows
+                                                                    NextAutoId = nextAutoId'
+                                                                    UniqueIndex = uniqueIndex
+                                                                    SecondaryIndex = secondaryIndex
+                                                                    SecondaryOrder = secondaryOrder },
+                                                            Some(RowsInserted(dbName, tableName, [ candidate ])),
+                                                            deletedConflicts.Length + 1
 
-                                                let updatedCatalog = setCatalogTable address target' deletedCatalog
+                                                    let updatedCatalog = setCatalogTable address target' deletedCatalog
 
-                                                (if store.ForeignKeyChecks then
-                                                     let currentDatabase = tryCatalogDatabase address.Database updatedCatalog |> Option.get
-                                                     checkFkParents updatedCatalog dbName currentDatabase target None candidate
-                                                 else
-                                                     Ok())
-                                                |> Result.map (fun () ->
-                                                    let firstAuto', lastExplicit' =
-                                                        trackAutoIncrementAssignment assigned firstAuto lastExplicit
+                                                    (if store.ForeignKeyChecks then
+                                                         let currentDatabase = tryCatalogDatabase address.Database updatedCatalog |> Option.get
+                                                         checkFkParents updatedCatalog dbName currentDatabase target None candidate
+                                                     else
+                                                         Ok())
+                                                    |> Result.map (fun () ->
+                                                        let firstAuto', lastExplicit' =
+                                                            trackAutoIncrementAssignment assigned firstAuto lastExplicit
 
-                                                    updatedCatalog,
-                                                    nextAutoId',
-                                                    firstAuto',
-                                                    lastExplicit',
-                                                    affected + weight,
-                                                    candidate :: inserted,
-                                                    events @ commitEvents removed blanked writeEvent)))))))
+                                                        updatedCatalog,
+                                                        nextAutoId',
+                                                        firstAuto',
+                                                        lastExplicit',
+                                                        affected + weight,
+                                                        candidate :: inserted,
+                                                        events @ commitEvents removed blanked writeEvent))))))))
 
                     rowsIn
                     |> List.indexed
@@ -15086,7 +15111,7 @@ and internal upsertRowsWithOrdinalChecked
                         if incomingClaimed then publish ()
                         else
                             let lockRows = rowsIn |> List.choose (Result.toOption >> Option.map (List.map Some))
-                            match tryInsertLockTargets store dbName tableName columns lockRows with
+                            match tryUpsertLockTargets store dbName tableName columns lockRows with
                             | Some targets when not lockRows.IsEmpty ->
                                 withInsertLocksUsing (Some owner) store dbName tableName targets.RowIds targets.Keys publish
                             | _ -> publish ())))
@@ -15117,7 +15142,7 @@ let private upsertRowsInStatement store dbName tableName rows prepareCandidate a
                     Ok(firstGenerated, lastExplicit, affected, inserted)
                 | Error error -> Error error
                 | Ok((candidate: PreparedInsertCandidate), allocation) ->
-                    let incomingClaimed = claimPreparedInsertWriteTargets store dbName tableName [ candidate.Values ]
+                    let incomingClaimed = claimPreparedInsertWriteTargets tryUpsertLockTargets store dbName tableName [ candidate.Values ]
                     upsertRowsWithOrdinalChecked
                         store dbName tableName None [ Ok(Array.toList candidate.Values) ] (fun _ row -> Ok row)
                         (fun _ -> applyUpdate ordinal) checkChangedRow assignedColumns foundRows ignoreDuplicates ignoreViewCheck allocation incomingClaimed

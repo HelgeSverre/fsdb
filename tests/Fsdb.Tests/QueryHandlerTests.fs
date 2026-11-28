@@ -16954,6 +16954,67 @@ let tests =
               let reader = run reader "ROLLBACK" (Affected 0UL)
               run reader "SELECT payload FROM t WHERE id=1" (ResultSet([ "payload" ], [ [ Some "100" ] ])) |> ignore
 
+          testCase "duplicate inserts wait for a changing secondary key instead of a payload lock"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let writer = run (create 1 store) "CREATE TABLE t(id INT PRIMARY KEY, k INT UNIQUE, payload INT)" (Affected 0UL)
+              let writer = run writer "INSERT INTO t VALUES(1,10,100)" (Affected 1UL)
+              let reader = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let writer = run writer "START TRANSACTION" (Affected 0UL)
+              let writer = run writer "UPDATE t SET payload=200 WHERE id=1" (Affected 1UL)
+              let reader = run reader "INSERT INTO t VALUES(2,10,300)"
+                               (Err(1062, "Duplicate entry '10' for key 't.k'"))
+              let reader = run reader "INSERT IGNORE INTO t VALUES(2,10,300)" (Affected 0UL)
+              let writer = run writer "ROLLBACK" (Affected 0UL)
+              let writer = run writer "START TRANSACTION" (Affected 0UL)
+              let writer = run writer "UPDATE t SET k=20 WHERE id=1" (Affected 1UL)
+              let reader = run reader "INSERT INTO t VALUES(2,10,300)"
+                               (Err(1205, "Lock wait timeout exceeded; try restarting transaction"))
+              run writer "ROLLBACK" (Affected 0UL) |> ignore
+              run reader "SELECT id,k,payload FROM t" (ResultSet([ "id"; "k"; "payload" ], [ [ Some "1"; Some "10"; Some "100" ] ]))
+              |> ignore
+
+          testCase "upsert and replace open the selected duplicate key in the read view"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let writer = run (create 1 store) "CREATE TABLE t(id INT PRIMARY KEY, k INT, payload INT)" (Affected 0UL)
+              let writer = run writer "INSERT INTO t VALUES(1,10,100),(2,20,200)" (Affected 2UL)
+              let reader = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let reader = run reader "START TRANSACTION WITH CONSISTENT SNAPSHOT" (Affected 0UL)
+              let writer = run writer "UPDATE t SET payload=300 WHERE id=1" (Affected 1UL)
+              let writer = run writer "ALTER TABLE t ADD UNIQUE INDEX ix(k), ALGORITHM=INPLACE" (Affected 0UL)
+              let writer = run writer "START TRANSACTION" (Affected 0UL)
+              let writer = run writer "UPDATE t SET payload=400 WHERE id=1" (Affected 1UL)
+              let unavailable = Err(1412, "Table definition has changed, please retry transaction")
+              let reader = run reader "INSERT INTO t VALUES(3,10,500) ON DUPLICATE KEY UPDATE payload=payload+1" unavailable
+              let reader = run reader "REPLACE INTO t VALUES(3,10,500)" unavailable
+              let reader = run reader "INSERT IGNORE INTO t VALUES(3,10,500)" (Affected 0UL)
+              let reader = run reader "INSERT INTO t VALUES(1,10,500) ON DUPLICATE KEY UPDATE payload=payload+1"
+                               (Err(1205, "Lock wait timeout exceeded; try restarting transaction"))
+              let writer = run writer "ROLLBACK" (Affected 0UL)
+              let reader = run reader "INSERT INTO t VALUES(1,10,500) ON DUPLICATE KEY UPDATE payload=payload+1" (Affected 2UL)
+              let reader = run reader "INSERT INTO t VALUES(4,40,500),(5,20,500) ON DUPLICATE KEY UPDATE payload=payload+1" unavailable
+              let reader = run reader "INSERT INTO t VALUES(3,30,500)" (Affected 1UL)
+              let reader = run reader "SELECT id,payload FROM t ORDER BY id"
+                               (ResultSet([ "id"; "payload" ], [ [ Some "1"; Some "301" ]; [ Some "2"; Some "200" ]; [ Some "3"; Some "500" ] ]))
+              let reader = run reader "ROLLBACK" (Affected 0UL)
+              let reader = run reader "START TRANSACTION WITH CONSISTENT SNAPSHOT" (Affected 0UL)
+              let writer = run writer "CREATE TABLE fresh(id INT PRIMARY KEY, payload INT)" (Affected 0UL)
+              run writer "INSERT INTO fresh VALUES(1,100)" (Affected 1UL) |> ignore
+              let reader = run reader "INSERT INTO fresh VALUES(2,200)" (Affected 1UL)
+              let reader = run reader "INSERT INTO fresh VALUES(1,500) ON DUPLICATE KEY UPDATE payload=payload+1" unavailable
+              let reader = run reader "REPLACE INTO fresh VALUES(1,500)" unavailable
+              let reader = run reader "SELECT id FROM fresh" unavailable
+              run reader "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "transaction access modes, chaining, and SET CHARACTER SET are enforced"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
