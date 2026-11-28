@@ -42,6 +42,12 @@ let private mysqlRadians degrees = degrees * geographicRadiansPerDegree
 let private geographicPointRadians (latitude, longitude) =
     mysqlRadians latitude, mysqlRadians longitude
 
+let private usesPinnedLinuxGeographicOverlayRounding =
+    OperatingSystem.IsLinux()
+    && (match Runtime.InteropServices.RuntimeInformation.ProcessArchitecture with
+        | Runtime.InteropServices.Architecture.Arm64 | Runtime.InteropServices.Architecture.X64 -> true
+        | _ -> false)
+
 let private squaredPlanarDistance (firstX: float, firstY: float) (secondX: float, secondY: float) =
     let deltaX, deltaY = secondX - firstX, secondY - firstY
     deltaX * deltaX + deltaY * deltaY
@@ -245,10 +251,8 @@ let internal geographicPointDistance referenceSystem (firstLatitude, firstLongit
         (mysqlRadians firstLatitude, mysqlRadians firstLongitude)
         (mysqlRadians secondLatitude, mysqlRadians secondLongitude)
 
-let private geographicAzimuthsUsing subtractProduct flattening (struct (sin1, cos1)) (struct (sin2, cos2)) (struct (sinLongitude, cosLongitude)) =
-    // Boost's optimized Andoyer inverse contracts this sum. Near a polar
-    // vertex the extra bit keeps a short, nonzero segment's azimuth intact.
-    let cosineDistance = max -1.0 (min 1.0 (Math.FusedMultiplyAdd(sin1, sin2, cos1 * cos2 * cosLongitude)))
+let private geographicAzimuthsUsing multiplyAdd subtractProduct flattening (struct (sin1, cos1)) (struct (sin2, cos2)) (struct (sinLongitude, cosLongitude)) =
+    let cosineDistance = max -1.0 (min 1.0 (multiplyAdd (sin1, sin2, cos1 * cos2 * cosLongitude)))
     let angularDistance = acos cosineDistance
     let sineDistance = sin angularDistance
 
@@ -292,11 +296,16 @@ let private geographicAzimuthsUsing subtractProduct flattening (struct (sin1, co
 let private fusedSubtractProduct factor value subtract =
     Math.FusedMultiplyAdd(factor, value, -subtract)
 
-let private geographicAzimuthsFromRadians subtractProduct flattening latitude1 latitude2 longitudeDelta =
-    geographicAzimuthsUsing subtractProduct flattening
+let private separateMultiplyAdd (factor, value, addend) = factor * value + addend
+let private separateSubtractProduct factor value subtract = factor * value - subtract
+
+let private geographicAzimuthsFromRadiansWith multiplyAdd subtractProduct flattening latitude1 latitude2 longitudeDelta =
+    geographicAzimuthsUsing multiplyAdd subtractProduct flattening
         (struct (sin latitude1, cos latitude1))
         (struct (sin latitude2, cos latitude2))
         (struct (sin longitudeDelta, cos longitudeDelta))
+
+let private geographicAzimuthsFromRadians = geographicAzimuthsFromRadiansWith Math.FusedMultiplyAdd
 
 /// Geographic line interpolation pairs the Andoyer azimuth with the
 /// segment distance and the first-order Thomas direct point.
@@ -306,14 +315,16 @@ let private geographicSegmentAzimuthsFromRadians =
 let private geographicTurnAzimuth flattening (latitude1, longitude1) (latitude2, longitude2) =
     // Paired trigonometry matches the native side strategy's rounding.
     // A single bit can keep a short, nonzero segment's azimuth intact.
-    geographicAzimuthsUsing fusedSubtractProduct flattening
+    geographicAzimuthsUsing Math.FusedMultiplyAdd fusedSubtractProduct flattening
         (Math.SinCos latitude1)
         (Math.SinCos latitude2)
         (Math.SinCos(longitude2 - longitude1))
     |> fst
 
-let private geographicSegmentAzimuthsRadians flattening (latitude1, firstLongitude) (latitude2, secondLongitude) =
-    geographicSegmentAzimuthsFromRadians flattening latitude1 latitude2 (secondLongitude - firstLongitude)
+let private geographicSegmentAzimuthsUsing azimuths flattening (latitude1, firstLongitude) (latitude2, secondLongitude) =
+    azimuths flattening latitude1 latitude2 (secondLongitude - firstLongitude)
+
+let private geographicSegmentAzimuthsRadians = geographicSegmentAzimuthsUsing geographicSegmentAzimuthsFromRadians
 
 let private geographicSegmentAzimuths flattening (firstLatitude, firstLongitude) (secondLatitude, secondLongitude) =
     geographicSegmentAzimuthsFromRadians flattening
@@ -1118,7 +1129,7 @@ let private geographicLatitudeOrderedSegment (start, endpoint) =
     let start, endpoint = if fst start > fst endpoint then endpoint, start else start, endpoint
     geographicPointRadians start, geographicPointRadians endpoint
 
-let private tryGeographicSegmentCrossing referenceSystem first second =
+let private tryGeographicSegmentCrossingWith separateProducts referenceSystem first second =
     let firstStart, firstEnd = first
     let secondStart, secondEnd = second
     if geographicSegmentsShareEndpoint first second then None
@@ -1132,7 +1143,16 @@ let private tryGeographicSegmentCrossing referenceSystem first second =
         if side firstAzimuth a c * side firstAzimuth a d >= 0
            || side secondAzimuth c a * side secondAzimuth c b >= 0 then None
         else
-            GeographicIntersection.intersect flattening a b firstAzimuth c d secondAzimuth
+            let multiplyAdd, firstBearing, secondBearing =
+                if separateProducts then
+                    // A paired line/area turn can change ownership when the
+                    // initial bearing or spherical guess rounds differently.
+                    let bearing first last =
+                        geographicSegmentAzimuthsUsing (geographicAzimuthsFromRadians separateSubtractProduct)
+                            flattening first last |> fst
+                    separateMultiplyAdd, bearing a b, bearing c d
+                else Math.FusedMultiplyAdd, firstAzimuth, secondAzimuth
+            GeographicIntersection.intersect multiplyAdd flattening a b firstBearing c d secondBearing
             |> Option.filter (fun point ->
                 let inside start endpoint baseline =
                     let distance = geographicPointDistanceRadians normalized start point
@@ -1143,6 +1163,8 @@ let private tryGeographicSegmentCrossing referenceSystem first second =
                     // An inverse that rounds to signed zero is still on the segment.
                     directedDistance >= 0.0 && directedDistance <= length
                 inside a b firstAzimuth && inside c d secondAzimuth)
+
+let private tryGeographicSegmentCrossing = tryGeographicSegmentCrossingWith false
 
 let private geographicSegmentsProperlyCross referenceSystem first second =
     tryGeographicSegmentCrossing referenceSystem first second |> Option.isSome
@@ -3085,12 +3107,6 @@ let private geographicPartitionContacts referenceSystem lineSections boundarySec
         for struct (line, boundary), _ in pairs do visit line boundary
         List.ofSeq ordered
 
-let private usesFusedLongitudeForOverlayEndpoints =
-    OperatingSystem.IsLinux()
-    && (match Runtime.InteropServices.RuntimeInformation.ProcessArchitecture with
-        | Runtime.InteropServices.Architecture.Arm64 | Runtime.InteropServices.Architecture.X64 -> true
-        | _ -> false)
-
 let private geographicRoundedOverlayContacts referenceSystem ((start, endpoint) as source) =
     let spheroid, flattening = geographicIntersectionSpheroid referenceSystem
     let distance = geographicInverseDistanceRadians false spheroid
@@ -3098,7 +3114,7 @@ let private geographicRoundedOverlayContacts referenceSystem ((start, endpoint) 
     let sourceStart, sourceEnd = geographicLatitudeOrderedSegment source
     let sourceBounds = lazy (geographicSectionBounds flattening [ source ])
     let coincides first second =
-        if usesFusedLongitudeForOverlayEndpoints then
+        if usesPinnedLinuxGeographicOverlayRounding then
             // The pinned Linux builds retain contacts when this form
             // rounds to unity at the inverse's zero-distance boundary.
             let latitude, longitude = first
@@ -3159,7 +3175,7 @@ let private geographicAreaLinePieces referenceSystem includePoints polygons boun
         // MySQL retains the solver's longitude in area overlay results,
         // even when a cut just beyond the antimeridian uses an extra turn.
         let crossing boundary =
-            tryGeographicSegmentCrossing referenceSystem segment boundary
+            tryGeographicSegmentCrossingWith usesPinnedLinuxGeographicOverlayRounding referenceSystem segment boundary
             |> Option.filter (fun _ -> not (geographicTurnRejectsRoundedEndpoint referenceSystem segment boundary))
             |> Option.map (fun ((latitude, longitude) as radians) ->
                 { Degrees = latitude / mysqlRadians 1.0, longitude / mysqlRadians 1.0
@@ -3281,7 +3297,7 @@ let private geographicAreaLineFragments retainCovered pieces =
 
 let private defaultGeographicFlattening = (6378137.0 - 6356752.3142451793) / 6378137.0
 
-let private geographicSegmentCoversPoint flattening
+let private geographicSegmentCoversPoint azimuth
     (((latitude1, longitude1) as start), ((latitude2, longitude2) as endpoint))
     ((latitude, longitude) as query) =
     let length = longitudeDistanceRadians longitude1 longitude2
@@ -3293,8 +3309,7 @@ let private geographicSegmentCoversPoint flattening
     | true, false -> boostGeoEqual latitude latitude1
     | false, true -> boostGeoEqual latitude latitude2
     | false, false when offset * length > 0.0 && abs offset < abs length ->
-        let azimuth point = geographicSegmentAzimuthsRadians flattening start point |> fst
-        let delta = normalizedLongitudeRadians (azimuth query - azimuth endpoint)
+        let delta = normalizedLongitudeRadians (azimuth start query - azimuth start endpoint)
         boostGeoEqual delta 0.0 || boostGeoEqual (abs delta) Math.PI
     | _ -> false
 
@@ -3302,8 +3317,14 @@ let private geographicOverlayLineCoverage lines =
     // MySQL subtracts the clipped linework using Boost's default spheroid.
     // Keep the solver's radians through this test to avoid rounding a turn twice.
     let segments = lines |> List.collect (List.map (fun point -> point.Radians) >> List.pairwise)
+    let azimuths =
+        if usesPinnedLinuxGeographicOverlayRounding then
+            // A clipped segment can round to zero in the point/line difference.
+            geographicSegmentAzimuthsUsing (geographicAzimuthsFromRadiansWith separateMultiplyAdd separateSubtractProduct)
+        else geographicSegmentAzimuthsRadians
+    let azimuth first second = azimuths defaultGeographicFlattening first second |> fst
     fun point ->
-        segments |> List.exists (fun segment -> geographicSegmentCoversPoint defaultGeographicFlattening segment point.Radians)
+        segments |> List.exists (fun segment -> geographicSegmentCoversPoint azimuth segment point.Radians)
 
 let private geographicMbr referenceSystem shape =
     let half = Math.PI
@@ -3438,7 +3459,8 @@ let private geographicBoundsContains outer inner =
         isInside outer.South latitude outer.North && longitudeInside isInside longitude
     let isPoint box = point box = farCorner box
     let isLine box = (box.West = box.East) <> (box.South = box.North)
-    let onOuterLine = geographicSegmentCoversPoint defaultGeographicFlattening (point outer, farCorner outer)
+    let azimuth first second = geographicSegmentAzimuthsRadians defaultGeographicFlattening first second |> fst
+    let onOuterLine = geographicSegmentCoversPoint azimuth (point outer, farCorner outer)
 
     if mbrBoundsEqual (geographicBoundsAsMbr outer) (geographicBoundsAsMbr inner) then true
     elif isPoint outer then false

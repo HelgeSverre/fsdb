@@ -3688,9 +3688,11 @@ implementation effort:
    across WGS 84, GRS 1980, and Clarke 1866. [Geodesic bounds on rounded
    vertices](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#rounded-vertices-beyond-geodesic-bounds)
    fix 72 mixed-latitude overlay results against both MySQL 8.4.11 builds.
-   The digest-pinned Linux image still differs on mixed-latitude and polar
-   fixtures. Multipart overlay differences and spatial cost estimates remain
-   open.
+   The [Linux crossing and coverage audit](torture/findings/2026-11-06-geographic-residual-vertex-audit.md#clipped-segment-coverage-and-crossing-arithmetic-on-linux)
+   closes the structured overlay sweep and the audited polar intersections
+   where both MySQL builds agreed. Other mixed-latitude and polar fixtures
+   still differ against the pinned Linux image. Multipart overlay differences
+   and spatial cost estimates remain open.
    [Cartesian mixed-collection overlays](torture/findings/2026-11-27-cartesian-collection-overlays.md)
    split nested members by dimension and match MySQL spatial equality in the
    audited SRID 0 and EPSG 3857 cases. Some WKT member ordering, ring starts,

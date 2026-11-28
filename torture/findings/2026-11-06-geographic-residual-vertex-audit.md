@@ -1265,3 +1265,36 @@ The A/B comparison found no new mismatches on either Linux architecture.
 Native macOS still matched its MySQL build in all 17,408 WGS 84 results.
 The 14 remaining shared-oracle cases involve whether the clipped geometry
 covers an isolated point near a short segment.
+
+### Clipped-segment coverage and crossing arithmetic on Linux
+
+A Boost 1.84 probe on Linux ARM64 differed on all 22 cases with GCC's
+default contraction and matched all 22 with contraction disabled. In
+three representative cases, the uncontracted probe also reproduced the
+clipped endpoint longitude reported by the pinned MySQL image. Ten of
+Fsdb's remaining differences came from the spherical starting
+calculation. The other four also required matching the starting bearing
+and point/line subtraction. For one short segment, the separate
+Andoyer cosine sum rounds to unity and gives a zero bearing, while the
+fused sum leaves a nonzero bearing.
+[Boost's Sjöberg solver](https://github.com/boostorg/geometry/blob/boost-1.84.0/include/boost/geometry/formulas/sjoberg_intersection.hpp).
+
+Fsdb now uses separate multiply-add operations for the spherical starting
+calculation, the starting bearing's denominator, and the point/line
+coverage bearing in geographic line/area overlays on Linux ARM64 and x64.
+The final version matched all 22 shared-oracle results on both Linux
+architectures. Native macOS matched its MySQL build across the same
+17,408 WGS 84 results.
+
+| Sweep | Results per architecture | Linux ARM64 mismatches before → after | Linux x64 mismatches before → after |
+| --- | ---: | ---: | ---: |
+| Structured WGS 84 | 7,168 | 2 → 0 | 2 → 0 |
+| Mixed WGS 84 | 4,096 | 17 → 9 | 17 → 9 |
+| Polar WGS 84 | 6,144 | 201 → 121 | 201 → 121 |
+| Polar GRS 80 | 6,144 | 197 → 121 | 199 → 121 |
+| Polar Clarke 1866 | 6,144 | 193 → 121 | 193 → 121 |
+
+The main sweep found no new mismatches. A fresh sweep with mixed seed
+`406189` and polar seed `271442` covered 22,528 results across the same
+three reference systems on each Linux architecture. It fixed 246
+results per architecture and introduced no new mismatches.

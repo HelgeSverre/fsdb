@@ -1281,6 +1281,40 @@ let tests =
                         for left, right in [ line, area; area, line ] do
                             Expect.equal (call "ST_Intersection" [ left; right ]) expected "both endpoint contacts survive"
 
+                testCase "geographic intersections distinguish isolated contacts beside polar clips"
+                <| fun _ ->
+                    let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L ]
+                    let cases =
+                        [ ("isolated contact",
+                           "POLYGON((83.06209153207453 -64.39370170820037,83.06209153207453 -57.59079606119798,88.12023312469321 -57.59079606119798,88.12023312469321 -64.39370170820037,83.06209153207453 -64.39370170820037),"
+                           + "(84.32662693022920 -62.69297529644977,86.85569772653855 -62.69297529644977,86.85569772653855 -59.29152247294859,84.32662693022920 -59.29152247294859,84.32662693022920 -62.69297529644977))",
+                           "84.32662693022920 -59.29153247294859", "86.85569772653855 -59.29153247294859",
+                           (84.3266269302292, -59.291532472948596), (84.32662695944535, -59.29153247294862),
+                           Some(84.32662695943998, -59.29153247294866))
+                          ("covered contact",
+                           "POLYGON((71.36458508035899 137.22952079468419,71.36458508035899 142.43620033540626,75.01453266994191 142.43620033540626,75.01453266994191 137.22952079468419,71.36458508035899 137.22952079468419),"
+                           + "(72.27707197775472 138.53119067986469,74.10204577254619 138.53119067986469,74.10204577254619 141.13453045022575,72.27707197775472 141.13453045022575,72.27707197775472 138.53119067986469))",
+                           "72.27707197775472 138.53120067986470", "74.10204577254619 138.53120067986470",
+                           (72.27707197775472, 138.5312006798647), (72.27707204368281, 138.53120067986399), None) ]
+                    let expectCoordinate label (latitude, longitude) (expectedLatitude, expectedLongitude) =
+                        Expect.isLessThan (abs (latitude - expectedLatitude)) 1e-10 (label + " latitude")
+                        Expect.isLessThan (abs (longitude - expectedLongitude)) 1e-10 (label + " longitude")
+                    for label, polygon, first, last, sourcePoint, cut, contact in cases do
+                        let area = geometry polygon
+                        for start, endpoint, reversed in [ first, last, false; last, first, true ] do
+                            let line = geometry $"LINESTRING({start},{endpoint})"
+                            for left, right in [ line, area; area, line ] do
+                                let checkClip a b =
+                                    let original, crossing = if reversed then b, a else a, b
+                                    expectCoordinate label original sourcePoint
+                                    expectCoordinate label crossing cut
+                                match contact, call "ST_Intersection" [ left; right ] with
+                                | None, VGeometry { Shape = GLineString [ a; b ] } -> checkClip a b
+                                | Some expected, VGeometry { Shape = GGeometryCollection [ { Shape = GLineString [ a; b ] }; { Shape = GPoint(latitude, longitude) } ] } ->
+                                    checkClip a b
+                                    expectCoordinate label (latitude, longitude) expected
+                                | _, actual -> failtestf "%s returned %A" label actual
+
                 testCase "geographic intersections subtract clipped lines using the solver coordinates"
                 <| fun _ ->
                     let geometry wkt = call "ST_GeomFromText" [ VString wkt; VInt 4326L ]

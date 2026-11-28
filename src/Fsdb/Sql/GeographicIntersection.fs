@@ -21,14 +21,14 @@ let private bounded value = max -1.0 (min 1.0 value)
 let private halfPi = Math.PI / 2.0
 
 // The initial spherical solution chooses the antipode nearest both segments.
-let private sphericalGuess (lat1, lon1) (latA2, lonA2) (lat2, lon2) (latB2, lonB2) =
+let private sphericalGuess multiplyAdd (lat1, lon1) (latA2, lonA2) (lat2, lon2) (latB2, lonB2) =
     let sinLon1, cosLon1 = sin lon1, cos lon1
     let sinLon2, cosLon2 = sin lon2, cos lon2
     let sinLat1, cosLat1 = sin lat1, cos lat1
     let sinLat2, cosLat2 = sin lat2, cos lat2
     let delta1, delta2 = lonA2 - lon1, lonB2 - lon2
-    let divisor1 = Math.FusedMultiplyAdd(cosLat1, tan latA2, -(sinLat1 * cos delta1))
-    let divisor2 = Math.FusedMultiplyAdd(cosLat2, tan latB2, -(sinLat2 * cos delta2))
+    let divisor1 = multiplyAdd (cosLat1, tan latA2, -(sinLat1 * cos delta1))
+    let divisor2 = multiplyAdd (cosLat2, tan latB2, -(sinLat2 * cos delta2))
     let vertical1 = equal (sin delta1) 0.0 || equal divisor1 0.0
     let vertical2 = equal (sin delta2) 0.0 || equal divisor2 0.0
     if vertical1 && vertical2 then None
@@ -41,12 +41,12 @@ let private sphericalGuess (lat1, lon1) (latA2, lonA2) (lat2, lon2) (latB2, lonB
             else
                 let t1, t2 = alpha1 * cosLat1, alpha2 * cosLat2
                 let product = t1 * t2
-                let y = Math.FusedMultiplyAdd(product,
-                            Math.FusedMultiplyAdd(sinLat1 / cosLat1, cosLon1, -(sinLat2 / cosLat2 * cosLon2)),
-                            Math.FusedMultiplyAdd(t1, sinLon2, -(t2 * sinLon1)))
-                let x = Math.FusedMultiplyAdd(-product,
-                            Math.FusedMultiplyAdd(sinLat1 / cosLat1, sinLon1, -(sinLat2 / cosLat2 * sinLon2)),
-                            Math.FusedMultiplyAdd(t1, cosLon2, -(t2 * cosLon1)))
+                let y = multiplyAdd (product,
+                            multiplyAdd (sinLat1 / cosLat1, cosLon1, -(sinLat2 / cosLat2 * cosLon2)),
+                            multiplyAdd (t1, sinLon2, -(t2 * sinLon1)))
+                let x = multiplyAdd (-product,
+                            multiplyAdd (sinLat1 / cosLat1, sinLon1, -(sinLat2 / cosLat2 * sinLon2)),
+                            multiplyAdd (t1, cosLon2, -(t2 * cosLon1)))
                 atan2 y x
         let opposite = if longitude > 0.0 then longitude - Math.PI else longitude + Math.PI
         let nearest longitude =
@@ -56,9 +56,9 @@ let private sphericalGuess (lat1, lon1) (latA2, lonA2) (lat2, lon2) (latB2, lonB
         let alpha, sinLat, cosLat, sinLon, cosLon =
             if abs alpha1 >= abs alpha2 then alpha1, sinLat1, cosLat1, sinLon1, cosLon1
             else alpha2, sinLat2, cosLat2, sinLon2, cosLon2
-        let sinDelta = Math.FusedMultiplyAdd(sin longitude, cosLon, -(cos longitude * sinLon))
-        let cosDelta = Math.FusedMultiplyAdd(cos longitude, cosLon, sin longitude * sinLon)
-        let tangent = Math.FusedMultiplyAdd(alpha * sinLat, cosDelta, sinDelta) / (alpha * cosLat)
+        let sinDelta = multiplyAdd (sin longitude, cosLon, -(cos longitude * sinLon))
+        let cosDelta = multiplyAdd (cos longitude, cosLon, sin longitude * sinLon)
+        let tangent = multiplyAdd (alpha * sinLat, cosDelta, sinDelta) / (alpha * cosLat)
         Some(longitude, tangent)
 
 type private Geodesic =
@@ -229,7 +229,7 @@ let private converge (first: Geodesic) (second: Geodesic) initialTangent spheric
     step initialTangent false |> Option.bind (iterate 2 initialTangent 0)
 
 /// Inputs and result use latitude/longitude radians on the normalized spheroid.
-let intersect flattening firstStart firstEnd firstAzimuth secondStart secondEnd secondAzimuth =
+let intersect multiplyAdd flattening firstStart firstEnd firstAzimuth secondStart secondEnd secondAzimuth =
     let first = geodesic flattening firstStart firstAzimuth
     let second = geodesic flattening secondStart secondAzimuth
     if first.IsEquator && second.IsEquator then None
@@ -250,7 +250,7 @@ let intersect flattening firstStart firstEnd firstAzimuth secondStart secondEnd 
         // Boost still attempts convergence from zero when the spherical
         // starting-point calculation cannot distinguish the two geodesics.
         let longitude, tangentLatitude =
-            sphericalGuess firstStart firstEnd secondStart secondEnd
+            sphericalGuess multiplyAdd firstStart firstEnd secondStart secondEnd
             |> Option.defaultValue (0.0, 0.0)
         if equal flattening 0.0 then Some(atan tangentLatitude, longitude)
         else
