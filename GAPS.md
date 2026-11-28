@@ -1927,6 +1927,8 @@ U+30000–U+3FFFF under those three legacy collations. First, middle, and
 final Extension J pages also match 41,472 two-column ngram searches at
 sizes 1–3. [Whole-block bigrams](torture/findings/2026-11-06-extension-j-plane-three-legacy-weights.md#whole-block-bigrams)
 match under legacy Unicode 5.2 and accent-insensitive Unicode 9.0.
+[Whole-block unigrams and trigrams](torture/findings/2026-11-06-extension-j-plane-three-legacy-weights.md#whole-block-unigrams-and-trigrams)
+also match under legacy Unicode 5.2.
 Other full-block token sizes, collations, and MeCab remain open.
 [Ideographic-space composition](torture/findings/2026-11-05-ideographic-space-legacy-weight.md)
 now matches 1,280 Extension A plus U+3000 pairs across five legacy collations;

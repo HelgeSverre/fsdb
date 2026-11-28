@@ -58,3 +58,13 @@ agree in all 25,824 searches under each of `utf8mb4_unicode_520_ci` and
 uv run --with pymysql python torture/scripts/ngram-multicol-oracle.py --legacy-range 323B0:33480 --all-range-scalars --collation utf8mb4_unicode_520_ci 2
 uv run --with pymysql python torture/scripts/ngram-multicol-oracle.py --legacy-range 323B0:33480 --all-range-scalars --collation utf8mb4_0900_ai_ci 2
 ```
+
+### Whole-block unigrams and trigrams
+
+The same 4,304-position index under `utf8mb4_unicode_520_ci` also matches
+25,824 searches at each of token sizes 1 and 3. Membership and relevance
+agree in natural, Boolean, and query expansion modes at both sizes.
+
+```sh
+uv run --with pymysql python torture/scripts/ngram-multicol-oracle.py --legacy-range 323B0:33480 --all-range-scalars --collation utf8mb4_unicode_520_ci 1 3
+```
