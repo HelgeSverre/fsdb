@@ -35,9 +35,17 @@ SRID 0 and WGS 84 points.
 Prepared parameter and result descriptors matched in `utf8mb4` and
 `latin1`. Sixteen binary executions matched values, errors, and warnings,
 including a geometry bound as a BLOB and coordinate strings with trailing
-text. Fsdb still defers some literal type errors to execution. For example,
-`PREPARE s FROM 'SELECT ST_LatFromGeoHash(42)'` returns 3064 during
-preparation in MySQL and during execution in Fsdb.
+text.
+
+Both engines now check argument types during `PREPARE` and before executing
+ordinary statements that yield no rows. For example,
+`PREPARE s FROM 'SELECT ST_LatFromGeoHash(42)'` returns 3064 during preparation.
+An empty hash is valid text at prepare time and returns 1411 on execution.
+A bit string can supply the binary point argument to `ST_GeoHash`, and
+execution returns 3037 if those bytes cannot hold a geometry.
+The pinned MySQL comparison covered 60 preparations and 11 ordinary
+statements, including literal, column, scalar-subquery, and placeholder
+arguments, empty sources, and short-circuited expressions.
 
 The text and geometry comparison passed in memory and WAL modes. After
 reopening the WAL database, the generated hash column still supported its

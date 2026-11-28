@@ -3553,6 +3553,44 @@ let tests =
                       "a decimal parameter value fails the length type check"
               | other -> failtestf "expected the encoder statement to prepare, got %A" other
 
+          testCase "geohash preparation checks argument types before evaluating values"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE gh_types(i INT, s VARCHAR(10), t TEXT, b BLOB, p POINT, d DOUBLE, bits BIT(8))"
+              for sql, argument, name in
+                  [ "SELECT ST_LatFromGeoHash(42)", "geohash", "ST_LATFROMGEOHASH"
+                    "SELECT ST_LongFromGeoHash(CAST('s' AS BINARY))", "geohash", "ST_LONGFROMGEOHASH"
+                    "SELECT ST_GeoHash('s',7)", "point", "st_geohash"
+                    "SELECT ST_GeoHash(1,2,3.5)", "geohash max length", "st_geohash"
+                    "SELECT ST_PointFromGeoHash(NULL,1.1)", "SRID", "st_pointfromgeohash"
+                    "SELECT ST_LatFromGeoHash(i) FROM gh_types", "geohash", "ST_LATFROMGEOHASH"
+                    "SELECT ST_LatFromGeoHash((SELECT i FROM gh_types LIMIT 1))", "geohash", "ST_LATFROMGEOHASH"
+                    "SELECT ST_PointFromGeoHash(s,t) FROM gh_types", "SRID", "st_pointfromgeohash"
+                    "UPDATE gh_types SET d=ST_LatFromGeoHash(i)", "geohash", "ST_LATFROMGEOHASH"
+                    "DO ST_LatFromGeoHash(42)", "geohash", "ST_LATFROMGEOHASH" ] do
+                  match prepareStatementForSession session sql with
+                  | Error(code, message) ->
+                      Expect.equal (code, message) (3064, $"Incorrect type for argument {argument} in function {name}.") sql
+                  | other -> failtestf "expected a type error from %s, got %A" sql other
+
+              for sql in
+                  [ "SELECT ST_LatFromGeoHash('')"
+                    "SELECT ST_GeoHash(X'73',7)"
+                    "SELECT ST_GeoHash(ST_GeomFromText('LINESTRING(0 0,1 1)'),7)"
+                    "SELECT ST_GeoHash(1,2,0)"
+                    "SELECT ST_PointFromGeoHash('s',999999)"
+                    "SELECT ST_GeoHash(?,?,?)"
+                    "SELECT ST_LatFromGeoHash(t), ST_GeoHash(b,7), ST_GeoHash(p,7), ST_GeoHash(bits,7) FROM gh_types" ] do
+                  match prepareStatementForSession session sql with
+                  | Ok _ -> ()
+                  | Error error -> failtestf "expected %s to prepare, got %A" sql error
+
+              for sql in
+                  [ "SELECT ST_LatFromGeoHash(i) FROM gh_types"
+                    "SELECT ST_LatFromGeoHash(CAST(NULL AS SIGNED))"
+                    "UPDATE gh_types SET d=ST_LatFromGeoHash(i) WHERE 0" ] do
+                  TestSupport.Sql.expectError 3064 (handle session sql |> snd) sql
+
           testCase "prepared comparison parameters retain their dynamic type"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

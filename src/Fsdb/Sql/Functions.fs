@@ -6468,8 +6468,12 @@ let private decodeGeohash (hash: string) =
     if valid then Some(roundGeohashCenter longitude longitudeAccuracy, roundGeohashCenter latitude latitudeAccuracy)
     else None
 
+let private geohashTypeDiagnostic name argument =
+    3064, $"Incorrect type for argument {argument} in function {name}."
+
 let private geohashArgumentTypeError name argument =
-    raise (SqlError(3064, $"Incorrect type for argument {argument} in function {name}."))
+    let code, message = geohashTypeDiagnostic name argument
+    raise (SqlError(code, message))
 
 let private geohashRangeError name argument =
     raise (SqlError(1690, $"{argument} value is out of range in '{name}'"))
@@ -6479,17 +6483,73 @@ let private isGeohashText = function
     | VEncodedString(charset, _) -> charset <> "binary"
     | _ -> false
 
-let private requireGeohashType name argument accepts value =
-    if value <> VNull && not (accepts value) then geohashArgumentTypeError name argument
-
 let private geohashText name = function
     | VString text -> text
     | VEncodedString(charset, bytes) when charset <> "binary" -> Charset.decodeBytes charset bytes
     | _ -> geohashArgumentTypeError name "geohash"
 
-let private isGeohashInteger = function
-    | VInt _ | VUInt _ -> true
-    | value -> isGeohashText value
+type private GeohashInput =
+    | HashNull
+    | HashInteger
+    | HashReal
+    | HashString
+    | HashText
+    | HashBinary
+    | HashGeometry
+    | HashOther
+
+let private geohashValueType = function
+    | VNull -> HashNull
+    | VInt _ | VUInt _ -> HashInteger
+    | VDouble _ | VDecimal _ -> HashReal
+    | VBytes _ | VBinaryLiteral _ | VEncodedString("binary", _) | VBit _ -> HashBinary
+    | VGeometry _ -> HashGeometry
+    | value when isGeohashText value -> HashString
+    | _ -> HashOther
+
+let private geohashMetadataType (metadata: ColumnMetadata) =
+    match metadata.TypeId with
+    | ty when ty = TypeNull -> HashNull
+    | ty when ty = TypeTiny || ty = TypeShort || ty = TypeInt24 || ty = TypeLong || ty = TypeLongLong -> HashInteger
+    | ty when ty = TypeDouble || ty = TypeFloat || ty = TypeNewDecimal -> HashReal
+    | ty when ty = TypeGeometry -> HashGeometry
+    | ty when ty = TypeBit -> HashBinary
+    | ty when ty = TypeString || ty = TypeVarchar || ty = TypeVarString || ty = TypeBlob ->
+        if metadata.CollationId = Some Collation.binaryId || carriesRawBytes metadata then HashBinary
+        elif ty = TypeBlob then HashText
+        else HashString
+    | _ -> HashOther
+
+let private geohashArgumentDiagnostic name infer arguments =
+    let check argumentName accepts argument =
+        match infer argument with
+        | None | Some HashNull -> None
+        | Some actual when accepts actual -> None
+        | Some _ -> Some(geohashTypeDiagnostic name argumentName)
+
+    let text = function HashString | HashText -> true | _ -> false
+    let lengthType = function HashInteger -> true | input -> text input
+    let coordinateType = function HashReal -> true | input -> lengthType input
+    let length = check "geohash max length" lengthType
+    let coordinate label = check label coordinateType
+    match name, arguments with
+    | "st_geohash", [ point; maxLength ] ->
+        check "point" (function HashBinary | HashGeometry -> true | _ -> false) point
+        |> Option.orElseWith (fun () -> length maxLength)
+    | "st_geohash", [ longitude; latitude; maxLength ] ->
+        coordinate "longitude" longitude
+        |> Option.orElseWith (fun () -> coordinate "latitude" latitude)
+        |> Option.orElseWith (fun () -> length maxLength)
+    | ("ST_LATFROMGEOHASH" | "ST_LONGFROMGEOHASH"), [ hash ] -> check "geohash" text hash
+    | "st_pointfromgeohash", [ hash; srid ] ->
+        check "geohash" text hash
+        |> Option.orElseWith (fun () -> check "SRID" (function HashInteger | HashString -> true | _ -> false) srid)
+    | _ -> None
+
+let private checkGeohashArguments name (fn: Scalar): Scalar = fun arguments ->
+    match geohashArgumentDiagnostic name (geohashValueType >> Some) arguments with
+    | Some(code, message) -> raise (SqlError(code, message))
+    | None -> fn arguments
 
 let private geohashInteger name argument = function
     | VInt number -> number
@@ -6516,24 +6576,21 @@ let private geometryGeohashFn: Scalar =
         if length < 1L || length > int64 maxGeohashLength then geohashRangeError name "max geohash length"
         VString(encodeGeohash longitude latitude (int length))
 
-    let isCoordinate = function
-        | VInt _ | VUInt _ | VDecimal _ | VDouble _ -> true
-        | value -> isGeohashText value
-
-    let isGeometry = function VGeometry _ | VBytes _ | VBinaryLiteral _ -> true | _ -> false
     let readLength = function VNull -> 0L | value -> geohashInteger name "geohash max length" value
 
     function
     | [ value; length ] ->
-        requireGeohashType name "point" isGeometry value
-        requireGeohashType name "geohash max length" isGeohashInteger length
         let parsedLength = readLength length
         if value = VNull || length = VNull then VNull
         else
             let geometry =
                 match value with
                 | VGeometry geometry -> geometry
-                | VBytes bytes | VBinaryLiteral bytes ->
+                | (VBytes _ | VBinaryLiteral _ | VEncodedString("binary", _) | VBit _) as binary ->
+                    let bytes =
+                        match binary with
+                        | VEncodedString(_, bytes) -> bytes
+                        | _ -> stringBytes binary
                     tryGeometryFromMySqlBinary bytes
                     |> Option.map GeometryCoordinates.swapMySqlGeographicAxes
                     |> Option.defaultWith (fun () -> raise (SqlError(3037, $"Invalid GIS data provided to function {name}.")))
@@ -6548,9 +6605,6 @@ let private geometryGeohashFn: Scalar =
                 | _ -> raise (SqlError(3682, $"Function {name} is only defined for SRID 0 and SRID 4326."))
             | _ -> geohashArgumentTypeError name "point"
     | [ longitude; latitude; length ] ->
-        requireGeohashType name "longitude" isCoordinate longitude
-        requireGeohashType name "latitude" isCoordinate latitude
-        requireGeohashType name "geohash max length" isGeohashInteger length
         let longitudeValue = geometryNumericArgument longitude
         let latitudeValue = geometryNumericArgument latitude
         let lengthValue = readLength length
@@ -6574,7 +6628,6 @@ let private geohashCoordinateFn name select: Scalar = function
 let private pointFromGeohashFn: Scalar = function
     | [ hash; srid ] ->
         let name = "st_pointfromgeohash"
-        requireGeohashType name "geohash" isGeohashText hash
         let sridValue = if srid = VNull then 0L else geohashInteger name "SRID" srid
         if sridValue < 0L || sridValue > int64 UInt32.MaxValue then geohashRangeError name "SRID"
         if hash = VNull || srid = VNull then VNull
@@ -7461,12 +7514,15 @@ let private registerSpatialBuiltins registry =
     |> registerGeometryConstructors geometryFromTextFn wktGeometryConstructors
     |> registerGeometryConstructors geometryFromWkbFn wkbGeometryConstructors
     |> registerScalarWithSignature "POINT" [ spatialDouble; spatialDouble ] pointResult pointConstructorFn
-    |> registerScalarWithMetadata "ST_GEOHASH" geohashResult geometryGeohashFn
-    |> registerScalarWithSignature "ST_LATFROMGEOHASH" [ geohashTextParameter ] spatialDouble (geohashCoordinateFn "ST_LATFROMGEOHASH" snd)
+    |> registerScalarWithMetadata "ST_GEOHASH" geohashResult (checkGeohashArguments "st_geohash" geometryGeohashFn)
+    |> registerScalarWithSignature "ST_LATFROMGEOHASH" [ geohashTextParameter ] spatialDouble
+        (geohashCoordinateFn "ST_LATFROMGEOHASH" snd |> checkGeohashArguments "ST_LATFROMGEOHASH")
     |> registerResultCollation "ST_LATFROMGEOHASH" (FixedCollation("binary", 5))
-    |> registerScalarWithSignature "ST_LONGFROMGEOHASH" [ geohashTextParameter ] spatialDouble (geohashCoordinateFn "ST_LONGFROMGEOHASH" fst)
+    |> registerScalarWithSignature "ST_LONGFROMGEOHASH" [ geohashTextParameter ] spatialDouble
+        (geohashCoordinateFn "ST_LONGFROMGEOHASH" fst |> checkGeohashArguments "ST_LONGFROMGEOHASH")
     |> registerResultCollation "ST_LONGFROMGEOHASH" (FixedCollation("binary", 5))
-    |> registerScalarWithSignature "ST_POINTFROMGEOHASH" [ geohashTextParameter; geohashSridParameter ] pointResult pointFromGeohashFn
+    |> registerScalarWithSignature "ST_POINTFROMGEOHASH" [ geohashTextParameter; geohashSridParameter ] pointResult
+        (checkGeohashArguments "st_pointfromgeohash" pointFromGeohashFn)
     |> registerResultCollation "ST_POINTFROMGEOHASH" binaryResult
     |> registerScalar "ST_ASTEXT" (geometryToTextFn "ST_AsText")
     |> registerScalar "ST_ASWKT" (geometryToTextFn "ST_AsWKT")
@@ -7852,4 +7908,17 @@ let internal tryGeohashResultType (name: string) registry =
     | "ST_GEOHASH" when isUnmodifiedBuiltinScalar name registry -> Some(TVarchar maxGeohashLength)
     | "ST_POINTFROMGEOHASH" when isUnmodifiedBuiltinScalar name registry -> Some(TGeometry Point)
     | "ST_LATFROMGEOHASH" | "ST_LONGFROMGEOHASH" when isUnmodifiedBuiltinScalar name registry -> Some(TDouble false)
+    | _ -> None
+
+let internal tryGeohashArgumentDiagnostic registry inferMetadata = function
+    | FuncCall(name, arguments) when name.EndsWith("geohash", StringComparison.OrdinalIgnoreCase) ->
+        let infer = function
+            | LiteralValue value -> Some(geohashValueType value)
+            | argument -> inferMetadata argument |> Option.map geohashMetadataType
+        match name.ToUpperInvariant() with
+        | "ST_GEOHASH" when isUnmodifiedBuiltinScalar name registry -> geohashArgumentDiagnostic "st_geohash" infer arguments
+        | "ST_POINTFROMGEOHASH" when isUnmodifiedBuiltinScalar name registry -> geohashArgumentDiagnostic "st_pointfromgeohash" infer arguments
+        | ("ST_LATFROMGEOHASH" | "ST_LONGFROMGEOHASH") as decoder when isUnmodifiedBuiltinScalar name registry ->
+            geohashArgumentDiagnostic decoder infer arguments
+        | _ -> None
     | _ -> None

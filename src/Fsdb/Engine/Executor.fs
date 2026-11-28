@@ -8303,6 +8303,7 @@ and private trySourceFreeScalarSubquery (ctx: EvalContext) (select: SelectStmt) 
 and private validateExpressionInContext ctx expression =
     let nodeDiagnostic node =
         Expression.tryLiteralNodeDiagnostic node
+        |> Option.orElseWith (fun () -> Functions.tryGeohashArgumentDiagnostic ctx.Registry (metadataOfExpr ctx) node)
         |> Option.orElseWith (fun () ->
             geometryArgumentDiagnostic (fun argument ->
                 metadataOfExpr ctx argument |> Option.exists (fun metadata -> metadata.TypeId = TypeGeometry)) node)
@@ -11645,6 +11646,14 @@ and private describeQueryColumnDescriptorsInScope
                 metadataOfExpr context.Value argument |> Option.exists (fun metadata -> metadata.TypeId = TypeGeometry)
         let nodeDiagnostic node =
             aliasNodeDiagnostic (fun name -> aliasSource name scopes) node
+            |> Option.orElseWith (fun () ->
+                let metadata = function
+                    | Subquery nested ->
+                        match describeSelect seen dbName ctes scopes nested with
+                        | Ok [ descriptor ] -> descriptor.WireMetadata |> Option.orElseWith (fun () -> ColumnWire.resultMetadataOf descriptor.Column)
+                        | _ -> None
+                    | argument -> metadataOfExpr context.Value argument
+                Functions.tryGeohashArgumentDiagnostic registry metadata node)
             |> Option.orElseWith (fun () -> geometryArgumentDiagnostic isGeometry node)
         validateExpressionBindings resolve
             (fun nested ->
@@ -30897,9 +30906,13 @@ let private validateBindingsWith describeColumns validateFunction store registry
         | _ -> Ok()
 
     let validateExpressions expressions =
+        let context = lazy (contextFactory store registry schema Map.empty Map.empty None [||])
+        let nodeDiagnostic node =
+            Expression.tryLiteralNodeDiagnostic node
+            |> Option.orElseWith (fun () -> Functions.tryGeohashArgumentDiagnostic registry (fun argument -> metadataOfExpr context.Value argument) node)
         expressions
         |> traverse (validateExpressionBindings (fun _ -> Ok()) (PlainSelect >> validateBody)
-                         Expression.tryLiteralNodeDiagnostic id validateFunction)
+                         nodeDiagnostic id validateFunction)
         |> Result.map ignore
 
     let validateDuplicateAssignments target assignments =
@@ -30972,9 +30985,10 @@ let private validateBindings store registry schema functionDatabase statement =
     let validateFunction = validateFunctionName registry functionDatabase
     validateBindingsWith (describeQueryColumnsCheckingFunctions functionDatabase) validateFunction store registry schema statement
 
-let private geometryBindingError store registry schema statement =
+let private spatialArgumentBindingError store registry schema statement =
     let mutable geometrySyntax = false
-    let needsTypedArguments =
+    let mutable hasGeometryRestriction = false
+    let hasGeohash =
         statement |> Expression.statementExists (fun expression ->
             if not geometrySyntax then
                 geometrySyntax <-
@@ -30986,7 +31000,12 @@ let private geometryBindingError store registry schema statement =
                         || (Functions.lookupScalarMetadata name registry
                             |> Option.exists (fun metadata -> metadata.TypeId = TypeGeometry))
                     | _ -> false
-            (geometryRestrictedArguments expression).IsSome)
+            if not hasGeometryRestriction then
+                hasGeometryRestriction <- (geometryRestrictedArguments expression).IsSome
+            match expression with
+            | FuncCall(name, _) when name.EndsWith("geohash", System.StringComparison.OrdinalIgnoreCase) ->
+                (Functions.tryGeohashResultType name registry).IsSome
+            | _ -> false)
 
     let canExposeGeometry () =
         TableLocks.directStatementAccesses schema statement
@@ -30995,22 +31014,22 @@ let private geometryBindingError store registry schema statement =
             | Ok table -> table.Columns |> List.exists (fun column -> match column.Type with TGeometry _ -> true | _ -> false)
             | Error _ -> true) // Includes stored views, whose output types are resolved by the binder.
 
-    // Bind before planning or short-circuit evaluation only when a restricted
-    // expression can see geometry. Ordinary comparisons stay on the usual path.
-    if needsTypedArguments && (geometrySyntax || canExposeGeometry ()) then
+    // Bind types before planning can eliminate empty sources or unused branches.
+    if hasGeohash || (hasGeometryRestriction && (geometrySyntax || canExposeGeometry ())) then
         match validateBindings store registry schema schema statement with
         | Error(1210, message) when message.StartsWith("Incorrect arguments to ", System.StringComparison.Ordinal) ->
             Some(Err(1210, message))
+        | Error(3064, message) when hasGeohash -> Some(Err(3064, message))
         | _ -> None
     else None
 
 let runTopLevelSelect store registry dbName select =
-    match geometryBindingError store registry dbName (Select select) with
+    match spatialArgumentBindingError store registry dbName (Select select) with
     | Some error -> error, [], None, []
     | None -> runTopLevelSelectCore store registry dbName select
 
 let runTopLevelUnion store registry dbName first rest orderBy limit offset =
-    match geometryBindingError store registry dbName (Union(first, rest, orderBy, limit, offset)) with
+    match spatialArgumentBindingError store registry dbName (Union(first, rest, orderBy, limit, offset)) with
     | Some error -> error, [], None, []
     | None -> runTopLevelUnionCore store registry dbName first rest orderBy limit offset
 
@@ -37557,7 +37576,7 @@ let rec private executeAsWithViewSources
 
 and executeAs store registry dbName ids foundRows currentAccount stmt =
     withStatementViewMerge store dbName stmt (fun () ->
-        match geometryBindingError store registry dbName stmt with
+        match spatialArgumentBindingError store registry dbName stmt with
         | Some error -> ids, error
         | None ->
             executeAsWithViewSources { Aliases = Set.empty; Conditions = []; CallerSubqueries = None } store registry dbName ids foundRows currentAccount stmt)

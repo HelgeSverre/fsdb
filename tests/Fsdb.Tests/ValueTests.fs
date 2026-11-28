@@ -2213,6 +2213,11 @@ let tests =
 
                     let point = call "ST_GeomFromText" [ VString "POINT(51.5 -0.1)"; VInt 4326L ]
                     Expect.equal (call "ST_GeoHash" [ point; VInt 12L ]) (VString "gcpuvxr1jzfd") "encode a WGS 84 point"
+                    match point with
+                    | VGeometry geometry ->
+                        let binary = VEncodedString("binary", geometryToSqlBinary geometry)
+                        Expect.equal (call "ST_GeoHash" [ binary; VInt 12L ]) (VString "gcpuvxr1jzfd") "preserve encoded geometry bytes"
+                    | value -> failtestf "expected a WGS 84 point, got %A" value
                     let hash = VString "U4PRUYDQQVJ"
                     Expect.equal (call "ST_LatFromGeoHash" [ hash ]) (VDouble 57.64911) "case-insensitive latitude"
                     Expect.equal (call "ST_LongFromGeoHash" [ hash ]) (VDouble 10.40744) "case-insensitive longitude"
