@@ -8889,13 +8889,14 @@ let tests =
 
           testCase "an ignored upsert from a temporary source refreshes only the permanent target"
           <| fun _ ->
-              for sql, explicitTransaction, ending in
-                  [ for sql in
-                        [ "INSERT IGNORE INTO jobs SELECT feed.id,feed.u,feed.p FROM feed ORDER BY feed.id ON DUPLICATE KEY UPDATE u=7,p=1"
-                          "INSERT IGNORE INTO jobs VALUES(10,5,0),(40,4,0),(60,4,0) ON DUPLICATE KEY UPDATE u=7,p=(SELECT 1 FROM feed WHERE id=40)" ] do
+              for sql, shadowedView, explicitTransaction, ending in
+                  [ for sql, shadowedView in
+                        [ "INSERT IGNORE INTO jobs SELECT feed.id,feed.u,feed.p FROM feed ORDER BY feed.id ON DUPLICATE KEY UPDATE u=7,p=1", false
+                          "INSERT IGNORE INTO jobs VALUES(10,5,0),(40,4,0),(60,4,0) ON DUPLICATE KEY UPDATE u=7,p=(SELECT 1 FROM feed WHERE id=40)", false
+                          "INSERT IGNORE INTO active_jobs SELECT feed.id,feed.u,feed.p FROM feed ORDER BY feed.id ON DUPLICATE KEY UPDATE u=7,p=1", true ] do
                         for explicitTransaction in [ false; true ] do
                             for ending in [ "COMMIT"; "ROLLBACK"; "TIMEOUT" ] do
-                                yield sql, explicitTransaction, ending ] do
+                                yield sql, shadowedView, explicitTransaction, ending ] do
                   let store = Fsdb.Storage.create ()
                   let run session sql expected =
                       let next, result = handle session sql
@@ -8910,6 +8911,12 @@ let tests =
                       run setup sql (Affected count) |> ignore
                   let writer = run (create 3 store) "CREATE TEMPORARY TABLE feed(id INT PRIMARY KEY,u INT,p INT)" (Affected 0UL)
                   let writer = run writer "INSERT INTO feed VALUES(10,5,0),(40,4,0),(60,4,0)" (Affected 3UL)
+                  let writer =
+                      if shadowedView then
+                          run setup "CREATE VIEW active_jobs AS SELECT id,u,p FROM jobs WHERE id>0 WITH CHECK OPTION" (Affected 0UL) |> ignore
+                          let writer = run writer "CREATE TEMPORARY TABLE jobs(local_id INT PRIMARY KEY)" (Affected 0UL)
+                          run writer "INSERT INTO jobs VALUES(99)" (Affected 1UL)
+                      else writer
                   let limit = if ending = "TIMEOUT" then 1 else 5
                   let writer = run writer $"SET innodb_lock_wait_timeout={limit}" (Affected 0UL)
                   let writer = if explicitTransaction then run writer "BEGIN" (Affected 0UL) else writer
@@ -8944,9 +8951,36 @@ let tests =
                   run writer "SELECT id,u,p FROM feed ORDER BY id"
                       (ResultSet([ "id"; "u"; "p" ], [ row [ 10; 5; 0 ]; row [ 40; 4; 0 ]; row [ 60; 4; 0 ] ]))
                   |> ignore
+                  if shadowedView then
+                      run writer "SELECT local_id FROM jobs" (ResultSet([ "local_id" ], [ row [ 99 ] ])) |> ignore
                   run setup "SELECT id,u,p FROM jobs ORDER BY id" (ResultSet([ "id"; "u"; "p" ], List.map row finalRows)) |> ignore
                   let backing = if ending = "COMMIT" then 100 else 99
                   run setup "SELECT p FROM feed" (ResultSet([ "p" ], [ row [ backing ] ])) |> ignore
+
+          testCase "insert-family view writes keep temporary sources and use permanent targets"
+          <| fun _ ->
+              for sql, affected, rows in
+                  [ "INSERT INTO active_jobs SELECT n,u,p FROM jobs WHERE n=50", 1UL, [ [ 30; 3; 0 ]; [ 50; 5; 8 ] ]
+                    "INSERT IGNORE INTO active_jobs SELECT n,u,p FROM jobs ORDER BY n ON DUPLICATE KEY UPDATE p=1", 3UL,
+                        [ [ 30; 3; 1 ]; [ 50; 5; 8 ] ]
+                    "REPLACE INTO active_jobs SELECT n,u,p FROM jobs ORDER BY n", 3UL, [ [ 30; 3; 7 ]; [ 50; 5; 8 ] ]
+                    "INSERT INTO active_jobs VALUES((SELECT MAX(n) FROM jobs),5,9)", 1UL, [ [ 30; 3; 0 ]; [ 50; 5; 9 ] ] ] do
+                  let store = Fsdb.Storage.create ()
+                  let run session sql expected =
+                      let next, result = handle session sql
+                      Expect.equal result expected sql
+                      next
+                  let setup = create 1 store
+                  run setup "CREATE TABLE jobs(id INT PRIMARY KEY,u INT UNIQUE,p INT)" (Affected 0UL) |> ignore
+                  run setup "INSERT INTO jobs VALUES(30,3,0)" (Affected 1UL) |> ignore
+                  run setup "CREATE VIEW active_jobs AS SELECT id,u,p FROM jobs WHERE id>0 WITH CHECK OPTION" (Affected 0UL) |> ignore
+                  let writer = run (create 2 store) "CREATE TEMPORARY TABLE jobs(n INT PRIMARY KEY,u INT,p INT)" (Affected 0UL)
+                  let writer = run writer "INSERT INTO jobs VALUES(30,3,7),(50,5,8)" (Affected 2UL)
+                  let writer = run writer sql (Affected affected)
+                  let row (values: int list) = values |> List.map (string >> Some)
+                  run setup "SELECT id,u,p FROM jobs ORDER BY id" (ResultSet([ "id"; "u"; "p" ], List.map row rows)) |> ignore
+                  run writer "SELECT n,u,p FROM jobs ORDER BY n"
+                      (ResultSet([ "n"; "u"; "p" ], [ row [ 30; 3; 7 ]; row [ 50; 5; 8 ] ])) |> ignore
 
           testCase "duplicate-key updates preserve validated key moves when publishing after a wait"
           <| fun _ ->

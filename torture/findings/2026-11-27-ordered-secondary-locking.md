@@ -303,13 +303,26 @@ temporary rows confined to the original connection.
 When a session creates a temporary table named `jobs` after creating
 the permanent view `active_jobs` over the permanent `jobs`, an
 `INSERT IGNORE INTO active_jobs SELECT ... ON DUPLICATE KEY UPDATE`
-can write to the temporary `jobs` in Fsdb. The pinned MySQL image wrote
+previously wrote to the temporary `jobs` in Fsdb. The pinned MySQL image wrote
 the permanent table and returned three affected rows for one update and
 one insert. Fsdb returned two affected rows and inserted both rows into
 the temporary table. The discrepancy also reproduced at `f8d4a899`.
 Plain INSERT SELECT, INSERT SELECT with ON DUPLICATE KEY UPDATE, and
 REPLACE SELECT also wrote to the temporary table in this fixture.
-VALUES, UPDATE, DELETE, and SELECT controls agreed with MySQL.
+Literal VALUES, UPDATE, DELETE, and SELECT controls agreed with MySQL.
+
+The insert and replace paths now bind the write to the permanent view
+target. The SELECT source and caller expressions continue to see
+temporary tables, including a temporary source with the same name as
+the base table. The storage rebase uses the write snapshot's visibility,
+so a lock wait can refresh the bound base table. Rows and triggers from
+the permanent write publish together on success.
+
+The pinned comparison matched 58 cases in memory and WAL mode, covering
+single and nested checked views, same-name SELECT sources, VALUES and
+SET expressions, concurrent duplicate-key waits, and trigger rollback.
+A separate crash replay recovered the committed permanent rows after a
+wait without persisting either of the temporary tables.
 
 ### Occupied keys being released
 

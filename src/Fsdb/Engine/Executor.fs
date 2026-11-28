@@ -413,7 +413,8 @@ type private CallerViewSubqueries =
 type private ViewMutationSources =
     { Aliases: Set<string>
       Conditions: Expr list
-      CallerSubqueries: CallerViewSubqueries option }
+      CallerSubqueries: CallerViewSubqueries option
+      InsertTarget: Store option }
 
 let private ownsViewCondition sources expression =
     sources.Conditions |> List.exists (fun condition -> obj.ReferenceEquals(condition, expression))
@@ -34674,11 +34675,13 @@ let rec private executeAsWithViewSources
                 | Some(Err(code, message)) -> Error(ExpressionError(code, message))
                 | _ -> finishInsertRow runStore db table columns candidate)
 
-    let publishMutationSnapshot baseCatalog snapshot =
-        if Storage.dynamicWriteRebaseActive store then
-            Storage.adoptTransactionSnapshot store snapshot
+    let publishMutationSnapshot targetStore baseCatalog snapshot =
+        if Storage.dynamicWriteRebaseActive targetStore then
+            Storage.adoptTransactionSnapshot targetStore snapshot
         else
-            Storage.commitCatalogInto store baseCatalog snapshot
+            Storage.commitCatalogInto targetStore baseCatalog snapshot
+
+    let insertStore = viewSources.InsertTarget |> Option.defaultValue store
 
     let insertPreparedRows
         targetStore
@@ -34724,23 +34727,23 @@ let rec private executeAsWithViewSources
 
             nextIds ids (outcome.LastInsertId, outcome.GeneratedId), Affected(uint64 outcome.Affected)
 
-        let before = beforeInsertTriggers store db table
-        let after = afterInsertTriggers store db table
+        let before = beforeInsertTriggers insertStore db table
+        let after = afterInsertTriggers insertStore db table
 
-        match before, after, Storage.dynamicWriteRebaseActive store with
+        match before, after, Storage.dynamicWriteRebaseActive insertStore with
         | [], [], false ->
-            match doInsert store with
+            match doInsert insertStore with
             | Ok outcome -> ok outcome
             | Error e -> ids, storageErr e
         | _, triggers, _ ->
-            let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
+            let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase insertStore
 
             match doInsert snapshot with
             | Error e -> ids, storageErr e
             | Ok outcome when outcome.InsertedRows.IsEmpty ->
                 // Nothing actually inserted (all-duplicate upsert/IGNORE) —
                 // nothing to fire, but the update-path writes still count.
-                publishMutationSnapshot baseCatalog snapshot
+                publishMutationSnapshot insertStore baseCatalog snapshot
                 ok outcome
             | Ok outcome ->
                 let rows = outcome.InsertedRows |> List.map (fun row -> None, Some row)
@@ -34748,7 +34751,7 @@ let rec private executeAsWithViewSources
                 match fireTriggers snapshot db table After TriggerInsert triggers rows with
                 | Some err -> ids, err
                 | None ->
-                    publishMutationSnapshot baseCatalog snapshot
+                    publishMutationSnapshot insertStore baseCatalog snapshot
                     ok outcome
 
     let onDuplicateUpdater
@@ -34795,7 +34798,7 @@ let rec private executeAsWithViewSources
         ignoreDuplicates
         input
         =
-        match scan store db table with
+        match scan insertStore db table with
         | Error e -> ids, storageErr e
         | Ok(tableColumns, _) ->
             let columnIndex = columnIndexOf tableColumns
@@ -34883,16 +34886,16 @@ let rec private executeAsWithViewSources
         (prepareFor: Store -> ColumnDef list -> int -> Set<int> -> Value[] -> Result<Value[], StorageError>)
         (finishFor: Store -> ColumnDef list -> int -> Value[] -> Result<Value[], StorageError>)
         =
-        let beforeInsert = beforeInsertTriggers store db table
-        let afterInsert = afterInsertTriggers store db table
-        let beforeDelete = triggersFor store db table "BEFORE" "DELETE"
-        let afterDelete = triggersFor store db table "AFTER" "DELETE"
+        let beforeInsert = beforeInsertTriggers insertStore db table
+        let afterInsert = afterInsertTriggers insertStore db table
+        let beforeDelete = triggersFor insertStore db table "BEFORE" "DELETE"
+        let afterDelete = triggersFor insertStore db table "AFTER" "DELETE"
         let hasTriggers =
             not (beforeInsert.IsEmpty && afterInsert.IsEmpty && beforeDelete.IsEmpty && afterDelete.IsEmpty)
             || viewCheckScope.Value.IsSome
-            || Storage.dynamicWriteRebaseActive store
+            || Storage.dynamicWriteRebaseActive insertStore
 
-        match hasTriggers, scan store db table with
+        match hasTriggers, scan insertStore db table with
         | _, Error error -> ids, storageErr error
         | false, Ok(tableColumns, _) ->
             finishInsert db table (fun targetStore ->
@@ -34906,7 +34909,7 @@ let rec private executeAsWithViewSources
                     (prepareFor targetStore tableColumns)
                     (finishFor targetStore tableColumns))
         | true, Ok(tableColumns, _) ->
-            let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
+            let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase insertStore
             let prepare = prepareFor snapshot tableColumns
             let finish = finishFor snapshot tableColumns
 
@@ -34970,7 +34973,7 @@ let rec private executeAsWithViewSources
             match rowsValues |> List.indexed |> List.fold step (Ok(None, None, 0, [])) with
             | Error error -> ids, error
             | Ok(firstAuto, lastExplicit, affected, inserted) ->
-                publishMutationSnapshot baseCatalog snapshot
+                publishMutationSnapshot insertStore baseCatalog snapshot
 
                 let outcome =
                     { LastInsertId = Option.defaultValue 0L (Option.orElse lastExplicit firstAuto)
@@ -35514,14 +35517,25 @@ let rec private executeAsWithViewSources
                 | _ -> viewSources.CallerSubqueries
             let execute () =
                 DynamicScope.withValue sharedViewCteScope (Some { Aliases = view.SharedCteAliases; Pending = true }) (fun () ->
+                    // Caller expressions and SELECT sources keep the SQL-visible catalog.
+                    // The saved view's insert target keeps its permanent binding.
+                    let publishInsert =
+                        if isTemporaryTable executionStore targetDatabase targetTable && (savedViewInsertShape statement).IsSome then
+                            permanentMutationPublisher executionStore
+                        else None
                     let scope =
                         { Aliases = runtimeAliases |> List.fold (fun aliases alias -> Set.add (alias.ToLowerInvariant()) aliases) viewSources.Aliases
                           Conditions =
                               Option.toList predicate
                               @ (runtimeView.UpdateJoins |> List.collect Join.conditions)
                               @ viewSources.Conditions
-                          CallerSubqueries = callerSubqueries }
-                    executeAsWithViewSources scope executionStore authorized dbName ids foundRows currentAccount statement)
+                          CallerSubqueries = callerSubqueries
+                          InsertTarget = publishInsert |> Option.map (fun _ -> store) }
+                    let result = executeAsWithViewSources scope executionStore authorized dbName ids foundRows currentAccount statement
+                    match snd result, publishInsert with
+                    | Affected _, Some publish -> publish store
+                    | _ -> ()
+                    result)
 
             let checkPredicate = Map.tryFind runtimeTargetKey runtimeView.CheckPredicates
 
@@ -36953,7 +36967,7 @@ let rec private executeAsWithViewSources
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
 
-        match scan store db table with
+        match scan insertStore db table with
         | Error error -> ids, storageErr error
         | Ok(tableColumns, _) ->
             match evaluateInsertRows store db table tableColumns columns rowsExprs with
@@ -37007,7 +37021,7 @@ let rec private executeAsWithViewSources
     | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
 
-        match scan store db table with
+        match scan insertStore db table with
         | Error error -> ids, storageErr error
         | Ok(targetColumns, _) ->
             match prepareInsertSelectSourceBindings store registry dbName targetColumns select onDuplicateUpdate with
@@ -37139,7 +37153,7 @@ let rec private executeAsWithViewSources
     | ReplaceSet(table, assignments) ->
         let db, table = splitQualified dbName table
 
-        match scan store db table with
+        match scan insertStore db table with
         | Error error -> ids, storageErr error
         | Ok(tableColumns, _) ->
             let columnIndex = columnIndexOf tableColumns
@@ -37158,7 +37172,7 @@ let rec private executeAsWithViewSources
                         Some(Col column)
                     | _ -> None)
 
-            match evaluateFunctionalDefaults store db table tableColumns functional defaults with
+            match evaluateFunctionalDefaults insertStore db table tableColumns functional defaults with
             | Error error -> ids, storageErr error
             | Ok defaults ->
                 let context = contextFactory store registry dbName columnIndex (singleQualifier table tableColumns) None defaults
@@ -37994,7 +38008,7 @@ let rec private executeAsWithViewSources
                         | Ok counts ->
                             match split with
                             | Some _ -> commitJoinedMutation store baseCatalog snapshot split
-                            | None -> publishMutationSnapshot baseCatalog snapshot
+                            | None -> publishMutationSnapshot store baseCatalog snapshot
                             // CLIENT_FOUND_ROWS reports claimed rows; the
                             // default reports rows changed after BEFORE triggers.
                             let matched = pending |> Array.sumBy (fun d -> d.Count)
@@ -38296,7 +38310,7 @@ and executeAs store registry dbName ids foundRows currentAccount stmt =
         match spatialArgumentBindingError store registry dbName stmt with
         | Some error -> ids, error
         | None ->
-            executeAsWithViewSources { Aliases = Set.empty; Conditions = []; CallerSubqueries = None } store registry dbName ids foundRows currentAccount stmt)
+            executeAsWithViewSources { Aliases = Set.empty; Conditions = []; CallerSubqueries = None; InsertTarget = None } store registry dbName ids foundRows currentAccount stmt)
 
 let validateSafeMutation (store: Store) (registry: Registry) (dbName: string) (statement: Statement) =
     let unsafeError =

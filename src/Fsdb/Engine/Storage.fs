@@ -480,7 +480,7 @@ type PreparedWriteRebase =
 
 type DynamicWriteRebase =
     { mutable BaseCatalog: Catalog
-      Prepare: Catalog -> Catalog -> PreparedWriteRebase }
+      Prepare: Catalog -> Catalog -> Map<string * string, Table option> -> PreparedWriteRebase }
 
 type TransactionLockContext =
     { Owner: int64
@@ -1089,7 +1089,7 @@ let restoreTransactionRollbackWork (store: Store) work =
 let beginDynamicWriteRebase
     (store: Store)
     (baseCatalog: Catalog)
-    (prepare: Catalog -> Catalog -> PreparedWriteRebase)
+    (prepare: Catalog -> Catalog -> Map<string * string, Table option> -> PreparedWriteRebase)
     =
     store.TransactionLocks
     |> Option.iter (fun context ->
@@ -1112,7 +1112,7 @@ let dynamicWriteRebaseActive (store: Store) =
 let private prepareDynamicWriteRebase (store: Store) =
     store.TransactionLocks
     |> Option.bind _.DynamicWriteRebase
-    |> Option.map (fun rebase -> rebase, rebase.Prepare rebase.BaseCatalog store.Catalog)
+    |> Option.map (fun rebase -> rebase, rebase.Prepare rebase.BaseCatalog store.Catalog store.TableShadows)
 
 let private applyDynamicWriteRebase
     (store: Store)

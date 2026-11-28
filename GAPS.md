@@ -1569,9 +1569,9 @@ now carries the permanent binding through multiple writable views,
 correlated view predicates, and indexed ngram MATCH. [Mixed joined writes](torture/findings/2026-11-26-joined-update-shadow.md#primary-key-locking-follow-up)
 can lock just the permanent row when integer equalities identify its
 complete primary key. Missing and unproven keys still use broader claims.
-[INSERT SELECT and REPLACE SELECT through a view whose base table is shadowed](torture/findings/2026-11-27-ordered-secondary-locking.md#inserting-through-a-shadowed-view-target)
-can write the session's temporary table when the source is also temporary.
-MySQL writes the permanent base table.
+[INSERT and REPLACE through a view whose base table is shadowed](torture/findings/2026-11-27-ordered-secondary-locking.md#inserting-through-a-shadowed-view-target)
+write to the permanent base table while evaluating caller expressions
+and SELECT sources against the session's visible tables.
 [Joined DELETE with a leading derived source](torture/findings/2026-11-26-joined-delete-binding.md#leading-derived-sources)
 supports both target-list forms, grouped and outer joins to writable
 views, CTE-backed sources, and prepared execution.
