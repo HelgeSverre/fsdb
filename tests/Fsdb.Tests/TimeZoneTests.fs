@@ -156,6 +156,38 @@ let tests =
                      + "WINDOW by_stamp AS (ORDER BY instant,ordinal DESC,id) ORDER BY id")
                   [ [ "12"; "1"; "1" ]; [ "13"; "2"; "2" ]; [ "22"; "3"; "3" ] ]
 
+          testCase "TIMESTAMP sorts after a join compare local times"
+          <| fun _ ->
+              let session =
+                  [ "SET time_zone='+00:00'"
+                    "CREATE TABLE events (id INT PRIMARY KEY, instant TIMESTAMP(2), ordinal INT)"
+                    "INSERT INTO events VALUES (12,'2024-11-03 05:30:00.20',2),(13,'2024-11-03 05:30:00.20',1),(22,'2024-11-03 06:30:00.20',4),(41,NULL,3)"
+                    "CREATE TABLE large_keys (id INT PRIMARY KEY)"
+                    "INSERT INTO large_keys VALUES (12),(13),(20),(21),(22),(23)"
+                    "INSERT INTO large_keys SELECT 100+n FROM (WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<100) SELECT n FROM seq) q"
+                    "SET time_zone='Fsdb/Test_Eastern'" ]
+                  |> List.fold execute (populatedSession ())
+
+              let check sql expected =
+                  match handle session sql |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows (expected |> List.map (List.map Some)) sql
+                  | other -> failtestf "Expected rows for %s, got %A" sql other
+
+              let postJoin = [ [ "22" ]; [ "12" ]; [ "13" ] ]
+              let physical = [ [ "12" ]; [ "13" ]; [ "22" ] ]
+              let joined = " FROM events a JOIN events b ON a.id=b.id WHERE a.id BETWEEN 12 AND 22 ORDER BY "
+              let select = "SELECT STRAIGHT_JOIN a.id" + joined
+              check (select + "a.instant,b.ordinal DESC,a.id") postJoin
+              check (select + "a.instant,(SELECT b.ordinal) DESC,a.id") postJoin
+              check (select + "a.instant,(SELECT a.ordinal) DESC,a.id") physical
+              check (select + "a.instant,a.ordinal DESC,a.id") physical
+              check ("SELECT STRAIGHT_JOIN a.id,COUNT(*) OVER()" + joined + "a.instant,b.ordinal DESC,a.id")
+                  [ [ "22"; "3" ]; [ "12"; "3" ]; [ "13"; "3" ] ]
+              check ("SELECT STRAIGHT_JOIN b.id FROM events a JOIN events b ON a.id<>b.id "
+                     + "WHERE a.id=41 AND b.id BETWEEN 12 AND 22 ORDER BY b.instant,b.ordinal DESC,b.id") physical
+              check ("SELECT a.id FROM events a JOIN large_keys b ON a.id=b.id "
+                     + "WHERE b.id BETWEEN 12 AND 22 ORDER BY a.instant,a.ordinal DESC,a.id") physical
+
           testCase "correlated TIMESTAMP ranges seek ordered keys across a repeated local hour"
           <| fun _ ->
               let session =

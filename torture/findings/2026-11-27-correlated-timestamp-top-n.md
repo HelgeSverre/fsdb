@@ -113,12 +113,22 @@ The distinguishing fall-back fixture returns the earlier occurrence for
 the merged reference and the higher-ranked local-time tie for the
 materialized reference.
 
-A separate joined query still differs. When a sort follows a join between
-merged and materialized references, MySQL's audited plan streams the joined
-rows into a sort and compares the merged reference's session-local values.
-Fsdb compares that reference's stored UTC instants. The same split appears
-with ordinary tables. A sort on the first nonconstant table uses UTC,
-while sorting rows from multiple tables after the join can use local time.
+### Sorting joined rows
+
+MySQL 8.4.11 uses the stored UTC key when it can sort on the first
+nonconstant table. When the sort consumes joined rows, the same
+TIMESTAMP key can compare as local time. In the repeated-hour fixture
+the early sort returns IDs `12, 13, 22`. A secondary sort term from the
+other table moves `22` to the front in the post-join sort.
+
+Fsdb matches that distinction in the audited ordinary and grouped joins,
+including mixed merged and materialized CTE references, projection aliases
+and ordinals, NULL timestamps, and a scalar subquery correlated to either
+side. An exact unique-key lookup can make a source constant. Audited
+reorderable two-table cases distinguish a selective primary-key range
+with a residual filter from a range that transfers across the join key.
+An unordered window retains the sort behavior of its joined input.
+Other cost-based join orders and subquery binding shapes remain open.
 
 ### Window sorts across the repeated hour
 

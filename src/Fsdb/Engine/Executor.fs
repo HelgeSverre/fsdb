@@ -16996,6 +16996,145 @@ and private transferNumericJoinIn
         | _ -> select
     | _ -> select
 
+and private preferRightJoinSortSource store registry dbName predicates (join: Join) (leftName, leftRef: TableRef) (rightName, rightRef: TableRef) =
+    Diagnostics.suppress (fun () ->
+        let lookup tableRef table column (bounds: RangeLookupBounds<string, Value>) =
+            let allowed = indexHintsFor IndexJoin tableRef |> indexAllowedBy
+            Storage.trySecondaryRangeLookupInTableWith (fun name -> equalsIgnoreCase "PRIMARY" name && allowed name) store table column bounds.Lower bounds.Upper
+            |> Option.map _.RangeRowCount
+
+        let boundsFor name tableRef table =
+            let bounds predicate =
+                rangeLookupBounds QualifiedColumn store registry table tableRef predicate
+            let predicate = Map.tryFind name predicates
+            match bounds predicate |> List.tryPick (fun bound -> lookup tableRef table bound.Column bound |> Option.map (fun count -> bound, count)) with
+            | None -> None, table.RowsArray.Count, false
+            | Some(bound, count) ->
+                let hasResidual =
+                    optionalConjuncts predicate |> List.exists (fun term ->
+                        bounds (Some term) |> List.exists (fun other -> equalsIgnoreCase bound.Column other.Column) |> not)
+                Some bound, count, hasResidual
+
+        let transfersPrimaryKey (left: ColumnDef) (right: ColumnDef) =
+            let matches name (column: ColumnDef) = function
+                | QualifiedCol(owner, key) -> equalsIgnoreCase name owner && equalsIgnoreCase column.Name key
+                | _ -> false
+            left.Type = right.Type
+            && (Join.conditions join |> List.collect conjuncts
+                |> List.exists (function
+                    | BinOp(Eq, x, y) ->
+                        (matches leftName left x && matches rightName right y)
+                        || (matches leftName left y && matches rightName right x)
+                    | _ -> false))
+
+        match physicalFastPathTable store dbName leftRef, physicalFastPathTable store dbName rightRef with
+        | Some leftTable, Some rightTable ->
+            let primaryColumn table =
+                Storage.primaryKeyColumns table
+                |> List.tryExactlyOne
+                |> Option.bind (fun name -> table.Columns |> List.tryFind (fun column -> equalsIgnoreCase column.Name name))
+            let leftBounds, leftCount, leftResidual = boundsFor leftName leftRef leftTable
+            let rightBounds, rightCount, rightResidual = boundsFor rightName rightRef rightTable
+            match rightBounds with
+            | Some rightRange when QueryPlanner.chooseRange rightTable.RowsArray.Count rightCount = QueryPlanner.IndexRange ->
+                let leftCount =
+                    match leftBounds, primaryColumn leftTable, primaryColumn rightTable with
+                    | None, Some left, Some right
+                        when equalsIgnoreCase right.Name rightRange.Column && transfersPrimaryKey left right ->
+                        lookup leftRef leftTable left.Name rightRange |> Option.defaultValue leftCount
+                    | _ -> leftCount
+                rightCount < leftCount || (rightCount = leftCount && rightResidual && not leftResidual)
+            | _ -> false
+        | _ -> false)
+
+and private joinSortInput store registry dbName (select: SelectStmt) whereExpression sources (columns: ColumnDef list) qualifiers outer =
+    let hasTimestamp = columns |> List.exists (fun column -> match column.Type with TTimestamp _ -> true | _ -> false)
+    if select.OrderBy.IsEmpty || select.Joins.IsEmpty || not hasTimestamp then StoredRows
+    else
+        let columnIndex = columnIndexOf columns
+        let projections = expandOrderProjections columns qualifiers select.Projections
+        let context = contextFactory store registry dbName columnIndex qualifiers outer (probeRow columns)
+        let sourceOf expression =
+            tryDirectColumnForExpr context expression
+            |> Option.bind (fun (index, _) ->
+                qualifiers |> Map.toSeq |> Seq.tryPick (fun (qualifier, (columns, offset)) ->
+                    if index >= offset && index < offset + columns.Length then Some qualifier else None))
+
+        let resolveOrder expression =
+            match resolveOrderPosition projections expression with
+            | Col name as column ->
+                tryOrderProjectionNamed columnIndex qualifiers projections name
+                |> Option.map _.Expression
+                |> Option.defaultValue column
+            | expression -> bindOrderExpression columnIndex qualifiers projections expression
+
+        let keys = select.OrderBy |> List.map (fst >> resolveOrder)
+        if keys |> List.exists (timestampColumnPosition context >> Option.isSome) |> not then StoredRows
+        else
+            let qualify expression =
+                Expression.rewrite
+                    (function
+                    | Col name as column -> sourceOf column |> Option.map (fun qualifier -> QualifiedCol(qualifier, name))
+                    | _ -> None)
+                    expression
+            let predicates, _ = splitJoinWhere (List.map fst sources) (Option.map qualify whereExpression)
+            let tableRefs =
+                (Option.toList select.From @ (select.Joins |> List.map _.Table))
+                |> List.collect FromItem.leaves
+                |> List.choose (function
+                    | FromTable tableRef ->
+                        let name = (tableRef.Alias |> Option.defaultValue tableRef.Table).ToLowerInvariant()
+                        Some(name, tableRef)
+                    | _ -> None)
+
+            let constantSources =
+                tableRefs |> List.choose (fun (name, tableRef) ->
+                    Map.tryFind name predicates
+                    |> Option.bind (fun predicate ->
+                        Diagnostics.suppress (fun () ->
+                            tryEqualityAccessWith CandidateNarrowing store registry dbName tableRef (Some predicate)))
+                    |> Option.filter (fun plan ->
+                        plan.Unique && plan.UsesFullKey && plan.CandidateCount <= 1
+                        && (plan.Rows.Value
+                            |> List.forall (fun (_, row) -> plan.ColumnIndices |> List.forall (fun i -> row.[i] <> VNull))))
+                    |> Option.map (fun _ -> name))
+                |> Set.ofList
+
+            let variableSources =
+                sources |> List.map (fst >> _.ToLowerInvariant()) |> List.filter (constantSources.Contains >> not)
+            let firstVariable =
+                match variableSources, select.Joins with
+                | [ left; right ], [ join ] when not select.StraightJoin && join.Kind = InnerJoin ->
+                    let find name = List.tryFind (fst >> (=) name) tableRefs
+                    match find left, find right with
+                    | Some leftRef, Some rightRef when preferRightJoinSortSource store registry dbName predicates join leftRef rightRef ->
+                        Some right
+                    | _ -> Some left
+                | _ -> List.tryHead variableSources
+
+            let laterSource column =
+                sourceOf column |> Option.exists (fun name ->
+                    not (constantSources.Contains name) && Some name <> firstVariable)
+            let localColumns _ (block: SelectStmt) =
+                selectSubqueryScope store dbName block
+                |> Option.map (fun scope ->
+                    block.Projections |> List.choose _.Alias |> List.fold (fun names alias -> Set.add (alias.ToLowerInvariant()) names) scope.Columns)
+
+            let requiresIntermediate expression =
+                if Expression.exists (function (Col _ | QualifiedCol _) as column -> laterSource column | _ -> false) expression then
+                    true
+                elif (Expression.collectSubqueries expression).IsEmpty then false
+                else
+                    let mutable dependent = false
+                    Expression.rewriteSubqueryOuterReferencesWithColumns localColumns (fun _ _ -> None)
+                        (fun column ->
+                            if laterSource column then dependent <- true
+                            None)
+                        expression |> ignore
+                    dependent
+
+            if List.exists requiresIntermediate keys then IntermediateRows else StoredRows
+
 and private runUnlockedSelectStmt
     output
     (store: Store)
@@ -17042,6 +17181,7 @@ and private runUnlockedSelectStmt
             (basePhysicalTable: Table option)
             (select: SelectStmt)
             =
+            let originalWhere = select.Where
             let joinConsumption = joinConsumptionFor select.Limit
             let pushedWhere, remainingWhere =
                 sourcePredicatesForInnerJoins fromItem select.Joins joinConsumption select.Where
@@ -17106,7 +17246,10 @@ and private runUnlockedSelectStmt
                         match rewritten with
                         | Error error -> error, [], []
                         | Ok select ->
-                            runSelect output StoredRows store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows groupInputOrder select outer
+                            let columns = sources |> List.collect snd
+                            let qualifiers = qualifierRanges sources
+                            let sortInput = joinSortInput store registry dbName select originalWhere sources columns qualifiers outer
+                            runSelect output sortInput store registry dbName columns qualifiers rows groupInputOrder select outer
 
         let runArbitrary columns (rows: Value[] seq) physicalTable resolvedSelect =
             runResolved ArbitraryGroupRows columns rows physicalTable resolvedSelect
@@ -24954,6 +25097,7 @@ and private runGroupedSelect
 
 /// MySQL evaluates windows after grouping.
 and private runGroupedWindowSelect
+    sortInput
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -24983,7 +25127,7 @@ and private runGroupedWindowSelect
     let leaves = (groupExprs @ aggregates) |> List.distinct
 
     if leaves.IsEmpty then
-        runWindowedSelect store registry dbName columns qualifiers rows select outer
+        runWindowedSelect sortInput store registry dbName columns qualifiers rows select outer
     else
 
     let leafNames = leaves |> List.mapi (fun i _ -> sprintf "__fsdb_group_%d__" i)
@@ -25034,6 +25178,7 @@ and private runGroupedWindowSelect
                 OrderBy = select.OrderBy |> List.map (fun (e, d) -> rewriteGroupedExpression e, d) }
 
         runWindowedSelect
+            IntermediateRows
             store
             registry
             dbName
@@ -25044,6 +25189,7 @@ and private runGroupedWindowSelect
             outer
 
 and private runWindowedSelect
+    sortInput
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -26228,7 +26374,7 @@ and private runWindowedSelect
             let sortInput =
                 let hasTimestamp = columns |> List.exists (fun column -> match column.Type with TTimestamp _ -> true | _ -> false)
                 if hasTimestamp && not select'.OrderBy.IsEmpty && (windowSorts.Value |> List.exists (List.isEmpty >> not)) then IntermediateRows
-                else StoredRows
+                else sortInput
             runSelect ReadValues sortInput store registry dbName extendedColumns extendedQualifiers extendedRows ArbitraryGroupRows select' outer
 
 and private fullTextScoresForTable
@@ -27276,9 +27422,9 @@ and private runSelect
             || orderBy |> List.exists (fst >> hasOwnedAggregate)
 
         if grouping then
-            runGroupedWindowSelect store registry dbName columns qualifiers (List.ofSeq rows) groupInputOrder select outer
+            runGroupedWindowSelect sortInput store registry dbName columns qualifiers (List.ofSeq rows) groupInputOrder select outer
         else
-            runWindowedSelect store registry dbName columns qualifiers (List.ofSeq rows) select outer
+            runWindowedSelect sortInput store registry dbName columns qualifiers (List.ofSeq rows) select outer
     elif
         not select.GroupBy.IsEmpty
         || (select.Having |> Option.exists hasOwnedAggregate)

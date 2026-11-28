@@ -3225,7 +3225,9 @@ implementation effort:
    now uses the stored instant for direct and merged TIMESTAMP columns.
    [Audited window sorts](torture/findings/2026-11-27-correlated-timestamp-top-n.md#window-sorts-across-the-repeated-hour)
    distinguish the first input sort from later local-time sorts and peer
-   comparisons. Post-join sorts and some window frames still differ.
+   comparisons. [Audited joined sorts](torture/findings/2026-11-27-correlated-timestamp-top-n.md#sorting-joined-rows)
+   also distinguish a base-table sort from a sort that consumes joined rows.
+   Broader join orders and some window partitions and frames still differ.
    [Correlated TIMESTAMP ranges](torture/findings/2026-11-27-correlated-timestamp-top-n.md#seeking-correlated-timestamp-ranges)
    seek in UTC with TIMESTAMP as the leading column or after a composite
    equality prefix. [Named-zone bounds](torture/findings/2026-11-27-correlated-timestamp-top-n.md#disjoint-named-zone-ranges)

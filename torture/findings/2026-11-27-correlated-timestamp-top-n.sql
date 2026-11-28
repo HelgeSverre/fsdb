@@ -94,3 +94,24 @@ FROM events a IGNORE INDEX(by_slot)
 WHERE a.id BETWEEN 12 AND 22 AND a.enabled=1
 WINDOW by_stamp AS (ORDER BY a.instant,a.ordinal DESC,a.id)
 ORDER BY a.id;
+
+SELECT STRAIGHT_JOIN a.id
+FROM events a JOIN events b ON a.id=b.id
+WHERE a.id BETWEEN 12 AND 22 AND a.enabled=1
+ORDER BY a.instant,(SELECT b.ordinal) DESC,a.id;
+
+SELECT STRAIGHT_JOIN a.id
+FROM events a JOIN events b ON a.id=b.id
+WHERE a.id BETWEEN 12 AND 22 AND a.enabled=1
+ORDER BY a.instant,(SELECT a.ordinal) DESC,a.id;
+
+SELECT a.id
+FROM events a JOIN events b ON a.id=b.id
+WHERE b.id BETWEEN 12 AND 22 AND b.enabled=1
+ORDER BY a.instant,a.ordinal DESC,a.id;
+
+WITH d AS (SELECT * FROM events IGNORE INDEX(by_slot))
+SELECT /*+ NO_MERGE(b) */ a.id
+FROM d a JOIN d b ON a.id=b.id
+WHERE a.id BETWEEN 12 AND 22 AND a.enabled=1
+ORDER BY a.instant,b.ordinal DESC,a.id;
