@@ -354,11 +354,32 @@ the median paired throughput for changes to a secondary unique key
 was 18% lower after routing them through a tracked statement. Payload-only
 updates were within 1% by the same measure.
 
-ON DUPLICATE KEY UPDATE and its ignored form can still reject a
-duplicate during staging while its owner holds the key. The plain
-INSERT path still takes a row lock on a duplicate secondary value. It
-can wait unnecessarily behind a payload-only update or an exact
-primary-key locking read.
+ON DUPLICATE KEY UPDATE and its ignored form now recheck the occupied
+destination using the prepared row. They acquire a later candidate's
+incoming locks only after the preceding candidate finishes. A fatal
+duplicate stops before those locks and discards the private statement
+snapshot. A later invalid value also rolls back earlier row changes
+after their assignments have run. IGNORE warns and continues for
+duplicate-key failures. In the original 96 schedules,
+both upsert forms match MySQL, leaving eight plain INSERT differences.
+The audited waits also match for INSERT SELECT through a checked view,
+cross-database foreign keys, and WAL publication. A separate 36-case
+comparison preserved the previous engine's auto-increment results,
+including existing differences from MySQL in candidate IDs and
+`LAST_INSERT_ID()`. INSERT IGNORE can still reject an explicit NULL
+for a NOT NULL input column that MySQL coerces with a warning.
+
+In eight paired native Debug samples per batch size, uncontended upserts
+that changed only a payload column retained 78%, 63%, and 58% of prior
+throughput at one, ten, and 100 rows per statement. The per-candidate
+publication path still costs more than the prior batched write.
+
+The plain INSERT path still takes a row lock on a duplicate secondary
+value. It can wait unnecessarily behind a payload-only update or an
+exact primary-key locking read.
 Probe results show that replacing this fallback also requires modeling
 the secondary records visited by range, IN-list, and covering index
-scans, and protecting the primary gaps visited by clustered scans.
+scans, and protecting the primary gaps visited by clustered scans. In
+a separate 40-schedule probe with fresh secondary values, 17 expected
+insert waits were missing under REPEATABLE READ. Those misses involved
+unique-secondary or clustered range and full scans.

@@ -1112,7 +1112,13 @@ let dynamicWriteRebaseActive (store: Store) =
 let private prepareDynamicWriteRebase (store: Store) =
     store.TransactionLocks
     |> Option.bind _.DynamicWriteRebase
-    |> Option.map (fun rebase -> rebase, rebase.Prepare rebase.BaseCatalog store.Catalog store.TableShadows)
+    |> Option.bind (fun rebase ->
+        let statement = store.Catalog
+        let prepared = rebase.Prepare rebase.BaseCatalog statement store.TableShadows
+        // The unchanged case returns both input roots. There is no catalog to reopen.
+        if obj.ReferenceEquals(prepared.BaseCatalog, rebase.BaseCatalog)
+           && obj.ReferenceEquals(prepared.StatementCatalog, statement) then None
+        else Some(rebase, prepared))
 
 let private applyDynamicWriteRebase
     (store: Store)
@@ -5022,12 +5028,12 @@ let activeOrderedKeyClaims (store: Store) (dbName: string) (tableName: string) (
 
 /// Claims prepared unique keys, then refreshes and claims duplicate rows from
 /// the rebased catalog before applying it.
-let internal acquirePreparedInsertWriteTargets
+let private claimPreparedInsertWriteTargets
     (store: Store)
     (dbName: string)
     (tableName: string)
     (candidates: Value[] list)
-    : unit =
+    : bool =
     let candidateRows = candidates |> List.map (Array.toList >> List.map Some)
 
     match tryInsertLockTargets store dbName tableName None candidateRows with
@@ -5047,7 +5053,11 @@ let internal acquirePreparedInsertWriteTargets
                 | Some currentTargets ->
                     withInsertLocks store dbName tableName currentTargets.RowIds currentTargets.Keys applyLatest
                 | None -> applyLatest ())
-    | _ -> ()
+        store.TransactionLocks.IsSome
+    | _ -> false
+
+let internal acquirePreparedInsertWriteTargets store dbName tableName candidates =
+    claimPreparedInsertWriteTargets store dbName tableName candidates |> ignore
 
 let internal waitForTransactionReadDependencies timeout (store: Store) dbName tableName keys rowIds =
     match store.TransactionLocks with
@@ -12978,6 +12988,7 @@ let private upsertRowsInTable
     (catalog: Catalog)
     (key: string)
     (table: Table)
+    resolveConflict
     (columns: string list option)
     (rowsIn: Result<Value list, StorageError> list)
     (prepare: Set<int> -> Value[] -> Result<Value[], StorageError>)
@@ -13071,7 +13082,7 @@ let private upsertRowsInTable
                                                     | Some check when applied <> existing -> check candidate applied
                                                     | _ -> Ok applied)
                                                 |> Result.bind (fun applied ->
-                                                    match validateUpdatedUniqueKeys table uniqueGroups state.UniqueIndex pos applied with
+                                                    match validateUpdatedUniqueKeysWith resolveConflict table uniqueGroups state.UniqueIndex pos applied with
                                                     | Error(DuplicateKey _ as error) when ignoreDuplicates ->
                                                         warnIgnoredUpsert error
                                                         Ok { state with NextAutoId = skippedCursor; Affected = state.Affected + unchangedMatch }
@@ -14778,7 +14789,7 @@ and upsertRowsWithOrdinal
     (assignedColumns: Set<int> option)
     (foundRows: bool)
     : Result<InsertOutcome, StorageError> =
-    upsertRowsWithOrdinalChecked store dbName tableName columns (List.map Ok rowsIn) prepare applyUpdate None assignedColumns foundRows false false StandardAllocation
+    upsertRowsWithOrdinalChecked store dbName tableName columns (List.map Ok rowsIn) prepare applyUpdate None assignedColumns foundRows false false StandardAllocation false
 
 and internal upsertRowsWithOrdinalChecked
     (store: Store)
@@ -14794,6 +14805,7 @@ and internal upsertRowsWithOrdinalChecked
     (ignoreDuplicates: bool)
     (ignoreViewCheck: bool)
     (allocation: UpsertAllocation)
+    (incomingClaimed: bool)
     : Result<InsertOutcome, StorageError> =
         let key = normalizeTableName tableName
 
@@ -14816,11 +14828,15 @@ and internal upsertRowsWithOrdinalChecked
                       let database, table = catalogTableIdentity catalog address
                       RowsUpdatedById(database, table, changes) ]
 
-        let operation catalog db =
+        let canWait = rowsIn.Length = 1 && dynamicWriteRebaseActive store
+        let operation owner catalog db =
             virtualWriteGuard store dbName tableName
             |> Result.bind (fun () -> tryGetTable dbName db tableName)
             |> Result.bind (fun table ->
-                upsertRowsInTable store dbName catalog key table columns rowsIn prepare applyUpdate checkChangedRow assignedColumns foundRows ignoreDuplicates ignoreViewCheck allocation)
+                let resolveConflict =
+                    if canWait then recheckOccupiedSecondaryKey owner store dbName tableName table ignore
+                    else fun _ _ _ -> true
+                upsertRowsInTable store dbName catalog key table resolveConflict columns rowsIn prepare applyUpdate checkChangedRow assignedColumns foundRows ignoreDuplicates ignoreViewCheck allocation)
             |> Result.map (fun (catalog', cascaded, summary) -> catalog', (summary, cascaded, catalog))
 
         let keysOf ((summary: UpsertSummary), cascaded, catalog) =
@@ -14856,12 +14872,14 @@ and internal upsertRowsWithOrdinalChecked
                                     publish (ignoredLateDuplicate (snd batch))
                                 | Error error, _ -> Error error
                                 | Ok (), _ -> publish batch)
-                        let publish () = withStagedCatalogPublishing store dbName false eventsOf operation keysOf claimKeys
-                        let lockRows = rowsIn |> List.choose (Result.toOption >> Option.map (List.map Some))
-                        match tryInsertLockTargets store dbName tableName columns lockRows with
-                        | Some targets when not lockRows.IsEmpty ->
-                            withInsertLocksUsing (Some owner) store dbName tableName targets.RowIds targets.Keys publish
-                        | _ -> publish ())))
+                        let publish () = withStagedCatalogPublishing store dbName canWait eventsOf (operation owner) keysOf claimKeys
+                        if incomingClaimed then publish ()
+                        else
+                            let lockRows = rowsIn |> List.choose (Result.toOption >> Option.map (List.map Some))
+                            match tryInsertLockTargets store dbName tableName columns lockRows with
+                            | Some targets when not lockRows.IsEmpty ->
+                                withInsertLocksUsing (Some owner) store dbName tableName targets.RowIds targets.Keys publish
+                            | _ -> publish ())))
 
         match result with
         | Ok(summary, _, _) ->
@@ -14877,8 +14895,8 @@ and internal upsertRowsWithOrdinalChecked
 /// Resolve each candidate against the keys left by the preceding candidate,
 /// including any rejected move after a wait. Publication to the caller's
 /// private statement snapshot allows a fatal error to discard every change.
-let private upsertIgnoredRowsInStatement store dbName tableName rows prepareCandidate applyUpdate checkChangedRow
-    assignedColumns foundRows ignoreViewCheck =
+let private upsertRowsInStatement store dbName tableName rows prepareCandidate applyUpdate checkChangedRow
+    assignedColumns foundRows ignoreDuplicates ignoreViewCheck =
     let step result (ordinal, values) =
         result
         |> Result.bind (fun (firstGenerated, lastExplicit, affected, inserted) ->
@@ -14889,9 +14907,10 @@ let private upsertIgnoredRowsInStatement store dbName tableName rows prepareCand
                     Ok(firstGenerated, lastExplicit, affected, inserted)
                 | Error error -> Error error
                 | Ok((candidate: PreparedInsertCandidate), allocation) ->
+                    let incomingClaimed = claimPreparedInsertWriteTargets store dbName tableName [ candidate.Values ]
                     upsertRowsWithOrdinalChecked
                         store dbName tableName None [ Ok(Array.toList candidate.Values) ] (fun _ row -> Ok row)
-                        (fun _ -> applyUpdate ordinal) checkChangedRow assignedColumns foundRows true ignoreViewCheck allocation
+                        (fun _ -> applyUpdate ordinal) checkChangedRow assignedColumns foundRows ignoreDuplicates ignoreViewCheck allocation incomingClaimed
                     |> Result.map (fun outcome ->
                         let assigned = if outcome.InsertedRows.IsEmpty then None else candidate.AssignedAutoId
                         let firstGenerated, lastExplicit =
@@ -14909,8 +14928,8 @@ let private upsertIgnoredRowsInStatement store dbName tableName rows prepareCand
           InsertedRows = List.rev inserted
           IgnoredErrors = [] })
 
-let internal upsertIgnoredRowsDynamically store dbName tableName columns rows prepare reservation applyUpdate checkChangedRow
-    assignedColumns foundRows ignoreViewCheck =
+let internal upsertRowsDynamically store dbName tableName columns rows prepare reservation applyUpdate checkChangedRow
+    assignedColumns foundRows ignoreDuplicates ignoreViewCheck =
     let preparation =
         match reservation with
         | Some(input, finish, assignsAuto) ->
@@ -14924,14 +14943,8 @@ let internal upsertIgnoredRowsDynamically store dbName tableName columns rows pr
 
     preparation
     |> Result.bind (fun prepareCandidate ->
-        let prepareAndLock values =
-            prepareCandidate values
-            |> Result.map (fun (candidate, allocation) ->
-                acquirePreparedInsertWriteTargets store dbName tableName [ candidate.Values ]
-                candidate, allocation)
-
-        upsertIgnoredRowsInStatement store dbName tableName rows prepareAndLock
-            applyUpdate checkChangedRow assignedColumns foundRows ignoreViewCheck)
+        upsertRowsInStatement store dbName tableName rows prepareCandidate
+            applyUpdate checkChangedRow assignedColumns foundRows ignoreDuplicates ignoreViewCheck)
 
 let internal canBatchIgnoredUpdates (store: Store) database table =
     // Referential actions retain per-row publication so later rows see preceding cascades.

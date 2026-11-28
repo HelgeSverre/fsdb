@@ -9122,9 +9122,14 @@ let tests =
                       let keyOwner = if ending = "COMMIT" then "60" else "30"
                       run (create 3 store) "SELECT id FROM jobs WHERE u=3" (ResultSet([ "id" ], [ [ Some keyOwner ] ])) |> ignore
 
-          testCase "updates recheck occupied destinations in row order without repeating assignments"
+          testCase "updates and upserts recheck occupied destinations in row order without repeating assignments"
           <| fun _ ->
-              for ignored in [ false; true ] do
+              let kinds =
+                  [ for ignored in [ false; true ] do
+                        yield false, ignored, false
+                        yield true, ignored, false
+                        yield true, ignored, true ]
+              for upsert, ignored, laterIncoming in kinds do
                   for firstEnding, secondEnding in [ "COMMIT", "COMMIT"; "COMMIT", "ROLLBACK"; "ROLLBACK", "COMMIT"; "ROLLBACK", "ROLLBACK" ] do
                       let store = Fsdb.Storage.create ()
                       let run session sql expected =
@@ -9137,12 +9142,21 @@ let tests =
                       let first = run (create 2 store) "BEGIN" (Affected 0UL)
                       let first = run first "UPDATE jobs SET u=1 WHERE id=30" (Affected 1UL)
                       let second = run (create 3 store) "BEGIN" (Affected 0UL)
-                      let second = run second "UPDATE jobs SET u=9 WHERE id=40" (Affected 1UL)
+                      let second =
+                          if laterIncoming then
+                              run second "SELECT id FROM jobs FORCE INDEX(PRIMARY) WHERE id=60 FOR UPDATE"
+                                  (ResultSet([ "id" ], [ [ Some "60" ] ]))
+                          else run second "UPDATE jobs SET u=9 WHERE id=40" (Affected 1UL)
                       let writer = run (create 4 store) "SET innodb_lock_wait_timeout=3" (Affected 0UL)
                       let writer = run writer "SET @calls=0" (Affected 0UL)
-                      let update = if ignored then "UPDATE IGNORE" else "UPDATE"
-                      let waiting = Threading.Tasks.Task.Run(fun () ->
-                          handle writer ($"{update} jobs SET p=(@calls:=@calls+1),u=CASE id WHEN 50 THEN 3 ELSE 4 END WHERE id>=50 ORDER BY id"))
+                      let secondKey = if laterIncoming then "6" else "4"
+                      let assignments = $"p=(@calls:=@calls+1),u=CASE id WHEN 50 THEN 3 ELSE {secondKey} END"
+                      let ignoreClause = if ignored then " IGNORE" else ""
+                      let sql =
+                          if upsert then
+                              $"INSERT{ignoreClause} INTO jobs VALUES(50,5,0),(60,6,0) ON DUPLICATE KEY UPDATE {assignments}"
+                          else $"UPDATE{ignoreClause} jobs SET {assignments} WHERE id>=50 ORDER BY id"
+                      let waiting = Threading.Tasks.Task.Run(fun () -> handle writer sql)
                       let pendingOwners () =
                           lock store.LockWaits.SyncRoot (fun () ->
                               store.LockWaits.Edges.Values |> Seq.collect _.Blockers |> Set.ofSeq)
@@ -9159,24 +9173,41 @@ let tests =
                       Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 4.0)) "the update finishes after both holders resolve"
                       Expect.isTrue (firstObserved && not (Set.isEmpty firstOwners)) "the first assignment waits on the first key"
                       let firstReleased = firstEnding = "COMMIT"
-                      let secondReleased = secondEnding = "COMMIT"
+                      let secondAccepted = laterIncoming || secondEnding = "COMMIT"
                       let reachesSecond = firstReleased || ignored
                       Expect.equal (secondObserved && secondWait secondOwners) reachesSecond "only a continuing statement visits the second key"
                       Expect.equal independent (Affected 1UL) "a disjoint writer can finish during the wait"
                       let writer, actual = waiting.Result
                       let accepted = if firstReleased then 1UL else 0UL
-                      let accepted = accepted + (if secondReleased then 1UL else 0UL)
+                      let accepted = accepted + (if secondAccepted then 1UL else 0UL)
                       let expected =
-                          if ignored || firstReleased && secondReleased then Affected accepted
+                          if ignored || firstReleased && secondAccepted then Affected(accepted * (if upsert then 2UL else 1UL))
                           elif not firstReleased then Err(1062, "Duplicate entry '3' for key 'jobs.ux'")
                           else Err(1062, "Duplicate entry '4' for key 'jobs.ux'")
                       Expect.equal actual expected "affected rows and duplicate selection match MySQL"
                       let calls = if reachesSecond then "2" else "1"
                       run writer "SELECT @calls AS calls" (ResultSet([ "calls" ], [ [ Some calls ] ])) |> ignore
-                      let keep = ignored || firstReleased && secondReleased
+                      let keep = ignored || firstReleased && secondAccepted
                       let firstValues = if keep && firstReleased then [ Some "3"; Some "1" ] else [ Some "5"; Some "0" ]
-                      let secondValues = if keep && secondReleased then [ Some "4"; Some "2" ] else [ Some "6"; Some "0" ]
+                      let secondValues = if keep && secondAccepted then [ Some secondKey; Some "2" ] else [ Some "6"; Some "0" ]
                       run setup "SELECT u,p FROM jobs WHERE id>=50 ORDER BY id" (ResultSet([ "u"; "p" ], [ firstValues; secondValues ])) |> ignore
+
+          testCase "a later invalid upsert candidate rolls back rows after evaluating earlier assignments"
+          <| fun _ ->
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let session = create 1 (Fsdb.Storage.create ())
+              let session = run session "CREATE TABLE jobs(id INT PRIMARY KEY,u INT NOT NULL UNIQUE,p INT NOT NULL)" (Affected 0UL)
+              let session = run session "INSERT INTO jobs VALUES(40,4,0)" (Affected 1UL)
+              let session = run session "SET @calls=0" (Affected 0UL)
+              let session =
+                  run session
+                      "INSERT INTO jobs VALUES(40,4,0),(50,5,NULL) ON DUPLICATE KEY UPDATE p=(@calls:=@calls+1)"
+                      (Err(1048, "Column 'p' cannot be null"))
+              run session "SELECT @calls AS calls" (ResultSet([ "calls" ], [ [ Some "1" ] ])) |> ignore
+              run session "SELECT id,p FROM jobs ORDER BY id" (ResultSet([ "id"; "p" ], [ [ Some "40"; Some "0" ] ])) |> ignore
 
           testCase "an update rechecks a key released while evaluating its assignment"
           <| fun _ ->

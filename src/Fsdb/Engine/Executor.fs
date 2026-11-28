@@ -35368,43 +35368,19 @@ let rec private executeAsWithViewSources
                         column.AutoIncrement
                         && (onDuplicateUpdate |> List.exists (fun (name, _) -> equalsIgnoreCase name column.Name)))
 
-                match dynamic, ignoreDuplicates with
-                | true, true ->
+                if dynamic then
                     let reservation = finishGenerated |> Option.map (fun finish -> input, finish, assignsAuto)
-                    Storage.upsertIgnoredRowsDynamically
+                    Storage.upsertRowsDynamically
                         s db table cols rowsValues prepare reservation applyUpdate checkChangedRow
-                        (Some coercedAssignments) foundRows ignoreViewCheck
-                | false, _ ->
+                        (Some coercedAssignments) foundRows ignoreDuplicates ignoreViewCheck
+                else
                     let allocation =
                         finishGenerated
                         |> Option.map (fun finish -> AllocateAfterViewCheck(input, finish, assignsAuto))
                         |> Option.defaultValue StandardAllocation
                     upsertRowsWithOrdinalChecked
-                        s db table cols (List.map Ok rowsValues) prepare applyUpdate checkChangedRow (Some coercedAssignments) foundRows ignoreDuplicates ignoreViewCheck allocation
-                | true, false ->
-                    rowsValues
-                    |> List.indexed
-                    |> traverse (fun (ordinal, values) ->
-                        Diagnostics.withRowNumber (ordinal + 1) (fun () ->
-                            Storage.prepareInsertCandidate s db table cols values prepare))
-                    |> Result.bind (fun prepared ->
-                        let candidates = prepared |> List.map _.Values
-
-                        Storage.acquirePreparedInsertWriteTargets s db table candidates
-
-                        upsertRowsWithOrdinalChecked
-                            s db table None (candidates |> List.map (Array.toList >> Ok)) (fun _ row -> Ok row)
-                            applyUpdate checkChangedRow (Some coercedAssignments) foundRows false false StandardAllocation
-                        |> Result.map (fun outcome ->
-                            let generatedId =
-                                prepared
-                                |> List.tryPick (fun candidate ->
-                                    if outcome.InsertedRows |> List.exists ((=) candidate.Values) then candidate.GeneratedId
-                                    else None)
-
-                            { outcome with
-                                LastInsertId = Option.defaultValue outcome.LastInsertId generatedId
-                                GeneratedId = generatedId })))
+                        s db table cols (List.map Ok rowsValues) prepare applyUpdate checkChangedRow
+                        (Some coercedAssignments) foundRows ignoreDuplicates ignoreViewCheck allocation false)
 
     let replaceEvaluatedWith
         (db: string)
@@ -40327,7 +40303,7 @@ let private transactionWriteTargetsIn
                 | _ -> targets source predicate
 
         joinedTargets resolveDeleteTarget delete.From delete.Joins delete.Targets delete.Where
-    | Insert(tableName, columns, rows, _, _) ->
+    | Insert(tableName, columns, rows, [], _) ->
         literalInsertTargets Storage.tryInsertLockTargets tableName columns rows |> Option.toList
     | Replace(tableName, columns, rows) ->
         literalInsertTargets Storage.tryReplaceLockTargets tableName columns rows |> Option.toList

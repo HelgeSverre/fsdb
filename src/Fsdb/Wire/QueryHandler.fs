@@ -4214,7 +4214,7 @@ let private autocommitExecution (session: Session) dbName statement =
         | Ok _ when mayRunNestedWrites -> TrackStatement
         | Ok target ->
             match statement with
-            | Insert(_, _, _ :: _ :: _, _ :: _, true) -> TrackStatement
+            | Insert(_, _, _, _ :: _, _) -> TrackStatement
             | Update _ | Delete _ ->
                 let isolation = configuredIsolation session
                 let protectGaps = isolation = RepeatableRead || isolation = Serializable
