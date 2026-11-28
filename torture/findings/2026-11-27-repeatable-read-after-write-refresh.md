@@ -201,14 +201,25 @@ For the audited standalone view updates, the layout error takes precedence
 over waiting for the rebuilt row. Missing columns and invalid index hints
 retain their existing errors. An INVOKER view still reports a grant failure
 first, with the same 1142 versus MySQL 1356 difference as the no-DDL control.
-Ordinary joined UPDATE and DELETE can
-still skip waits on locked partners, including primary probes and
-`IGNORE INDEX` scans. The reproduced cases span READ COMMITTED,
-REPEATABLE READ, and SERIALIZABLE. Multi-target UPDATE assignment ordering
-also differs. The audited MySQL statements process targets in written source
-order. An immediate target exposes its changes to later targets, while a
-buffered target does not. The optimizer can choose a different immediate
+Multi-target UPDATE assignment ordering differs. The audited MySQL statements
+process targets in written source order. Only changes to an immediate target
+are visible to later targets. The optimizer can choose a different immediate
 target when the query uses a different index.
+
+### Plain joined read partners
+
+Audited two-table UPDATE and DELETE joins on matching signed integer primary
+keys acquire a shared lock on the matching read partner before applying the
+write. An exclusive lock on the partner can delay a primary probe, a secondary
+filter, or an `IGNORE INDEX` scan. A shared lock held by another transaction
+allows the write to proceed. Disjoint primary probes and impossible joins
+also proceed. Tests cover matching pending inserts, secondary-key changes,
+and the committed row image after waiting under a pinned read view. Explicit
+transactions retain matching partner locks until transaction end. Autocommit
+releases them when the statement completes.
+
+The audited scope uses one write target. Additional join shapes, full range
+and gap boundaries, and multi-target write scheduling remain open.
 
 ### Duplicate-key writes
 

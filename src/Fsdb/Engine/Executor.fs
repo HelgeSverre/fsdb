@@ -41156,6 +41156,127 @@ let private primaryDependencyKeys store (table: Table) =
         |> Option.map _.Keys
         |> Option.defaultValue []
 
+let private tryPlainJoinPartners store dbName statement =
+    let operands from (join: Join) =
+        match join.Table, join.Kind with
+        | FromTable right, (InnerJoin | StraightJoin | LeftJoin) when join.Using.IsEmpty ->
+            let resolve reference =
+                physicalFastPathTable store dbName reference
+                |> Option.map (fun table -> reference, table)
+            Option.map2 (fun left right -> left, right) (resolve from) (resolve right)
+        | _ -> None
+
+    let qualifier (source: TableRef) = source.Alias |> Option.defaultValue source.Table
+    let choose ((left, leftTable), (right, rightTable)) (join: Join) isTarget =
+        let leftTarget = isTarget left leftTable rightTable
+        let rightTarget = isTarget right rightTable leftTable
+        let separateTables = MutationTargets.physicalTableKey dbName left <> MutationTargets.physicalTableKey dbName right
+        if not separateTables || equalsIgnoreCase (qualifier left) (qualifier right) then None
+        elif leftTarget && not rightTarget then Some((left, leftTable), (right, rightTable))
+        elif rightTarget && not leftTarget && join.Kind <> LeftJoin then Some((right, rightTable), (left, leftTable))
+        else None
+
+    match statement with
+    | Update { Ctes = []; From = from; Joins = [ join ]; OrderBy = []; Limit = None; Assignments = assignments } ->
+        operands from join |> Option.bind (fun sources ->
+            let isTarget (reference: TableRef) (table: Table) (other: Table) =
+                assignments |> List.forall (fun assignment ->
+                    let belongsToSource =
+                        match assignment.Table with
+                        | Some owner -> equalsIgnoreCase (qualifier reference) owner
+                        | None -> resolveColumn other.Columns assignment.Column |> Result.isError
+                    belongsToSource
+                    && (resolveAssignableColumn table.Columns reference.Table assignment.Column |> Result.isOk))
+            choose sources join isTarget)
+    | Delete { Ctes = []; Source = MultiDeleteSource(FromTable from, [ join ]); Targets = [ target ]; OrderBy = []; Limit = None } ->
+        operands from join |> Option.bind (fun sources -> choose sources join (fun reference _ _ -> equalsIgnoreCase (qualifier reference) target))
+    | _ -> None
+
+let internal hasPlainJoinPartner store dbName statement =
+    (tryPlainJoinPartners store dbName statement).IsSome
+
+let internal plainJoinReadClaims pendingConnection store registry dbName statement =
+    let qualifier (source: TableRef) = source.Alias |> Option.defaultValue source.Table
+    let primaryKey (table: Table) =
+        match Storage.primaryKeyColumns table with
+        | [ name ] -> resolveColumn table.Columns name |> Result.toOption |> Option.map (fun index -> name, index)
+        | _ -> None
+    let plan ((targetRef, (target: Table)), (partnerRef, (partner: Table))) (join: Join) where =
+        let columnTypes =
+            [ targetRef, target; partnerRef, partner ]
+            |> List.collect (fun (source, table) ->
+                table.Columns |> List.map (fun column -> mutationColumnKey (qualifier source, column.Name), column.Type))
+            |> Map.ofList
+        let targetOwner, partnerOwner = qualifier targetRef, qualifier partnerRef
+        let predicates = optionalConjuncts where
+        let local owner =
+            predicates
+            |> List.filter (Expression.exists (function QualifiedCol(alias, _) -> equalsIgnoreCase owner alias | _ -> false))
+            |> List.fold (fun combined predicate -> combineViewPredicate combined (Some predicate)) None
+        let targetWhere, partnerWhere = local targetOwner, local partnerOwner
+
+        match primaryKey target, primaryKey partner, qualifiedColumnEqualities [ join.On ] with
+        | Some(targetKey, targetKeyIndex), Some(partnerKey, partnerKeyIndex), [ equality ] ->
+            let expectedTarget = mutationColumnKey (targetOwner, targetKey)
+            let expectedPartner = mutationColumnKey (partnerOwner, partnerKey)
+            let coversKeys =
+                match joinEdge isSignedJoinKey columnTypes equality with
+                | Some(left, right) -> (left = expectedTarget && right = expectedPartner) || (left = expectedPartner && right = expectedTarget)
+                | None -> false
+            if not coversKeys || not (predicates |> List.forall (isJoinPredicate isSignedJoinKey isSignedJoinLiteral columnTypes))
+               || (join.Kind = LeftJoin && partnerWhere.IsSome)
+               || (validatePreparedBindings store registry dbName statement |> Result.isError)
+               || (rewrittenMutationReadError store registry dbName statement |> Option.isSome) then None
+            else
+                let matchLocal (reference: TableRef) (table: Table) predicate =
+                    let context = contextFactory store registry dbName (columnIndexOf table.Columns) (singleQualifier (qualifier reference) table.Columns) None
+                    prepareWhereMatches context predicate
+                let matchesTarget = matchLocal targetRef target targetWhere
+                let matchesPartner = matchLocal partnerRef partner partnerWhere
+                let matches check row = check row |> Result.defaultValue false
+                let keys reference (table: Table) keyIndex predicate check =
+                    let rows =
+                        tryPhysicalCandidatesInTable store registry table reference predicate
+                        |> Option.map (snd >> Seq.ofList)
+                        |> Option.defaultWith (fun () -> table.RowsArray.Indexed)
+                    rows |> Seq.choose (fun (_, row) -> if matches check row then Some row[keyIndex] else None)
+                let database = partnerRef.Database |> Option.defaultValue dbName
+                let pending =
+                    pendingConnection |> Option.toList |> List.collect (fun owner ->
+                        pendingReadTables store database partnerRef.Table (Some owner) |> List.map snd)
+                let claims table key = Storage.tryPrimaryWriteLockTargets store table [ key ]
+                let hasMatchingRow (table: Table) check (claim: WriteLockTargets) =
+                    claim.RowIds |> List.exists (fun id -> table.RowsArray.TryFind id |> Option.exists (matches check))
+                let candidates =
+                    if targetWhere.IsSome || partnerWhere.IsNone then keys targetRef target targetKeyIndex targetWhere matchesTarget
+                    else
+                        partner :: pending
+                        |> Seq.collect (fun table -> keys partnerRef table partnerKeyIndex partnerWhere matchesPartner)
+                        |> Seq.distinct
+                        |> Seq.filter (fun key -> claims target key |> Option.exists (hasMatchingRow target matchesTarget))
+
+                let selected =
+                    candidates |> Seq.choose (fun key ->
+                        claims partner key |> Option.bind (fun claim ->
+                            let present = hasMatchingRow partner matchesPartner claim
+                            let incoming = pending |> List.exists (fun table -> claims table key |> Option.exists (hasMatchingRow table matchesPartner))
+                            if present || incoming then Some(key, claim) else None))
+                    |> Seq.toList
+                Some [ database, partnerRef.Table,
+                       { RetainedRows = selected |> List.collect (fun (_, claim) -> claim.RowIds)
+                         WaitKeys = selected |> List.collect (fun (_, claim) -> if claim.RowIds.IsEmpty then claim.Keys else [])
+                         WaitRows = []
+                         PrimaryProbes = selected |> List.map (fun (key, _) -> [ key ])
+                         Materialized = None } ]
+        | _ -> None
+
+    tryPlainJoinPartners store dbName statement
+    |> Option.bind (fun sources ->
+        match statement with
+        | Update { Joins = [ join ]; Where = where }
+        | Delete { Source = MultiDeleteSource(_, [ join ]); Where = where } -> plan sources join where
+        | _ -> None)
+
 let private tryMaterializedReadTargets scope store registry dbName select (source: TableRef) pendingConnection =
     let database = source.Database |> Option.defaultValue dbName
     let scan = materializedWriteScan store registry scope source select

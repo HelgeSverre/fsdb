@@ -1081,8 +1081,11 @@ preserve session-local sources and keep writes to permanent destinations
 inside the transaction for the audited INSERT and REPLACE SELECT forms.
 [Joined updates and deletes](torture/findings/2026-11-27-repeatable-read-after-write-refresh.md#joined-updates-deletes-and-writable-views)
 also reject rebuilt layouts and forced probes through new keys in the audited
-plans, including writes through mergeable views. Broader access plans,
-joined write scheduling, and prepared or EXPLAIN paths still differ.
+plans, including writes through mergeable views. [Audited plain joins on
+integer primary keys](torture/findings/2026-11-27-repeatable-read-after-write-refresh.md#plain-joined-read-partners)
+wait on matching partner rows and read their committed versions after a wait.
+Broader access plans, joined write scheduling, and prepared or EXPLAIN paths
+still differ.
 [Point UPDATE and DELETE](torture/findings/2026-11-27-current-point-writes.md)
 can seek an exact unique key absent from the transaction's old write
 view. The audited writes wait for a pending key or its current row and

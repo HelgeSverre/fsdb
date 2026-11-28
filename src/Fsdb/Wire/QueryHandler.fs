@@ -2975,6 +2975,11 @@ let startTransactionStatement (session: Session) : Session =
     | Some _ -> session
     | None -> session
 
+let private safeUpdatesEnabled session =
+    match sessionValue session "sql_safe_updates" with
+    | Some("1" | "ON") -> true
+    | _ -> false
+
 let private prepareTransactionWrite (temporaryCatalog: Catalog option) (statement: Statement) (session: Session) : Session =
     let dbName = session.Database |> Option.defaultValue defaultDatabase
     let registry = registryFor session
@@ -2988,8 +2993,10 @@ let private prepareTransactionWrite (temporaryCatalog: Catalog option) (statemen
         let claimReadPartners = temporaryCatalog.IsNone
         // Functions share the invoking statement's private view and publication boundary.
         let canRefresh = not (insideFunctionOrTrigger session)
+        let plainJoined = claimReadPartners && canRefresh && Executor.hasPlainJoinPartner transaction.Snapshot dbName statement
         let lowerJoined =
             match transaction.Isolation, statement with
+            | (ReadUncommitted | ReadCommitted), _ when plainJoined -> true
             | (ReadUncommitted | ReadCommitted), Update update when claimReadPartners && canRefresh && not update.Joins.IsEmpty ->
                 FromTable update.From :: (update.Joins |> List.map _.Table)
                 |> List.collect FromItem.leaves
@@ -3003,7 +3010,9 @@ let private prepareTransactionWrite (temporaryCatalog: Catalog option) (statemen
             { transaction with Snapshot = snapshot; BaseCatalog = baseCatalog; Seeded = true }
 
         let readSnapshot (transaction: Transaction) =
-            if lowerJoined && transaction.Isolation = ReadUncommitted then refreshCommitted transaction
+            if (lowerJoined && transaction.Isolation = ReadUncommitted)
+               || (plainJoined && (transaction.Isolation = RepeatableRead || transaction.Isolation = Serializable)) then
+                refreshCommitted transaction
             else transaction
 
         let refresh (transaction: Transaction) =
@@ -3039,6 +3048,9 @@ let private prepareTransactionWrite (temporaryCatalog: Catalog option) (statemen
 
         let readClaims pending (transaction: Transaction) =
             if not claimReadPartners then []
+            elif plainJoined then
+                if safeUpdatesEnabled session && (Executor.validateSafeMutation transaction.Snapshot registry dbName statement |> Result.isError) then []
+                else Executor.plainJoinReadClaims pending transaction.Snapshot registry dbName statement |> Option.defaultValue []
             else
                 match transaction.Isolation with
                 | (ReadUncommitted | ReadCommitted) when lowerJoined ->
@@ -3612,11 +3624,6 @@ let private formatResultForProtocol metadata (typedRows: Value[] list) result =
     | ResultSet(columns, rows) ->
         ResultSetWithValues(columns, rows, rawResultColumns result, typedRows)
     | _ -> result
-
-let private safeUpdatesEnabled session =
-    match sessionValue session "sql_safe_updates" with
-    | Some("1" | "ON") -> true
-    | _ -> false
 
 let private tableDefinitionChanged before after database table =
     let revision store =

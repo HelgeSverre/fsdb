@@ -17148,6 +17148,51 @@ let tests =
               let reader = run reader "UPDATE dst d JOIN src s IGNORE INDEX(iy) ON d.id=s.id SET d.v=s.v WHERE s.k=10" (Affected 1UL)
               run reader "ROLLBACK" (Affected 0UL) |> ignore
 
+          testCase "plain joined mutations wait only for the selected primary partner"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let writer = run (create 1 store) "CREATE TABLE src(id INT PRIMARY KEY,v INT)" (Affected 0UL)
+              let writer = run writer "CREATE TABLE dst(id INT PRIMARY KEY,v INT,target_only INT)" (Affected 0UL)
+              let writer = run writer "INSERT INTO src VALUES(1,100),(2,200)" (Affected 2UL)
+              let writer = run writer "INSERT INTO dst(id,v) VALUES(1,11),(2,22)" (Affected 2UL)
+              let reader = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let reader = run reader "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED" (Affected 0UL)
+              let reader = run reader "START TRANSACTION" (Affected 0UL)
+              let writer = run writer "START TRANSACTION" (Affected 0UL)
+              let writer = run writer "UPDATE src SET v=400 WHERE id=1" (Affected 1UL)
+              let timeout = Err(1205, "Lock wait timeout exceeded; try restarting transaction")
+              let reader = run reader "UPDATE dst d JOIN src s ON s.id=d.id SET d.v=s.v WHERE d.id=1" timeout
+              let reader = run reader "UPDATE dst d JOIN src s ON s.id=d.id SET target_only=s.v WHERE d.id=1" timeout
+              let reader = run reader "DELETE d FROM dst d JOIN src s ON s.id=d.id WHERE d.id=1" timeout
+              let reader = run reader "UPDATE dst d JOIN src s ON s.id=d.id SET d.v=s.v WHERE d.id=2" (Affected 1UL)
+              let reader = run reader "UPDATE dst d JOIN src s ON FALSE SET d.v=s.v WHERE d.id=1" (Affected 0UL)
+              let reader = run reader "SELECT v FROM dst ORDER BY id" (ResultSet([ "v" ], [ [ Some "11" ]; [ Some "200" ] ]))
+              let reader = run reader "ROLLBACK" (Affected 0UL)
+              let writer = run writer "ROLLBACK" (Affected 0UL)
+
+              let reader = run reader "SET SESSION innodb_lock_wait_timeout=6" (Affected 0UL)
+              let reader = run reader "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ" (Affected 0UL)
+              let reader = run reader "START TRANSACTION WITH CONSISTENT SNAPSHOT" (Affected 0UL)
+              let writer = run writer "START TRANSACTION" (Affected 0UL)
+              let writer = run writer "UPDATE src SET v=400 WHERE id=1" (Affected 1UL)
+              let owner = reader.Tx.Value.Snapshot.TransactionLocks.Value.Owner
+              let waiting = Threading.Tasks.Task.Run(fun () ->
+                  handle reader "UPDATE dst d JOIN src s ON s.id=d.id SET d.v=s.v WHERE d.id=1")
+              let registered () = lock store.LockWaits.SyncRoot (fun () -> store.LockWaits.Edges.ContainsKey owner)
+              let didWait =
+                  try Threading.SpinWait.SpinUntil(registered, TimeSpan.FromSeconds 3.0)
+                  finally run writer "COMMIT" (Affected 0UL) |> ignore
+              Expect.isTrue didWait "the update waited before the partner committed"
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the joined update resumed"
+              let reader, result = waiting.Result
+              Expect.equal result (Affected 1UL) "the target was updated"
+              let reader = run reader "SELECT v FROM dst WHERE id=1" (ResultSet([ "v" ], [ [ Some "400" ] ]))
+              run reader "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "transaction access modes, chaining, and SET CHARACTER SET are enforced"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
