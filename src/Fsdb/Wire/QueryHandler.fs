@@ -3616,20 +3616,22 @@ let private safeUpdatesEnabled session =
     | Some("1" | "ON") -> true
     | _ -> false
 
+let private bindCurrentMutationTarget (session: Session) (transaction: Transaction) database table =
+    let revision store =
+        Storage.tableSnapshot store database table
+        |> Result.toOption |> Option.map _.SchemaRevision
+    if revision transaction.Snapshot = revision session.Store then session
+    else
+        let baseCatalog, snapshot = rebaseTransactionSnapshot session transaction
+        { session with Tx = Some { transaction with BaseCatalog = baseCatalog; Snapshot = snapshot } }
+
 let private bindMutationReadView (session: Session) statement =
     let unchanged session = session, Ok(Executor.MutationScan statement)
     match session.Tx with
     | Some transaction when transaction.Isolation = RepeatableRead
                             && Storage.hasConsistentReadView transaction.Snapshot
                             && not (insideFunctionOrTrigger session) ->
-        let bindCurrentDefinition database table =
-            let revision store =
-                Storage.tableSnapshot store database table
-                |> Result.toOption |> Option.map _.SchemaRevision
-            if revision transaction.Snapshot = revision session.Store then session
-            else
-                let baseCatalog, snapshot = rebaseTransactionSnapshot session transaction
-                { session with Tx = Some { transaction with BaseCatalog = baseCatalog; Snapshot = snapshot } }
+        let bindCurrentDefinition = bindCurrentMutationTarget session transaction
         let dbName = session.Database |> Option.defaultValue defaultDatabase
         match Executor.tryDirectMutationRead statement with
         | Some read ->
@@ -3659,6 +3661,30 @@ let private openPrimaryRead (session: Session) refresh strength planningStore (s
             let qualifier = source.Alias |> Option.defaultValue source.Table
             let selected = Executor.selectLockedPrimaryKeys plan.ReadRangeLimit.IsSome qualifier keys rows select
             current, selected, consumed
+
+let private isInsertSourceStatement = function
+    | InsertSelect _ | ReplaceSelect _ -> true
+    | _ -> false
+
+let private usesLockingInsertSources transaction statement =
+    (transaction.Isolation = RepeatableRead || transaction.Isolation = Serializable)
+    && isInsertSourceStatement statement
+
+let private withInsertSourceReadView session refresh body =
+    let primarySourceRead (store: Store) registry dbName (select: SelectStmt) =
+        match select.From with
+        | Some(FromTable source) ->
+            let key = CatalogOverlay.tableKey (source.Database |> Option.defaultValue dbName) source.Table
+            if store.TableShadows.ContainsKey key then None
+            else
+                Executor.tryPrimaryRead true WaitForLocks store registry dbName select
+                |> Option.map (fun prepared ->
+                    let current, selected, _ = openPrimaryRead session refresh ShareLock store source prepared
+                    current, selected)
+        | _ -> None
+    Executor.withLiveLockingReadStore session.Store refresh (lockWaitTimeout session) (fun () ->
+        Executor.withInsertSourceLocks (Some primarySourceRead) (fun () ->
+            Executor.withLockingReadOffsetRelease false body))
 
 let private executeParsedStatement readOverlay accesses (session: Session) (stmt: Statement) : Session * QueryResult =
     let stmt = withSqlSelectLimit session stmt
@@ -3715,10 +3741,7 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
         let lockingReadView () =
             match session.Tx with
             | Some transaction ->
-                let insertSourceLocks =
-                    match transaction.Isolation, stmt with
-                    | (RepeatableRead | Serializable), (InsertSelect _ | ReplaceSelect _) -> true
-                    | _ -> false
+                let insertSourceLocks = usesLockingInsertSources transaction stmt
                 let releaseOffset = transaction.Isolation = ReadCommitted || transaction.Isolation = ReadUncommitted
                 if insertSourceLocks || statementContainsLockingRead stmt then
                     Some((fun () -> rebaseTransactionSnapshot session transaction |> snd), releaseOffset, insertSourceLocks)
@@ -3935,18 +3958,10 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
             try
                 withSelectDeadline (fun () ->
                     match lockingReadView () with
-                    | Some(current, releaseOffset, insertSourceLocks) ->
-                        let primarySourceRead store registry dbName (select: SelectStmt) =
-                            match select.From with
-                            | Some(FromTable source) ->
-                                Executor.tryPrimaryRead true WaitForLocks store registry dbName select
-                                |> Option.map (fun prepared ->
-                                    let current, selected, _ = openPrimaryRead session current ShareLock store source prepared
-                                    current, selected)
-                            | _ -> None
-                        let insertSourceRead = if insertSourceLocks then Some primarySourceRead else None
+                    | Some(current, _, true) -> withInsertSourceReadView session current evaluate
+                    | Some(current, releaseOffset, false) ->
                         Executor.withLiveLockingReadStore session.Store current (lockWaitTimeout session) (fun () ->
-                            Executor.withInsertSourceLocks insertSourceRead (fun () ->
+                            Executor.withInsertSourceLocks None (fun () ->
                                 Executor.withLockingReadOffsetRelease releaseOffset evaluate))
                     | None -> evaluate ())
             with
@@ -4488,11 +4503,11 @@ let private isPermanentOverlayInsert (session: Session) dbName =
         let database, table = splitQualified dbName target
         Executor.viewExists (Session.currentStore session) database table
     function
-    | Insert(target, _, _, updates, _)
-    | InsertSelect(target, _, _, updates, _) ->
+    | InsertSelect(target, _, _, _, _)
+    | ReplaceSelect(target, _, _) -> permanentTarget target
+    | Insert(target, _, _, updates, _) ->
         permanentTarget target && (not updates.IsEmpty || viewTarget target)
     | Replace(target, _, _)
-    | ReplaceSelect(target, _, _)
     | ReplaceSet(target, _) -> permanentTarget target && viewTarget target
     | _ -> false
 
@@ -4553,7 +4568,16 @@ let private executeWithTemporaryCatalog (action: TemporaryAction option) (sessio
     let (executed, result), permanent =
         try
             Executor.withPermanentMutationResult working session.Store (fun () ->
-                executeParsedCoreWith StatementLockHeld readOverlay workingSession stmt)
+                let execute () = executeParsedCoreWith StatementLockHeld readOverlay workingSession stmt
+                match session.Tx with
+                | Some transaction when usesLockingInsertSources transaction stmt ->
+                    let refresh () =
+                        let _, permanent = rebaseTransactionSnapshot session transaction
+                        let catalog = CatalogOverlay.merge permanent.Catalog session.TemporaryCatalog
+                        { Storage.beginTransactionSnapshotFromCatalog working catalog with
+                            TableShadows = working.TableShadows |> Map.map (fun key _ -> CatalogOverlay.tryTable permanent.Catalog key) }
+                    withInsertSourceReadView session refresh execute
+                | _ -> execute ())
         finally
             if startedRebase then
                 rebasedBase <- Storage.finishDynamicWriteRebase baseStore
@@ -4666,24 +4690,33 @@ let private executeTemporaryStatement (action: TemporaryAction option) dbName (s
         beginTransaction ImplicitTrackedTransaction (pendingTransactionCharacteristics session) (configuredReadOnly session) session
     let writePlan = if action.IsNone then permanentTemporaryOverlayWrite session dbName stmt else None
     match writePlan with
-    | None ->
+    | None when not (isInsertSourceStatement stmt) ->
         let session =
             if session.Tx.IsNone && autocommitDisabled session && action.IsNone && isDataChangeStatement stmt then start session
             else session
         executeWithTemporaryCatalog action session stmt
-    | Some plan ->
+    | plan ->
         let publish = session.Tx.IsNone && not (autocommitDisabled session)
         let mutable working = if session.Tx.IsNone then start session else session
         try
             let executed, result =
                 let access =
-                    if working.Tx |> Option.exists _.ReadOnly then Error(1792, "Cannot execute statement in a READ ONLY transaction")
+                    if plan.IsNone then Ok()
+                    elif working.Tx |> Option.exists _.ReadOnly then Error(1792, "Cannot execute statement in a READ ONLY transaction")
                     else checkSessionAccess working working.Store (requiredPrivilegesForStatement working working.Store dbName stmt)
                 match access with
                 | Error(code, message) -> working, Err(code, message)
                 | Ok () ->
                     working <- startTransactionStatement working
-                    working <- prepareTransactionWrite (Some working.TemporaryCatalog) plan working
+                    match plan, working.Tx with
+                    | Some(InsertSelect(target, _, _, _, _) | ReplaceSelect(target, _, _)), Some transaction
+                        when usesLockingInsertSources transaction stmt ->
+                        let database, table = splitQualified dbName target
+                        working <- bindCurrentMutationTarget working transaction database table
+                    | _ -> ()
+                    match plan with
+                    | Some statement -> working <- prepareTransactionWrite (Some working.TemporaryCatalog) statement working
+                    | None -> ()
                     executeWithTemporaryCatalog action working stmt
             working <- executed
             if publish then

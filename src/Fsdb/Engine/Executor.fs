@@ -16700,6 +16700,11 @@ and private prepareLockingRead
                     | None -> Ok()
 
         let acquire () =
+            let targets =
+                targets |> List.filter (fun (name, _) ->
+                    let reference = byQualifier.[name.ToLowerInvariant()].Reference
+                    let database = reference.Database |> Option.defaultValue dbName
+                    not (isTemporaryTable store database reference.Table))
             let skippedSources =
                 if not readingInsertSource.Value then Set.empty
                 else

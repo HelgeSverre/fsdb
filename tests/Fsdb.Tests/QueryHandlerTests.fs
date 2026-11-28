@@ -17068,6 +17068,48 @@ let tests =
               run writer "INSERT INTO src VALUES(5,500)" (Affected 1UL) |> ignore
               run reader "ROLLBACK" (Affected 0UL) |> ignore
 
+          testCase "insert select keeps temporary shadows and rolls back permanent writes"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let writer = run (create 1 store) "CREATE TABLE src(id INT PRIMARY KEY,k INT,v INT)" (Affected 0UL)
+              let writer = run writer "INSERT INTO src VALUES(1,10,100)" (Affected 1UL)
+              let writer = run writer "CREATE TABLE dst(id INT PRIMARY KEY,v INT)" (Affected 0UL)
+              let writer = run writer "CREATE TABLE shadow(id INT PRIMARY KEY,v INT)" (Affected 0UL)
+              let writer = run writer "INSERT INTO shadow VALUES(1,999)" (Affected 1UL)
+              let reader = run (create 2 store) "CREATE TEMPORARY TABLE shadow(id INT PRIMARY KEY,v INT)" (Affected 0UL)
+              let reader = run reader "INSERT INTO shadow VALUES(1,500)" (Affected 1UL)
+              let reader = run reader "CREATE TEMPORARY TABLE local_dst(id INT PRIMARY KEY,v INT)" (Affected 0UL)
+              let reader = run reader "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let reader = run reader "SET TRANSACTION ISOLATION LEVEL READ COMMITTED" (Affected 0UL)
+              let reader = run reader "START TRANSACTION" (Affected 0UL)
+              let reader = run reader "INSERT INTO dst SELECT id,v FROM shadow" (Affected 1UL)
+              let reader = run reader "SELECT v FROM dst" (ResultSet([ "v" ], [ [ Some "500" ] ]))
+              let reader = run reader "ROLLBACK" (Affected 0UL)
+              let writer = run writer "SELECT v FROM dst" (ResultSet([ "v" ], []))
+              let reader = run reader "START TRANSACTION WITH CONSISTENT SNAPSHOT" (Affected 0UL)
+              let writer = run writer "UPDATE src SET v=300 WHERE id=1" (Affected 1UL)
+              let writer = run writer "ALTER TABLE src ADD INDEX ix(k), ALGORITHM=INPLACE" (Affected 0UL)
+              let reader = run reader "INSERT INTO local_dst SELECT id,v FROM src FORCE INDEX(ix) WHERE k=10"
+                               (Err(1412, "Table definition has changed, please retry transaction"))
+              let reader = run reader "REPLACE INTO local_dst SELECT id,v FROM src WHERE id=1" (Affected 1UL)
+              let reader = run reader "SELECT v FROM local_dst" (ResultSet([ "v" ], [ [ Some "300" ] ]))
+              let writer = run writer "CREATE TABLE fresh_dst(id INT PRIMARY KEY,v INT)" (Affected 0UL)
+              let reader = run reader "INSERT INTO fresh_dst SELECT id,v FROM shadow WHERE id=1" (Affected 1UL)
+              let reader = run reader "SELECT v FROM fresh_dst"
+                               (Err(1412, "Table definition has changed, please retry transaction"))
+              let writer = run writer "START TRANSACTION" (Affected 0UL)
+              let writer = run writer "UPDATE shadow SET v=9999 WHERE id=1" (Affected 1UL)
+              let reader = run reader "INSERT INTO dst SELECT s.id,s.v+x.v FROM src s JOIN shadow x ON x.id=s.id" (Affected 1UL)
+              let reader = run reader "SELECT v FROM dst" (ResultSet([ "v" ], [ [ Some "800" ] ]))
+              let reader = run reader "ROLLBACK" (Affected 0UL)
+              let writer = run writer "ROLLBACK" (Affected 0UL)
+              run reader "SELECT v FROM local_dst" (ResultSet([ "v" ], [])) |> ignore
+              run writer "SELECT v FROM dst" (ResultSet([ "v" ], [])) |> ignore
+
           testCase "transaction access modes, chaining, and SET CHARACTER SET are enforced"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

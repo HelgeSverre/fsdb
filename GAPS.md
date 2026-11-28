@@ -1077,7 +1077,8 @@ bind current target definitions. Upsert and REPLACE check the duplicate
 key they use to open an existing row. Audited INSERT and REPLACE SELECT
 sources read current rows under REPEATABLE READ and protect visited
 primary gaps. [Temporary-table overlays](torture/findings/2026-11-27-repeatable-read-after-write-refresh.md#temporary-table-source-overlays)
-can still copy stale source rows or leave rows visible after ROLLBACK.
+preserve session-local sources and keep writes to permanent destinations
+inside the transaction for the audited INSERT and REPLACE SELECT forms.
 Broader access plans, joined mutations, and prepared or EXPLAIN paths still differ.
 [Point UPDATE and DELETE](torture/findings/2026-11-27-current-point-writes.md)
 can seek an exact unique key absent from the transaction's old write
