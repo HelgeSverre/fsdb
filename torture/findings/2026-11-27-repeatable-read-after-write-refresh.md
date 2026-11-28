@@ -185,7 +185,7 @@ write scan. Column binding and safe-update errors retain their precedence.
 
 The comparison includes ordered UPDATE with LIMIT, DELETE with a single
 source and an explicit target, and clustered writes using USE or IGNORE
-hints. Joined writes and insert source queries remain open.
+hints. Joined writes remain open.
 
 ### Duplicate-key writes
 
@@ -201,3 +201,17 @@ reports 1412 once the key is stable. A conflict through an inherited
 PRIMARY can wait for the latest row and then proceed if the layout is
 available. A new row can be inserted into a layout created after the
 read view, while a later read of that layout still returns 1412.
+
+### Insert and replace source queries
+
+Under REPEATABLE READ, INSERT and REPLACE SELECT use current source
+rows and wait for conflicting row writes. A selected secondary key or
+layout outside the read view returns 1412 before a row wait. An ordinary
+consistent SELECT in the transaction keeps its pinned rows. READ
+COMMITTED source reads can copy committed rows while another transaction
+holds an uncommitted update.
+
+The clustered cursor protects visited primary gaps, including an empty
+range or missing point. LIMIT 0 and an eliminated join source acquire
+no locks on the skipped rows. The comparison includes joined and
+scalar sources and checks the rows copied into a separate destination.

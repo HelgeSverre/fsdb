@@ -1253,6 +1253,9 @@ let private lockingReadRows = System.Threading.AsyncLocal<Map<string, Set<RowId>
 let private suppressReadRowLocks = new System.Threading.ThreadLocal<bool>()
 let private committedStatementStore = System.Threading.AsyncLocal<Store option>()
 let private lockingReadStore = System.Threading.AsyncLocal<(Store option * (unit -> Store)) option>()
+let private insertSourcePrimaryRead =
+    System.Threading.AsyncLocal<(Store -> Registry -> string -> SelectStmt -> (Store * SelectStmt) option) option>()
+let private readingInsertSource = System.Threading.AsyncLocal<bool>()
 let private lockingReadTimeout = System.Threading.AsyncLocal<System.TimeSpan option>()
 let private releaseLockingReadOffsetRows = System.Threading.AsyncLocal<bool>()
 let private examinedRows = System.Threading.AsyncLocal<int64 ref option>()
@@ -1430,6 +1433,9 @@ let internal withLiveLockingReadStore live refresh timeout body =
 
 let internal withLockingReadOffsetRelease release body =
     DynamicScope.withValue releaseLockingReadOffsetRows release body
+
+let internal withInsertSourceLocks preparePrimary body =
+    DynamicScope.withValue insertSourcePrimaryRead preparePrimary body
 
 type private StoredView =
     { Name: string
@@ -8377,7 +8383,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | Exists select ->
         let ctx = expressionSubqueryContext ctx select
         let indexed =
-            if select.Locking.IsEmpty && not (hasReadViewRestrictions ctx.Store) then
+            if select.Locking.IsEmpty && not readingInsertSource.Value && not (hasReadViewRestrictions ctx.Store) then
                 tryCorrelatedExists ctx select |> Option.orElseWith (fun () -> tryDecorrelatedExists ctx select)
             else None
         match indexed with
@@ -8394,7 +8400,7 @@ and private evalExprCore (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | Subquery select ->
         let ctx = expressionSubqueryContext ctx select
         let shortcut =
-            if select.Locking.IsEmpty && not (hasReadViewRestrictions ctx.Store) then
+            if select.Locking.IsEmpty && not readingInsertSource.Value && not (hasReadViewRestrictions ctx.Store) then
                 tryMissingCorrelatedAggregateArgument ctx select
                 |> Option.orElseWith (fun () -> tryCorrelatedCount ctx select)
                 |> Option.orElseWith (fun () -> tryFoldCorrelatedRangeAggregate ctx select)
@@ -10330,7 +10336,7 @@ and private runExpressionSubquery
           RowEqualityMembership = None }
 
     match memo.TryGetValue cacheKey with
-    | _ when not cacheKey.Locking.IsEmpty -> execute (Some ctx)
+    | _ when not cacheKey.Locking.IsEmpty || readingInsertSource.Value -> execute (Some ctx)
     // A probe may skip read-view checks that execution must enforce.
     | _ when (metadataProbe.Value || planningProbe.Value) && hasReadViewRestrictions ctx.Store -> execute (Some ctx)
     | true, MemoizedSubquery result -> result
@@ -16694,6 +16700,16 @@ and private prepareLockingRead
                     | None -> Ok()
 
         let acquire () =
+            let skippedSources =
+                if not readingInsertSource.Value then Set.empty
+                else
+                    let impossible = impossibleReadCondition store registry dbName
+                    select.Joins
+                    |> List.collect (fun join ->
+                        if join.Kind = LeftJoin && impossible join.On then FromItem.leaves join.Table else [])
+                    |> List.choose FromItem.tryQualifier
+                    |> List.map (fun name -> name.ToLowerInvariant())
+                    |> Set.ofList
             let layoutUnavailable (source: LockingReadSource) =
                 let database = source.Reference.Database |> Option.defaultValue dbName
                 Storage.lockingReadLayoutUnavailable store database source.Reference.Table source.Table
@@ -16786,7 +16802,7 @@ and private prepareLockingRead
                         let source = byQualifier.[qualifier]
                         // The read can reach this point with an unavailable layout
                         // only when its access has already been eliminated.
-                        if layoutUnavailable source then Ok(qualifier, Set.empty)
+                        if Set.contains qualifier skippedSources || layoutUnavailable source then Ok(qualifier, Set.empty)
                         else acquireTargets qualifier source locking)
                     |> Result.map (fun rows -> Map.ofList rows, None))
 
@@ -16796,6 +16812,9 @@ and private prepareLockingRead
             else
                 match snapshotLayoutReadError store registry dbName select outer with
                 | Some error -> Error error
+                | None when readingInsertSource.Value
+                            && (select.Where |> Option.exists (impossibleReadCondition store registry dbName)) ->
+                    Ok(Map.empty, None)
                 | None -> acquire ()))
 
 and private runSelectStmt
@@ -16808,6 +16827,17 @@ and private runSelectStmt
     runSelectStmtWithOutput ReadValues store registry dbName select outer
 
 and private runSelectStmtWithOutput output store registry dbName (select: SelectStmt) outer =
+    let store, select =
+        if readingInsertSource.Value && select.Locking.IsEmpty && select.From.IsSome then
+            let prepared =
+                if outer.IsSome || metadataProbe.Value || planningProbe.Value || suppressReadRowLocks.Value
+                   || (not select.CalculateFoundRows && zeroLimitWithoutOffset select.Limit select.Offset) then None
+                else
+                    insertSourcePrimaryRead.Value
+                    |> Option.bind (fun prepare -> prepare store registry dbName select)
+            prepared |> Option.defaultWith (fun () ->
+                store, { select with Locking = [ { Strength = ShareLock; Tables = []; Wait = WaitForLocks } ] })
+        else store, select
     let pendingBefore =
         if select.Limit.IsSome then Some(pendingCorrelatedNumericWarningCheckpoint ())
         else None
@@ -16903,6 +16933,18 @@ and private numericKeyRangeIsEmpty (table: Table) column (bounds: Lazy<RangeLook
             lower > upper || (lower = upper && not (lowerInclusive && upperInclusive))
         | _ -> false))
 
+and private impossibleReadCondition store registry dbName =
+    let context = lazy (contextFactory store registry dbName Map.empty Map.empty None [||])
+    let rec impossible = function
+        | BinOp(And, left, right) -> impossible left || impossible right
+        | BinOp(Or, left, right) -> impossible left && impossible right
+        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), LiteralValue VNull, _)
+        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), _, LiteralValue VNull) -> true
+        | predicate ->
+            tryClosedNumericValue context.Value predicate
+            |> Option.exists (fun value -> truthy value <> Some true)
+    impossible
+
 and private snapshotLayoutReadError
     (store: Store)
     (registry: Registry)
@@ -16916,16 +16958,7 @@ and private snapshotLayoutReadError
            || (store.UnavailableReadLayouts.IsEmpty && (not locking || store.TransactionLocks.IsNone))
            || (not select.CalculateFoundRows && zeroLimitWithoutOffset select.Limit select.Offset) then false
         else
-            let context = lazy (contextFactory store registry dbName Map.empty Map.empty None [||])
-            let rec impossible = function
-                | BinOp(And, left, right) -> impossible left || impossible right
-                | BinOp(Or, left, right) -> impossible left && impossible right
-                | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), LiteralValue VNull, _)
-                | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), _, LiteralValue VNull) -> true
-                | predicate ->
-                    tryClosedNumericValue context.Value predicate
-                    |> Option.exists (fun value -> truthy value <> Some true)
-
+            let impossible = impossibleReadCondition store registry dbName
             let unavailable schema name table =
                 if locking then Storage.lockingReadLayoutUnavailable store schema name table
                 else Set.contains table.ReadLayoutRevision store.UnavailableReadLayouts
@@ -28998,6 +29031,15 @@ let private insertSelectSourceReferences (assignments: (string * Expr) list) : E
 
     references |> Seq.distinct |> List.ofSeq
 
+let private insertSourceStore store =
+    if insertSourcePrimaryRead.Value.IsSome then
+        lockingReadStore.Value |> Option.map (fun (_, refresh) -> refresh ()) |> Option.defaultValue store
+    else store
+
+let private runInsertSourceSelect store registry dbName select =
+    DynamicScope.withValue readingInsertSource insertSourcePrimaryRead.Value.IsSome (fun () ->
+        runSelectStmt store registry dbName select None)
+
 let private prepareInsertSelectSourceBindings
     (store: Store)
     (registry: Registry)
@@ -37814,10 +37856,11 @@ let rec private executeAsWithViewSources
         match scan insertStore db table with
         | Error error -> ids, storageErr error
         | Ok(targetColumns, _) ->
-            match prepareInsertSelectSourceBindings store registry dbName targetColumns select onDuplicateUpdate with
+            let sourceStore = insertSourceStore store
+            match prepareInsertSelectSourceBindings sourceStore registry dbName targetColumns select onDuplicateUpdate with
             | Error(code, message) -> ids, Err(code, message)
             | Ok(boundSelect, sourceReferences) ->
-                let selectResult, _, typedRows = runSelectStmt store registry dbName boundSelect None
+                let selectResult, _, typedRows = runInsertSourceSelect sourceStore registry dbName boundSelect
 
                 match selectResult with
                 | Err(code, message) -> ids, Err(code, message)
@@ -37912,7 +37955,7 @@ let rec private executeAsWithViewSources
 
     | ReplaceSelect(table, columns, select) ->
         let db, table = splitQualified dbName table
-        let selectResult, _, _ = runSelectStmt store registry dbName select None
+        let selectResult, _, _ = runInsertSourceSelect (insertSourceStore store) registry dbName select
 
         match selectResult with
         | Err(code, message) -> ids, Err(code, message)

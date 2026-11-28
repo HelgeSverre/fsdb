@@ -17015,6 +17015,59 @@ let tests =
               let reader = run reader "SELECT id FROM fresh" unavailable
               run reader "ROLLBACK" (Affected 0UL) |> ignore
 
+          testCase "insert and replace select read current source rows in repeatable read"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let writer = run (create 1 store) "CREATE TABLE src(id INT PRIMARY KEY,k INT,payload INT)" (Affected 0UL)
+              let writer = run writer "CREATE TABLE dst(id INT PRIMARY KEY,v INT)" (Affected 0UL)
+              let writer = run writer "INSERT INTO src VALUES(1,10,100),(2,20,200)" (Affected 2UL)
+              let reader = run (create 2 store) "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let reader = run reader "START TRANSACTION WITH CONSISTENT SNAPSHOT" (Affected 0UL)
+              let writer = run writer "UPDATE src SET payload=300 WHERE id=1" (Affected 1UL)
+              let writer = run writer "ALTER TABLE src ADD INDEX ix(k), ALGORITHM=INPLACE" (Affected 0UL)
+              let unavailable = Err(1412, "Table definition has changed, please retry transaction")
+              let reader = run reader "INSERT INTO dst SELECT id,payload FROM src FORCE INDEX(ix) WHERE k=10" unavailable
+              let writer = run writer "START TRANSACTION" (Affected 0UL)
+              let writer = run writer "UPDATE src SET payload=400 WHERE id=1" (Affected 1UL)
+              let reader = run reader "INSERT INTO dst SELECT id,payload FROM src WHERE id=1"
+                               (Err(1205, "Lock wait timeout exceeded; try restarting transaction"))
+              let reader = run reader "INSERT INTO dst SELECT id,payload FROM src LIMIT 0" (Affected 0UL)
+              let writer = run writer "ROLLBACK" (Affected 0UL)
+              let reader = run reader "INSERT INTO dst SELECT id,payload FROM src IGNORE INDEX(ix) WHERE k=10" (Affected 1UL)
+              let reader = run reader "SELECT v FROM dst" (ResultSet([ "v" ], [ [ Some "300" ] ]))
+              let reader = run reader "SELECT payload FROM src WHERE id=1" (ResultSet([ "payload" ], [ [ Some "100" ] ]))
+              let reader = run reader "ROLLBACK" (Affected 0UL)
+              let reader = run reader "START TRANSACTION WITH CONSISTENT SNAPSHOT" (Affected 0UL)
+              run writer "ALTER TABLE src ADD INDEX iy(payload), ALGORITHM=COPY" (Affected 2UL) |> ignore
+              let reader = run reader "REPLACE INTO dst SELECT id,payload FROM src WHERE id=1" unavailable
+              run reader "ROLLBACK" (Affected 0UL) |> ignore
+
+          testCase "insert select protects a visited primary gap and skips a zero limit"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let run session sql expected =
+                  let next, result = handle session sql
+                  Expect.equal result expected sql
+                  next
+              let writer = run (create 1 store) "CREATE TABLE src(id INT PRIMARY KEY,v INT)" (Affected 0UL)
+              let writer = run writer "CREATE TABLE dst(id INT PRIMARY KEY,v INT)" (Affected 0UL)
+              let writer = run writer "INSERT INTO src VALUES(1,100),(10,1000)" (Affected 2UL)
+              let writer = run writer "SET SESSION innodb_lock_wait_timeout=1" (Affected 0UL)
+              let reader = run (create 2 store) "START TRANSACTION" (Affected 0UL)
+              let reader = run reader "INSERT INTO dst SELECT id,v FROM src WHERE id>1 AND id<10" (Affected 0UL)
+              let writer = run writer "INSERT INTO src VALUES(5,500)"
+                               (Err(1205, "Lock wait timeout exceeded; try restarting transaction"))
+              let writer = run writer "INSERT INTO src VALUES(20,2000)" (Affected 1UL)
+              let reader = run reader "ROLLBACK" (Affected 0UL)
+              let reader = run reader "START TRANSACTION" (Affected 0UL)
+              let reader = run reader "INSERT INTO dst SELECT id,v FROM src WHERE id=5 LIMIT 0" (Affected 0UL)
+              run writer "INSERT INTO src VALUES(5,500)" (Affected 1UL) |> ignore
+              run reader "ROLLBACK" (Affected 0UL) |> ignore
+
           testCase "transaction access modes, chaining, and SET CHARACTER SET are enforced"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

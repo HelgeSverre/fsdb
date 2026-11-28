@@ -1074,8 +1074,10 @@ acquiring row locks while keeping current row versions for clustered
 reads. Direct UPDATE and DELETE bind current index hints and reject
 unavailable access paths before taking row locks. Values-based inserts
 bind current target definitions. Upsert and REPLACE check the duplicate
-key they use to open an existing row. Broader access plans, joined
-mutations, insert source queries, and prepared or EXPLAIN paths still differ.
+key they use to open an existing row. Audited INSERT and REPLACE SELECT
+sources read current rows under REPEATABLE READ and protect visited
+primary gaps. Broader access plans, joined mutations, and prepared or
+EXPLAIN paths still differ.
 [Point UPDATE and DELETE](torture/findings/2026-11-27-current-point-writes.md)
 can seek an exact unique key absent from the transaction's old write
 view. The audited writes wait for a pending key or its current row and

@@ -3648,6 +3648,18 @@ let private bindMutationReadView (session: Session) statement =
             | _ -> unchanged session
     | _ -> unchanged session
 
+let private openPrimaryRead (session: Session) refresh strength planningStore (source: TableRef) = function
+    | Executor.NoPrimaryScan select -> planningStore, select, 0
+    | Executor.LockPrimaryRead(plan, select, keys) ->
+        match Storage.lockPrimaryRead (lockWaitTimeout session) session.Store refresh strength plan with
+        | Storage.ReadPrimary current -> current, select, 0
+        | Storage.SkippedPrimaryPoint current ->
+            current, { select with Where = Some(Lit(VInt 0L)) }, 0
+        | Storage.ReadSelectedPrimaryKeys(current, rows, consumed) ->
+            let qualifier = source.Alias |> Option.defaultValue source.Table
+            let selected = Executor.selectLockedPrimaryKeys plan.ReadRangeLimit.IsSome qualifier keys rows select
+            current, selected, consumed
+
 let private executeParsedStatement readOverlay accesses (session: Session) (stmt: Statement) : Session * QueryResult =
     let stmt = withSqlSelectLimit session stmt
     stmt
@@ -3702,9 +3714,15 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
         let store = Session.currentStore session
         let lockingReadView () =
             match session.Tx with
-            | Some transaction when statementContainsLockingRead stmt ->
+            | Some transaction ->
+                let insertSourceLocks =
+                    match transaction.Isolation, stmt with
+                    | (RepeatableRead | Serializable), (InsertSelect _ | ReplaceSelect _) -> true
+                    | _ -> false
                 let releaseOffset = transaction.Isolation = ReadCommitted || transaction.Isolation = ReadUncommitted
-                Some((fun () -> rebaseTransactionSnapshot session transaction |> snd), releaseOffset)
+                if insertSourceLocks || statementContainsLockingRead stmt then
+                    Some((fun () -> rebaseTransactionSnapshot session transaction |> snd), releaseOffset, insertSourceLocks)
+                else None
             | _ -> None
 
         match access with
@@ -3840,17 +3858,10 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
                                                         if revision store <> revision session.Store then refresh () else store
                                                     else store
                                                 Executor.tryPrimaryRead protectGaps wait planningStore registry dbName readSelect
-                                                |> Option.map (function
-                                                    | Executor.NoPrimaryScan noLockSelect -> planningStore, noLockSelect
-                                                    | Executor.LockPrimaryRead(plan, orderedSelect, keys) ->
-                                                        match Storage.lockPrimaryRead (lockWaitTimeout session) session.Store refresh strength plan with
-                                                        | Storage.ReadPrimary readStore -> readStore, orderedSelect
-                                                        | Storage.SkippedPrimaryPoint readStore ->
-                                                            readStore, { orderedSelect with Where = Some(Lit(VInt 0L)) }
-                                                        | Storage.ReadSelectedPrimaryKeys(readStore, rows, consumed) ->
-                                                            consumedOffset <- consumed
-                                                            let qualifier = source.Alias |> Option.defaultValue source.Table
-                                                            readStore, Executor.selectLockedPrimaryKeys plan.ReadRangeLimit.IsSome qualifier keys rows orderedSelect)
+                                                |> Option.map (fun prepared ->
+                                                    let current, selected, consumed = openPrimaryRead session refresh strength planningStore source prepared
+                                                    consumedOffset <- consumed
+                                                    current, selected)
                                                 |> Option.defaultValue (planningStore, select)
                                         | _ -> store, select)
                                     |> Option.defaultWith (fun () -> consistentReadStore (), select)
@@ -3924,9 +3935,19 @@ let private executeParsedStatement readOverlay accesses (session: Session) (stmt
             try
                 withSelectDeadline (fun () ->
                     match lockingReadView () with
-                    | Some(current, releaseOffset) ->
+                    | Some(current, releaseOffset, insertSourceLocks) ->
+                        let primarySourceRead store registry dbName (select: SelectStmt) =
+                            match select.From with
+                            | Some(FromTable source) ->
+                                Executor.tryPrimaryRead true WaitForLocks store registry dbName select
+                                |> Option.map (fun prepared ->
+                                    let current, selected, _ = openPrimaryRead session current ShareLock store source prepared
+                                    current, selected)
+                            | _ -> None
+                        let insertSourceRead = if insertSourceLocks then Some primarySourceRead else None
                         Executor.withLiveLockingReadStore session.Store current (lockWaitTimeout session) (fun () ->
-                            Executor.withLockingReadOffsetRelease releaseOffset evaluate)
+                            Executor.withInsertSourceLocks insertSourceRead (fun () ->
+                                Executor.withLockingReadOffsetRelease releaseOffset evaluate))
                     | None -> evaluate ())
             with
             | Limits.SelectTimeoutExpired ->
