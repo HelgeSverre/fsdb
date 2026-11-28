@@ -4684,9 +4684,10 @@ let private registerIndexGap (cache: KeyLockCache) (context: TransactionLockCont
     cache.Gaps.Add(WeakReference<RowLockStripe>(stripe))
     lock context.HeldStripes (fun () -> context.HeldStripes.Add stripe |> ignore)
 
-let private withWriteLocksForContext
+let private withWriteLocksForContextUsing
     (transactionLocks: TransactionLockContext option)
     (timeout: TimeSpan)
+    waitPolicy
     checkGaps
     (store: Store)
     (dbName: string)
@@ -4802,7 +4803,7 @@ let private withWriteLocksForContext
     let claimed = ResizeArray<RowLockStripe>()
     let acquire stripe additional =
         let _, newlyHeld =
-            acquireStripeWithBlockers deadline store.LockWaits dbName context ExclusiveStripe WaitUntilAvailable stripe additional
+            acquireStripeWithBlockers deadline store.LockWaits dbName context ExclusiveStripe waitPolicy stripe additional
         if newlyHeld then
             claimed.Add stripe
 
@@ -4835,20 +4836,17 @@ let private withWriteLocksForContext
         if releaseAfter then
             releaseLockStripes context claimed
 
+let private withWriteLocksForContext transactionLocks timeout checkGaps store dbName tableName rowIds keys body =
+    withWriteLocksForContextUsing transactionLocks timeout WaitUntilAvailable checkGaps store dbName tableName rowIds keys body
+
 let private withWriteLocksFor timeout (store: Store) dbName tableName rowIds keys body =
     withWriteLocksForContext store.TransactionLocks timeout true store dbName tableName rowIds keys body
-
-let private withRowLocks store dbName tableName rowIds body =
-    withWriteLocksFor (Fsdb.Limits.statementLockWaitTimeout ()) store dbName tableName rowIds [] body
 
 let private fullScanRowIds store dbName tableName =
     tableSnapshot store dbName tableName
     |> Result.toOption
     |> Option.map (fun table -> table.RowsArray.Indexed |> Seq.map fst |> List.ofSeq)
     |> Option.defaultValue []
-
-let private withFullScanRowLocks store dbName tableName body =
-    withRowLocks store dbName tableName (fullScanRowIds store dbName tableName) body
 
 let private acquireKeylessWriteCohort (store: Store) deadline database context owner blockers =
     let otherOwners () =
@@ -6293,6 +6291,27 @@ let internal tryPrimaryWriteLockTargets store table values =
 let internal tryUniqueWriteLockTargets store table (index: EqualityIndex) values =
     if index.Unique && index.UsesWholeStoredValues then tryExactWriteLockTargets store table index.Name values
     else None
+
+/// An exact exclusive read locks both the secondary record and its primary record.
+let internal acquireExactSecondaryUniqueReadTargets timeout (store: Store) database tableName (table: Table) name wait rowIds =
+    let keys =
+        uniqueKeyGroups table
+        |> List.tryFind (fun group -> group.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+        |> Option.map (fun group ->
+            withoutIndexExpressionDiagnostics (fun () ->
+                rowIds |> List.choose (fun rowId ->
+                    table.RowsArray.TryFind rowId
+                    |> Option.bind (encodeUniqueKey table.Columns group)
+                    |> Option.map (uniqueKeyLockName group))))
+        |> Option.defaultValue []
+    let claim policy () =
+        withWriteLocksForContextUsing store.TransactionLocks timeout policy false store database tableName rowIds keys (fun () -> rowIds)
+    match wait with
+    | WaitForLocks -> claim WaitUntilAvailable ()
+    | NoWait -> claim FailIfUnavailable ()
+    | SkipLocked ->
+        try withTransactionLockCheckpoint store (claim FailIfUnavailable)
+        with LockNowait _ -> []
 
 let private rowAtClaimedUniqueKey (table: Table) (key: string) =
     let separator = key.IndexOf '\u0000'
@@ -13629,90 +13648,6 @@ let internal replaceRowsWithOrdinal
     : Result<InsertOutcome, StorageError> =
     replaceRowsCore store dbName tableName columns rowsIn deferred prepare finish
 
-/// Deletes every candidate matching `predicate`. Predicate errors abort the
-/// operation; enabled foreign-key checks apply each referencing ON DELETE
-/// action. `None` scans the table, while supplied identities are resolved
-/// from the current table root and rechecked before removal.
-let private deleteRowsCore
-    (store: Store)
-    (dbName: string)
-    (tableName: string)
-    (candidates: (RowId * Value[]) list option)
-    (predicate: RowId -> Value[] -> Result<bool, StorageError>)
-    : Result<int, StorageError> =
-    let eventsOf
-         (_,
-         (catalog: Catalog),
-         (removed: Map<TableAddress, RowRemoval list>),
-         (blanked: Map<TableAddress, RowUpdate list>))
-        =
-        [ for KeyValue(address, rows) in removed do
-              if not rows.IsEmpty then
-                  let database, table = catalogTableIdentity catalog address
-                  RowsDeletedById(database, table, rows)
-
-          for KeyValue(address, changes) in blanked do
-              if not changes.IsEmpty then
-                  let database, table = catalogTableIdentity catalog address
-                  RowsUpdatedById(database, table, changes) ]
-
-    let apply () =
-        withReferentialCatalogPublishing store dbName SharedAccess eventsOf (fun catalog db ->
-            let key = normalizeTableName tableName
-            let address = tableAddress dbName key
-
-            virtualWriteGuard store dbName tableName
-            |> Result.bind (fun () -> tryGetTable dbName db tableName)
-            |> Result.bind (fun table ->
-                let rows =
-                    candidates
-                    |> Option.map (fun candidates ->
-                        candidates
-                        |> List.map fst
-                        |> List.distinct
-                        |> List.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row)))
-                    |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> List.ofSeq)
-
-                rows
-                |> traverse (fun (rowId, row) -> predicate rowId row |> Result.map (fun keep -> keep, row))
-                |> Result.bind (fun flagged ->
-                    let toDelete = flagged |> List.filter fst |> List.map snd
-
-                    cascadeDelete store.ForeignKeyChecks catalog address toDelete
-                    |> Result.map (fun (catalog', removed, blanked) -> catalog', (toDelete.Length, catalog, removed, blanked)))))
-
-    let result =
-        match candidates with
-        | None -> withFullScanRowLocks store dbName tableName apply
-        | Some candidates ->
-            candidates
-            |> List.map fst
-            |> fun rowIds -> withRowLocks store dbName tableName rowIds apply
-
-    match result with
-    | Ok(affected, _, _, _) -> Ok affected
-    | Error e -> Error e
-
-let deleteRows
-    (store: Store)
-    (dbName: string)
-    (tableName: string)
-    (predicate: Value[] -> Result<bool, StorageError>)
-    : Result<int, StorageError> =
-    deleteRowsCore store dbName tableName None (fun _ row -> predicate row)
-
-let deleteRowsCandidates
-    (store: Store)
-    (dbName: string)
-    (tableName: string)
-    (candidates: (RowId * Value[]) list)
-    (predicate: Value[] -> Result<bool, StorageError>)
-    : Result<int, StorageError> =
-    deleteRowsCore store dbName tableName (Some candidates) (fun _ row -> predicate row)
-
-let internal deleteRowsCandidatesById store dbName tableName candidates predicate =
-    deleteRowsCore store dbName tableName (Some candidates) predicate
-
 let private validateCatalogForeignKeys (baseCatalog: Catalog) (catalog: Catalog) : unit =
     let conflict database = raise (LockWaitTimeout database)
 
@@ -14340,7 +14275,7 @@ type private UpdateKeyClaims =
       Original: Table
       Changes: RowUpdate list
       Moves: UniqueKeyMove list
-      OrderedKeys: string list }
+      AdditionalKeys: string list }
 
 type private StagedUpdate =
     { Changes: RowUpdate list
@@ -14363,6 +14298,34 @@ let private directAndCascadedUpdates dbName tableName direct cascaded =
     if List.isEmpty direct then cascaded
     else Map.change (tableAddress dbName tableName) (fun affected -> Some(direct @ Option.defaultValue [] affected)) cascaded
 
+let private releasedSecondaryUniqueKeysInTable (table: Table) (rows: RowUpdate list) =
+    withoutIndexExpressionDiagnostics (fun () ->
+        let primary, secondary =
+            uniqueKeyGroups table |> List.partition (fun group -> group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase))
+        let valuesChanged (row: RowUpdate) (group: IndexKeyGroup) =
+            group.Indices |> List.exists (fun index -> row.Before.[index] <> row.After.[index])
+        [ for row in rows do
+              // Moving the primary key rewrites the secondary records even when their unique values stay the same.
+              let primaryMoved =
+                  primary |> List.exists (fun group ->
+                      valuesChanged row group
+                      && encodeUniqueKey table.Columns group row.Before <> encodeUniqueKey table.Columns group row.After)
+              for group in secondary do
+                  if primaryMoved || valuesChanged row group then
+                      match encodeUniqueKey table.Columns group row.Before with
+                      | Some key when primaryMoved || encodeUniqueKey table.Columns group row.After <> Some key ->
+                          yield uniqueKeyLockName group key
+                      | _ -> () ])
+
+let private secondaryUniqueKeysForRows (table: Table) (rows: RowRemoval list) =
+    withoutIndexExpressionDiagnostics (fun () ->
+        [ for group in uniqueKeyGroups table do
+              if not (group.Name.Equals("PRIMARY", StringComparison.OrdinalIgnoreCase)) then
+                  for row in rows do
+                      match encodeUniqueKey table.Columns group row.Row with
+                      | Some key -> yield uniqueKeyLockName group key
+                      | None -> () ])
+
 let private mutationKeyClaims dbName tableName catalog direct cascaded =
     directAndCascadedUpdates dbName tableName direct cascaded
     |> Map.toList
@@ -14379,8 +14342,8 @@ let private mutationKeyClaims dbName tableName catalog direct cascaded =
                                   | Some key when encodeUniqueKey table.Columns group change.Before <> Some key ->
                                       yield { Change = change; Group = group; Key = key }
                                   | _ -> () ])
-            let orderedKeys = orderedUpdateKeys table rows
-            if moves.IsEmpty && orderedKeys.IsEmpty then None
+            let otherKeys = releasedSecondaryUniqueKeysInTable table rows @ orderedUpdateKeys table rows
+            if moves.IsEmpty && otherKeys.IsEmpty then None
             else
                 Some
                     { Address = address
@@ -14388,7 +14351,7 @@ let private mutationKeyClaims dbName tableName catalog direct cascaded =
                       Original = table
                       Changes = rows
                       Moves = moves
-                      OrderedKeys = orderedKeys }))
+                      AdditionalKeys = otherKeys }))
 
 let private updateKeyClaims dbName tableName (batch: StagedUpdate) =
     mutationKeyClaims dbName tableName batch.OriginalCatalog batch.Changes batch.Cascaded
@@ -14446,7 +14409,7 @@ let private withUpdateKeyClaims owner store groups publish =
         | group :: remaining ->
             let database, table = group.Target
             let uniqueKeys = group.Moves |> List.map (fun move -> uniqueKeyLockName move.Group move.Key)
-            withOwnedWriteLocks owner store database table [] (uniqueKeys @ group.OrderedKeys) (fun () -> claim remaining)
+            withOwnedWriteLocks owner store database table [] (uniqueKeys @ group.AdditionalKeys) (fun () -> claim remaining)
     claim groups
 
 let internal tryIgnoreUpdateConstraintError = function
@@ -14617,6 +14580,106 @@ let private withStagedCatalogPublishing
                             publishAfterKeyWait baseCatalog batchCatalog result keys)))
 
     prepared |> Result.bind (fun publish -> publish ())
+
+/// Deletes every candidate matching `predicate`. Predicate errors abort the
+/// operation; enabled foreign-key checks apply each referencing ON DELETE
+/// action. `None` scans the table, while supplied identities are resolved
+/// from the current table root and rechecked before removal.
+let private deleteRowsCore
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (candidates: (RowId * Value[]) list option)
+    (predicate: RowId -> Value[] -> Result<bool, StorageError>)
+    : Result<int, StorageError> =
+    let eventsOf
+         (_,
+         (catalog: Catalog),
+         (removed: Map<TableAddress, RowRemoval list>),
+         (blanked: Map<TableAddress, RowUpdate list>))
+        =
+        [ for KeyValue(address, rows) in removed do
+              if not rows.IsEmpty then
+                  let database, table = catalogTableIdentity catalog address
+                  RowsDeletedById(database, table, rows)
+
+          for KeyValue(address, changes) in blanked do
+              if not changes.IsEmpty then
+                  let database, table = catalogTableIdentity catalog address
+                  RowsUpdatedById(database, table, changes) ]
+
+    let operation catalog db =
+        captureIndexExpressionError (fun () -> withIndexExpressionDiagnostics store (fun () ->
+            let key = normalizeTableName tableName
+            let address = tableAddress dbName key
+
+            virtualWriteGuard store dbName tableName
+            |> Result.bind (fun () -> tryGetTable dbName db tableName)
+            |> Result.bind (fun table ->
+                let rows =
+                    candidates
+                    |> Option.map (fun candidates ->
+                        candidates
+                        |> List.map fst
+                        |> List.distinct
+                        |> List.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row)))
+                    |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> List.ofSeq)
+
+                rows
+                |> traverse (fun (rowId, row) -> predicate rowId row |> Result.map (fun keep -> keep, row))
+                |> Result.bind (fun flagged ->
+                    let toDelete = flagged |> List.filter fst |> List.map snd
+
+                    cascadeDelete store.ForeignKeyChecks catalog address toDelete
+                    |> Result.map (fun (catalog', removed, blanked) -> catalog', (toDelete.Length, catalog, removed, blanked))))))
+
+    let releasedKeys (_, catalog, removed, blanked) =
+        let addresses = Seq.append (Map.keys removed) (Map.keys blanked) |> Set.ofSeq
+        addresses
+        |> Seq.choose (fun address ->
+            tryCatalogTable address catalog
+            |> Option.bind (fun table ->
+                let deleted = Map.tryFind address removed |> Option.defaultValue [] |> secondaryUniqueKeysForRows table
+                let changed = Map.tryFind address blanked |> Option.defaultValue [] |> releasedSecondaryUniqueKeysInTable table
+                match deleted @ changed with
+                | [] -> None
+                | keys -> Some(catalogTableIdentity catalog address, keys)))
+        |> List.ofSeq
+
+    let result =
+        withWriteLockOwner store (fun owner ->
+            let rec claim keys prepared publish =
+                match keys with
+                | [] -> publish prepared
+                | ((database, table), keys) :: rest ->
+                    withOwnedWriteLocks owner store database table [] keys (fun () -> claim rest prepared publish)
+            let ids = candidates |> Option.map (List.map fst) |> Option.defaultWith (fun () -> fullScanRowIds store dbName tableName)
+            withOwnedWriteLocks owner store dbName tableName ids [] (fun () ->
+                withStagedCatalogPublishing store dbName eventsOf operation releasedKeys claim))
+
+    match result with
+    | Ok(affected, _, _, _) -> Ok affected
+    | Error e -> Error e
+
+let deleteRows
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (predicate: Value[] -> Result<bool, StorageError>)
+    : Result<int, StorageError> =
+    deleteRowsCore store dbName tableName None (fun _ row -> predicate row)
+
+let deleteRowsCandidates
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (candidates: (RowId * Value[]) list)
+    (predicate: Value[] -> Result<bool, StorageError>)
+    : Result<int, StorageError> =
+    deleteRowsCore store dbName tableName (Some candidates) (fun _ row -> predicate row)
+
+let internal deleteRowsCandidatesById store dbName tableName candidates predicate =
+    deleteRowsCore store dbName tableName (Some candidates) predicate
 
 let private withQualifiedUpdatePublishing owner store dbName policy tableName eventsOf operation =
     withStagedCatalogPublishing store dbName eventsOf operation (updateKeyClaims dbName tableName)

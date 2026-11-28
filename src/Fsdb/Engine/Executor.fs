@@ -16663,13 +16663,10 @@ and private prepareLockingRead
             | Some(name, _) -> Error(Err(3569, sprintf "Table `%s` appears in multiple locking clauses." name))
             | None when suppressReadRowLocks.Value -> Ok(Map.empty, None)
             | None ->
-                let rowIdsFor (source: LockingReadSource) =
+                let accessFor (source: LockingReadSource) =
                     if sources.Length = 1 && select.Joins.IsEmpty then
-                        tryPhysicalCandidates store registry dbName source.Reference select.Where
-                        |> Option.map (snd >> List.map fst)
-                        |> Option.defaultWith (fun () -> source.Table.RowsArray.Indexed |> Seq.map fst |> List.ofSeq)
-                    else
-                        source.Table.RowsArray.Indexed |> Seq.map fst |> List.ofSeq
+                        tryPhysicalAccessWith CandidateNarrowing store registry dbName source.Reference select.Where
+                    else None
 
                 let ordered =
                     match sources, targets with
@@ -16687,17 +16684,23 @@ and private prepareLockingRead
                         |> traverse (fun (name, locking) ->
                             let source = byQualifier.[name.ToLowerInvariant()]
                             let database = source.Reference.Database |> Option.defaultValue dbName
-                            let rowIds = rowIdsFor source
+                            let access = accessFor source
+                            let rowIds =
+                                access
+                                |> Option.map (physicalAccessRows >> snd >> List.map fst)
+                                |> Option.defaultWith (fun () -> source.Table.RowsArray.Indexed |> Seq.map fst |> List.ofSeq)
+                            let timeout = lockingReadTimeout.Value |> Option.defaultValue (Limits.lockWaitTimeout ())
 
                             let acquired =
-                                Storage.acquireTransactionReadTargets
-                                    (lockingReadTimeout.Value |> Option.defaultValue (Limits.lockWaitTimeout ()))
-                                    store
-                                    database
-                                    source.Reference.Table
-                                    locking.Strength
-                                    locking.Wait
-                                    rowIds
+                                match access, rowIds with
+                                | Some(EqualityAccess plan), [ _ ]
+                                    when store.TransactionLocks.IsSome && locking.Strength = UpdateLock
+                                         && plan.Unique && plan.UsesFullKey && not (equalsIgnoreCase plan.KeyName "PRIMARY") ->
+                                    Storage.acquireExactSecondaryUniqueReadTargets
+                                        timeout store database source.Reference.Table source.Table plan.KeyName locking.Wait rowIds
+                                | _ ->
+                                    Storage.acquireTransactionReadTargets
+                                        timeout store database source.Reference.Table locking.Strength locking.Wait rowIds
 
                             Ok(source.Qualifier.ToLowerInvariant(), Set.ofList acquired))
                         |> Result.map (fun rows -> Map.ofList rows, None)))

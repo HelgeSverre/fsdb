@@ -9088,6 +9088,40 @@ let tests =
                   Expect.isTrue wasWaiting "the reader enters the wait graph before the holder ends"
                   Expect.equal result (ResultSet([ "id" ], [ [ Some expected ] ])) "the seek reopens on the current index"
 
+          testCase "a cascaded delete holds the child's old unique key through commit or rollback"
+          <| fun _ ->
+              for isolation in [ "READ COMMITTED"; "REPEATABLE READ" ] do
+                  for ending in [ "COMMIT"; "ROLLBACK" ] do
+                      let store = Fsdb.Storage.create ()
+                      let run session sql expected =
+                          let next, result = handle session sql
+                          Expect.equal result expected sql
+                          next
+                      let holder = create 1 store
+                      let holder = run holder "CREATE TABLE owners(id INT PRIMARY KEY)" (Affected 0UL)
+                      let holder = run holder "CREATE TABLE jobs(id INT PRIMARY KEY,u INT NOT NULL,owner INT,UNIQUE KEY ux(u),FOREIGN KEY(owner) REFERENCES owners(id) ON DELETE CASCADE)" (Affected 0UL)
+                      let holder = run holder "INSERT INTO owners VALUES(0),(30)" (Affected 2UL)
+                      let holder = run holder "INSERT INTO jobs VALUES(20,2,0),(30,3,30),(40,4,0)" (Affected 3UL)
+                      let holder = run holder $"SET TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                      let holder = run holder "BEGIN" (Affected 0UL)
+                      let holder = run holder "DELETE FROM owners WHERE id=30" (Affected 1UL)
+                      let writer = run (create 2 store) $"SET TRANSACTION ISOLATION LEVEL {isolation}" (Affected 0UL)
+                      let writer = run writer "SET innodb_lock_wait_timeout=5" (Affected 0UL)
+                      let waiting = Threading.Tasks.Task.Run(fun () -> handle writer "INSERT INTO jobs VALUES(60,3,0)")
+                      let blocked () = lock store.LockWaits.SyncRoot (fun () -> store.LockWaits.Edges.Count > 0)
+                      let entered = Threading.SpinWait.SpinUntil((fun () -> blocked () || waiting.IsCompleted), TimeSpan.FromSeconds 3.0)
+                      let wasWaiting = blocked ()
+                      run holder ending (Affected 0UL) |> ignore
+                      Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 5.0)) "the insert finishes after the delete resolves"
+                      let scenario = $"{isolation}, {ending}"
+                      Expect.isTrue (entered && wasWaiting) scenario
+                      let expected =
+                          if ending = "COMMIT" then Affected 1UL
+                          else Err(1062, "Duplicate entry '3' for key 'jobs.ux'")
+                      Expect.equal (snd waiting.Result) expected scenario
+                      let keyOwner = if ending = "COMMIT" then "60" else "30"
+                      run (create 3 store) "SELECT id FROM jobs WHERE u=3" (ResultSet([ "id" ], [ [ Some keyOwner ] ])) |> ignore
+
           testCase "ordered secondary offset releases a record rewritten by a rolled-back update"
           <| fun _ ->
               for isolation, changes, retainsOffset in

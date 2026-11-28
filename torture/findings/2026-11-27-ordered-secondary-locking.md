@@ -326,13 +326,22 @@ wait without persisting either of the temporary tables.
 
 ### Occupied keys being released
 
-When the holder moves away from an already committed value, MySQL
-waits before deciding whether that value is available. Fsdb checks
-the initial unique index and returns 1062 immediately in both the
-commit and rollback cases.
+Deletes, cascaded deletes, changes to the primary or unique secondary
+key, and exact secondary `FOR UPDATE` reads now retain the occupied
+secondary key through transaction end. An insert that collides with a
+child row being deleted by a foreign-key cascade waits in READ COMMITTED
+and REPEATABLE READ. It succeeds after the delete commits and returns
+1062 after rollback. The same schedules matched the pinned MySQL server
+with the child in a separate database and with an XA-prepared delete.
+The Fsdb WAL also preserved the prepared key claim across restart.
 
-MySQL also waits when the holder deletes the row, restores the
-unique value after changing it, or uses the unique index for a
-locking read of that value. A payload-only update or a locking read
-through the primary key leaves the unique check free to return
-1062 immediately.
+In the original 96-schedule matrix, UPDATE, ON DUPLICATE KEY UPDATE,
+and INSERT IGNORE with ON DUPLICATE KEY UPDATE can still reject a
+duplicate during staging while its owner holds the key. An assignment
+probe requires the waiting statement to evaluate its assignments once
+while a disjoint writer proceeds. The plain INSERT path still takes a
+row lock on a duplicate secondary value. It can wait unnecessarily
+behind a payload-only update or an exact primary-key locking read.
+Probe results show that replacing this fallback also requires modeling
+the secondary records visited by range, IN-list, and covering index
+scans, and protecting the primary gaps visited by clustered scans.

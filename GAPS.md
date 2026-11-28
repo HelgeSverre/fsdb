@@ -1026,7 +1026,11 @@ The audited path covers VALUES and SELECT from permanent or temporary
 sources, including writes through checked views. A wait refreshes the
 permanent rows while leaving session-local sources visible to the upsert.
 An upsert can still reject a key before its current owner finishes
-moving away.
+moving away. [Occupied secondary unique keys](torture/findings/2026-11-27-ordered-secondary-locking.md#occupied-keys-being-released)
+now stay locked through a cascaded delete, so a plain INSERT waits for
+the holder before deciding whether the key is available. UPDATE and
+upsert still need to defer some initial duplicate decisions, and the
+plain INSERT duplicate check can wait on primary-only row locks.
 [Joins through temporary sources](torture/findings/2026-11-27-joined-update-key-waits.md#session-local-join-sources)
 also refresh permanent keys after a wait, including when a temporary
 table shadows a permanent source. [Batched warning retention](torture/findings/2026-11-27-ignored-update-key-waits.md#warning-order-and-retention)
